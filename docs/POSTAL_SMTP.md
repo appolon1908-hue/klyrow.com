@@ -16,4 +16,6 @@ After DNS/PTR pass:
 
 The unauthenticated relay probe reached `RCPT TO` without DATA and was rejected with `530 Authentication required`. Repeat externally after port 25 is deliberately opened.
 
-The latest verification run could not repeat server-local TCP/25 or SMTP checks because `37.27.128.39` rejected every available SSH identity. Treat the earlier connection timeout as superseded only after a new connection-level test from that exact server succeeds; the provider's policy notification alone is not PASS evidence.
+The dedicated deployment identity was restored. Connection-only tests from `37.27.128.39` received `220` banners from Gmail and Outlook MX hosts, so outbound TCP/25 is PASS. No `EHLO`, envelope command, or message data was sent to either host. `scripts/mail-readiness` now repeats these bounded connection/banner checks.
+
+The deployment identity remains intentionally least-privilege. It can inspect/restart the Klyrow stack and read firewall status, but it cannot alter DNS/PTR, Certbot/Nginx, firewall policy, Docker configuration, runtime secrets, or backups. Those changes still require the owning operator after DNS propagation.

@@ -24,7 +24,9 @@ Do not publish an AAAA for `mail.klyrow.com` until IPv6 outbound routing and PTR
 
 ## NEEDS-HOSTING-PROVIDER
 
-Set PTR for `37.27.128.39` to `mail.klyrow.com.`. Confirm `37.27.128.39 → mail.klyrow.com → 37.27.128.39`. Confirm outbound TCP/25 is permitted; live probes to two external MX hosts timed out.
+Set PTR for `37.27.128.39` to `mail.klyrow.com.`. Confirm `37.27.128.39 → mail.klyrow.com → 37.27.128.39`.
+
+Outbound TCP/25 is **PASS**. On 2026-08-15, connection-only probes executed directly from `37.27.128.39` resolved and connected to both `gmail-smtp-in.l.google.com:25` and `outlook-com.olc.protection.outlook.com:25`; each returned a `220` SMTP banner. No SMTP transaction or mail submission occurred.
 
 ## APPLIED
 

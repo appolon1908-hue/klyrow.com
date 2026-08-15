@@ -23,17 +23,17 @@ Existing hardening is preserved: private SMTP binding, private-vSwitch gateway l
 
 - Publish and verify the exact A, MX, SPF, live Postal DKIM, Postal verification, return-path CNAME, and staged DMARC records in `docs/MAIL_DNS.md`.
 - Provider must replace PTR `Ubuntu-jammy-latest-amd64-base.zst` with `mail.klyrow.com`.
-- Confirm the hosting provider permits outbound TCP/25; direct probes currently time out.
+- Outbound TCP/25 is verified; preserve provider and firewall controls.
 - After DNS propagation, issue/mount the trusted mail SMTP certificate, enable STARTTLS, and verify renewal/reload.
 - Enable approved n8n/Odoo middleware targets and credentials; middleware itself is healthy at `10.40.0.1:8095`.
-- Complete dedicated `klyrow-deploy` SSH account/authorized-key setup on the correct host.
+- Grant an approved operator path for the DNS/PTR, Certbot, backup, and Postal TLS changes; the least-privilege deployment identity must not be broadened casually.
 - Owner must authorize a controlled external recipient and validate delivered/bounce/complaint flows.
 
 Unrestricted delivery remains disabled. Do not set both `KLYROW_SAFE_MODE=false` and `KLYROW_PRODUCTION_GATE_APPROVED=true` until every blocker and the consent/suppression acceptance test passes.
 
 ### Latest access and public-DNS recheck
 
-On the latest 2026-08-15 run, the dedicated `klyrow-deploy` key and all locally available administrative SSH identities were rejected by `37.27.128.39`. The reported Hetzner TCP/25 policy change therefore could not be verified from the source server, and no server configuration, backup, certificate, listener, or SMTP credential was changed.
+On the latest 2026-08-15 run, the dedicated `klyrow-deploy` identity connected successfully to `37.27.128.39`. Connection-only probes to the primary Gmail and Outlook MX hosts both returned `220` banners, so `OUTBOUND_TCP25=PASS`; no mail command or message was sent. The identity is intentionally least-privilege and cannot perform DNS/PTR, Certbot/Nginx, backup, firewall, Docker-configuration, or secret changes. No server configuration, certificate, listener, or SMTP credential was changed.
 
 Cloudflare public DNS and both authoritative GoDaddy nameservers still return no mail A, apex/bounce MX, SPF/helper SPF, live DKIM, Postal verification, or PSRP CNAME. PTR now answers `static.39.128.27.37.clients.your-server.de.`, not `mail.klyrow.com`; FCrDNS fails. No DNS-provider credential or approved canary recipient is available locally. No delivery or bounce message was sent. Status remains **BLOCKED-EXTERNAL**.
 
