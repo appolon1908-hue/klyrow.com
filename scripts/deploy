@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/lib.sh"; require_env
+docker compose config --quiet
+scripts/render-postal-config
+docker compose pull
+docker compose up -d --build
+scripts/health

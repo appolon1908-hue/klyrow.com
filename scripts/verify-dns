@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -u
+for h in klyrow.com www.klyrow.com app.klyrow.com api.klyrow.com track.klyrow.com bounce.klyrow.com mail.klyrow.com; do printf '%-25s A=%s\n' "$h" "$(dig +short A "$h" | paste -sd, -)"; done
+for q in 'klyrow.com MX' 'klyrow.com TXT' '_dmarc.klyrow.com TXT' 'postal._domainkey.klyrow.com TXT' '39.128.27.37.in-addr.arpa PTR'; do set -- $q; printf '%-35s %s\n' "$1 $2" "$(dig +short "$2" "$1" | paste -sd, -)"; done

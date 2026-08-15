@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+domain="${1:-klyrow.com}"; selector="${2:-postal}"
+umask 077; dir="secrets/dkim/$domain"; mkdir -p "$dir"
+[[ ! -e "$dir/$selector.key" ]] || { echo "Key exists; refusing overwrite" >&2; exit 1; }
+openssl genrsa -out "$dir/$selector.key" 2048 >/dev/null 2>&1
+openssl rsa -in "$dir/$selector.key" -pubout -out "$dir/$selector.pub" >/dev/null 2>&1
+value="$(sed '1d;$d' "$dir/$selector.pub" | tr -d '\n')"
+printf '%s._domainkey.%s IN TXT "v=DKIM1; k=rsa; p=%s"\n' "$selector" "$domain" "$value" | tee "$dir/$selector.dns.txt"

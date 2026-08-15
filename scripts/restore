@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/lib.sh"; require_env
+src="${1:?usage: scripts/restore BACKUP_DIR}"; [[ -f "$src/SHA256SUMS" ]] || { echo "Invalid backup" >&2; exit 1; }
+(cd "$src" && sha256sum -c SHA256SUMS)
+[[ "${CONFIRM_RESTORE:-}" == "RESTORE_KLYROW" ]] || { echo "Set CONFIRM_RESTORE=RESTORE_KLYROW; restore overwrites Klyrow databases" >&2; exit 2; }
+docker compose exec -T postgres pg_restore -U klyrow --clean --if-exists -d klyrow < "$src/klyrow.dump"
+gzip -dc "$src/mautic.sql.gz" | docker compose exec -T mautic-db mariadb -uroot -p"$(sed -n 's/^MAUTIC_DB_ROOT_PASSWORD=//p' .env)" mautic
+gzip -dc "$src/postal.sql.gz" | docker compose exec -T postal-db mariadb -uroot -p"$(sed -n 's/^POSTAL_DB_PASSWORD=//p' .env)"
