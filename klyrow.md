@@ -337,11 +337,30 @@ Document required Google OAuth credentials/scopes but do not invent credentials.
 
 Configure host-based routing for the Klyrow domains.
 
-Obtain Let's Encrypt certificates once DNS resolves.
+Use **free publicly trusted TLS certificates from Let's Encrypt** for every public web/API hostname that resolves to this server, including all applicable Klyrow services such as `klyrow.com`, `www.klyrow.com`, `app.klyrow.com`, `api.klyrow.com`, `track.klyrow.com`, `bounce.klyrow.com`, and any additional production hostname that is actually enabled.
 
-Force HTTPS for web/API traffic.
+Install and configure Certbot, Traefik ACME, Caddy ACME, or another maintainable ACME client appropriate to the selected reverse proxy. Do not use self-signed certificates for normal public production endpoints.
 
-Use secure TLS defaults.
+Automate certificate issuance and **automatic renewal**. Renewal must not depend on a human manually running a command.
+
+Configure:
+- ACME account/registration
+- HTTP-01 or DNS-01 challenge as appropriate
+- persistent certificate storage
+- automatic scheduled renewal or proxy-native ACME renewal
+- safe reverse-proxy reload after renewal if required
+- HTTPS redirects
+- secure TLS defaults
+- certificate expiry monitoring
+- renewal failure alerting/logging
+
+Test certificate renewal using the ACME client's supported dry-run/staging mechanism where possible. Verify that renewal survives container and server restarts.
+
+Do not issue certificates until DNS for the hostname resolves correctly. If DNS is not ready, continue the deployment and report the exact DNS blocker instead of generating self-signed replacements.
+
+For SMTP/mail TLS, configure the mail services to use the appropriate publicly trusted certificate for `mail.klyrow.com` or the actual mail hostname, and ensure certificate refresh/reload is automated without interrupting mail queues unnecessarily.
+
+**SSH is separate from HTTPS/TLS:** continue using SSH public-key authentication for server administration. Do not attempt to use Let's Encrypt certificates as a replacement for SSH keys.
 
 Do not expose internal container ports unless required.
 
@@ -389,6 +408,7 @@ Add monitoring for:
 - CPU/RAM/disk
 - webhook failures
 - TLS expiry
+- certificate renewal failures
 
 Use Prometheus/Grafana if practical, or another maintainable open-source equivalent.
 
@@ -400,6 +420,7 @@ Create automated backup and restore procedures for:
 - application database
 - templates/configuration
 - reverse proxy config
+- ACME/Let's Encrypt certificate state where appropriate
 - generated DKIM/private signing material
 
 Do not commit signing private keys to Git.
@@ -461,6 +482,8 @@ Create safe operational scripts under `/scripts`, including where appropriate:
 - verify-dns
 - test-smtp
 - test-webhook
+- test-tls
+- test-certificate-renewal
 
 Scripts must fail safely and avoid printing secrets.
 
@@ -472,33 +495,36 @@ Test:
 1. Docker Compose validates
 2. all containers become healthy
 3. reverse proxy works
-4. TLS works when DNS is ready
-5. Mautic login works
-6. Postal admin/login works where configured
-7. Klyrow client login/logout works
-8. admin login works
-9. RBAC works
-10. tenant isolation works
-11. API key creation/revocation works
-12. domain onboarding works
-13. DNS verification logic works
-14. DKIM generation works
-15. authenticated API send request is accepted into a safe test/mock path
-16. unauthorized API request is rejected
-17. middleware webhook signature validation works
-18. bad webhook signature is rejected
-19. replayed webhook is rejected
-20. middleware private connectivity works
-21. Mautic can hand mail to Postal in a safe test environment
-22. Postal queue/worker path works
-23. bounce event processing works using test/simulated events
-24. unsubscribe enforcement works
-25. suppression enforcement works
-26. restart/reboot persistence works
-27. backup succeeds
-28. restore procedure is validated where practical
-29. internal databases/Redis are not exposed publicly
-30. public service URLs route to the correct applications
+4. publicly trusted TLS works when DNS is ready
+5. automatic certificate renewal dry-run/staging test succeeds where supported
+6. certificate state persists across restart/reboot
+7. Mautic login works
+8. Postal admin/login works where configured
+9. Klyrow client login/logout works
+10. admin login works
+11. RBAC works
+12. tenant isolation works
+13. API key creation/revocation works
+14. domain onboarding works
+15. DNS verification logic works
+16. DKIM generation works
+17. authenticated API send request is accepted into a safe test/mock path
+18. unauthorized API request is rejected
+19. middleware webhook signature validation works
+20. bad webhook signature is rejected
+21. replayed webhook is rejected
+22. middleware private connectivity works
+23. Mautic can hand mail to Postal in a safe test environment
+24. Postal queue/worker path works
+25. bounce event processing works using test/simulated events
+26. unsubscribe enforcement works
+27. suppression enforcement works
+28. restart/reboot persistence works
+29. backup succeeds
+30. restore procedure is validated where practical
+31. internal databases/Redis are not exposed publicly
+32. public service URLs route to the correct applications
+33. SMTP/mail TLS uses the intended certificate and reloads safely after renewal
 
 Do not send production bulk mail during testing.
 
@@ -513,7 +539,9 @@ Before declaring launch-ready, report the state of:
 - DKIM
 - DMARC
 - PTR/rDNS
-- TLS
+- TLS on every enabled public hostname
+- automatic certificate renewal
+- certificate-expiry monitoring
 - SMTP identity
 - middleware connectivity
 - webhooks
@@ -557,6 +585,9 @@ The mission is complete when:
 - domain verification flow works
 - middleware integration works over the private network
 - signed webhooks work
+- free publicly trusted TLS is active on all enabled public Klyrow endpoints
+- certificate renewal is fully automatic and tested
+- SMTP/mail TLS renewal/reload is automated
 - backups/restore are documented and tested
 - monitoring exists
 - DNS requirements are fully documented/generated
