@@ -1,10 +1,10 @@
 # Klyrow production mail DNS contract
 
-Observed from public authoritative DNS and the live Postal 3.3.7 database on 2026-08-15. TTL `3600` is recommended for all records during rollout. Postal created the sending domain once and generated selector `postal-QQaKrT`; its private key remains only in Postal's database and protected backups.
+Observed from both authoritative nameservers, Cloudflare `1.1.1.1`, Google `8.8.8.8`, and the live Postal 3.3.7 database on 2026-08-15. TTL `3600` is recommended for all records during rollout. Postal created the sending domain once and generated selector `postal-QQaKrT`; its private key remains only in Postal's database and protected backups.
 
-Latest public recheck: both authoritative GoDaddy nameservers and Cloudflare DNS show all records in `NEEDS-DNS-PROVIDER` still absent except the pre-existing DMARC record. Current PTR is `static.39.128.27.37.clients.your-server.de.`, so PTR and FCrDNS fail.
+## APPLIED
 
-## NEEDS-DNS-PROVIDER
+Every record in the table below is publicly present and consistent. Postal independently reports ownership verified and SPF, DKIM, MX, and return-path status `OK`. `_dmarc.klyrow.com` returns exactly one TXT record.
 
 | Type | Host/name | Exact value | TTL | Purpose |
 |---|---|---|---:|---|
@@ -18,7 +18,7 @@ Latest public recheck: both authoritative GoDaddy nameservers and Cloudflare DNS
 | CNAME | `psrp.klyrow.com` | `bounce.klyrow.com.` | `3600` | Postal custom return-path alignment |
 | TXT | `_dmarc.klyrow.com` | `v=DMARC1; p=none; adkim=r; aspf=r` | `3600` | Staged monitoring policy without an invented reporting mailbox |
 
-Edit the existing DMARC TXT record; do not add a second DMARC record. The current record is `p=quarantine` with a third-party reporting address whose ownership was not established. After SPF/DKIM alignment is proven and reports are reviewed through an approved owned mailbox, progress `none` → `quarantine` → `reject`.
+The prior DMARC TXT record was replaced rather than duplicated. After SPF/DKIM alignment is proven and reports are reviewed through an approved owned mailbox, progress `none` → `quarantine` → `reject`.
 
 Do not publish an AAAA for `mail.klyrow.com` until IPv6 outbound routing and PTR for `2a01:4f9:3071:100f::2` are deliberately approved. `track.klyrow.com` and `bounce.klyrow.com` already have A records to `37.27.128.39`; tracking is handled by the Klyrow gateway, not Postal's tracking-domain CNAME feature.
 
@@ -26,12 +26,8 @@ Do not publish an AAAA for `mail.klyrow.com` until IPv6 outbound routing and PTR
 
 Set PTR for `37.27.128.39` to `mail.klyrow.com.`. Confirm `37.27.128.39 → mail.klyrow.com → 37.27.128.39`.
 
-Outbound TCP/25 is **PASS**. On 2026-08-15, connection-only probes executed directly from `37.27.128.39` resolved and connected to both `gmail-smtp-in.l.google.com:25` and `outlook-com.olc.protection.outlook.com:25`; each returned a `220` SMTP banner. No SMTP transaction or mail submission occurred.
-
-## APPLIED
-
-The apex, `www`, `app`, `api`, `track`, and `bounce` web records resolve as documented. `track` and `bounce` have trusted HTTPS coverage. No result in this document relies on `/etc/hosts`.
+Public resolvers currently return `static.39.128.27.37.clients.your-server.de.`. Although that hostname resolves forward to `37.27.128.39`, it does not match Postal's `mail.klyrow.com` HELO identity. Forced-IPv4 outbound TCP/25 probes to external Google MX hosts pass. No SMTP message transaction occurred.
 
 ## BLOCKED-EXTERNAL
 
-Certificate issuance, SMTP STARTTLS activation, public SMTP binding, controlled delivery, and header authentication checks wait for the DNS and PTR records above to resolve publicly.
+Per the deployment gate, mail certificate issuance and SMTP STARTTLS activation wait for PTR to become `mail.klyrow.com.` and forward-confirm correctly. Controlled delivery also waits for an explicitly approved recipient. No result in this document relies on `/etc/hosts`.

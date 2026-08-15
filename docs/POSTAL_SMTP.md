@@ -6,7 +6,7 @@ The server is in Postal Development mode with a 10,000-message server limit, whi
 
 Mautic `7.1.3` uses authenticated SMTP at `postal-smtp:25` over the private Compose network. A login-only probe passed; no DATA command or external delivery was performed. Plain SMTP is acceptable only on this isolated internal network. Public submission must require STARTTLS before authentication.
 
-After DNS/PTR pass:
+Public forward DNS and Postal's DNS validation now pass. Forced-IPv4 outbound TCP/25 passes to two external MX hosts. PTR still does not match `mail.klyrow.com`, so the following steps remain blocked:
 
 1. Issue the `mail.klyrow.com` certificate with the existing Certbot nginx/webroot lifecycle.
 2. Run `scripts/install-postal-tls`; it validates the certificate name, copies only the required certificate/key with restricted permissions, enables Postal TLS, and restarts only `postal-smtp`.
@@ -18,4 +18,4 @@ The unauthenticated relay probe reached `RCPT TO` without DATA and was rejected 
 
 The dedicated deployment identity was restored. Connection-only tests from `37.27.128.39` received `220` banners from Gmail and Outlook MX hosts, so outbound TCP/25 is PASS. No `EHLO`, envelope command, or message data was sent to either host. `scripts/mail-readiness` now repeats these bounded connection/banner checks.
 
-The deployment identity remains intentionally least-privilege. It can inspect/restart the Klyrow stack and read firewall status, but it cannot alter DNS/PTR, Certbot/Nginx, firewall policy, Docker configuration, runtime secrets, or backups. Those changes still require the owning operator after DNS propagation.
+The deployment identity remains intentionally least-privilege. Preserve provider and firewall controls; do not broaden access merely to bypass the PTR gate.

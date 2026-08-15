@@ -21,12 +21,12 @@ Existing hardening is preserved: private SMTP binding, private-vSwitch gateway l
 
 ## External launch blockers
 
-- Publish and verify the exact A, MX, SPF, live Postal DKIM, Postal verification, return-path CNAME, and staged DMARC records in `docs/MAIL_DNS.md`.
-- Provider must replace PTR `Ubuntu-jammy-latest-amd64-base.zst` with `mail.klyrow.com`.
+- DNS provider work is complete: exact A, MX, SPF, live Postal DKIM, Postal verification, return-path CNAME, and single staged DMARC records all pass publicly.
+- Provider must replace PTR `static.39.128.27.37.clients.your-server.de.` with `mail.klyrow.com.`.
 - Outbound TCP/25 is verified; preserve provider and firewall controls.
-- After DNS propagation, issue/mount the trusted mail SMTP certificate, enable STARTTLS, and verify renewal/reload.
-- Enable approved n8n/Odoo middleware targets and credentials; middleware itself is healthy at `10.40.0.1:8095`.
-- Grant an approved operator path for the DNS/PTR, Certbot, backup, and Postal TLS changes; the least-privilege deployment identity must not be broadened casually.
+- After PTR correction, issue/mount the trusted mail SMTP certificate, enable STARTTLS, and verify renewal/reload.
+- Supply or authorize access to the Odoo SMTP configuration so its Postal credentials can be verified; no Odoo service or configuration is present on this host and private-host SSH authentication is unavailable.
+- Preserve the dedicated deployment identity's least-privilege access; do not broaden it casually.
 - Owner must authorize a controlled external recipient and validate delivered/bounce/complaint flows.
 
 Unrestricted delivery remains disabled. Do not set both `KLYROW_SAFE_MODE=false` and `KLYROW_PRODUCTION_GATE_APPROVED=true` until every blocker and the consent/suppression acceptance test passes.
@@ -35,15 +35,15 @@ Unrestricted delivery remains disabled. Do not set both `KLYROW_SAFE_MODE=false`
 
 On the latest 2026-08-15 run, the dedicated `klyrow-deploy` identity connected successfully to `37.27.128.39`. Connection-only probes to the primary Gmail and Outlook MX hosts both returned `220` banners, so `OUTBOUND_TCP25=PASS`; no mail command or message was sent. The identity is intentionally least-privilege and cannot perform DNS/PTR, Certbot/Nginx, backup, firewall, Docker-configuration, or secret changes. No server configuration, certificate, listener, or SMTP credential was changed.
 
-Cloudflare public DNS and both authoritative GoDaddy nameservers still return no mail A, apex/bounce MX, SPF/helper SPF, live DKIM, Postal verification, or PSRP CNAME. PTR now answers `static.39.128.27.37.clients.your-server.de.`, not `mail.klyrow.com`; FCrDNS fails. No DNS-provider credential or approved canary recipient is available locally. No delivery or bounce message was sent. Status remains **BLOCKED-EXTERNAL**.
+Cloudflare, Google, and both authoritative GoDaddy nameservers now return the complete required mail record set. PTR still answers `static.39.128.27.37.clients.your-server.de.`, not `mail.klyrow.com`; identity-matched FCrDNS fails. No approved canary recipient is available. No delivery or bounce message was sent. Status remains **BLOCKED-EXTERNAL**.
 
 ## Mail readiness audit
 
 - Postal 3.3.7 and Mautic 7.1.3 containers are healthy. The verified outbound IPv4 is `37.27.128.39`; IPv6 is not authorized for mail.
 - The live Postal domain `klyrow.com` was created once in Development mode and generated selector `postal-QQaKrT`. The private key was not printed or committed.
-- Public DNS is missing mail A, apex/bounce MX, SPF, live DKIM, Postal verification, and return-path CNAME. Existing DMARC is conflicting with the staged monitoring contract. PTR is incorrect and forward-confirmed rDNS fails.
+- Public forward DNS passes on both authoritative servers and independent resolvers. Postal reports the domain verified with SPF, DKIM, MX, and return path all `OK`. PTR is still incorrect, so identity-matched forward-confirmed rDNS fails.
 - SMTP banner/HELO is `mail.klyrow.com`; STARTTLS and a mail-host certificate are absent. SMTP remains loopback-only, and the firewall exposes no SMTP ports.
-- Mautic-style authenticated SMTP login passes. An unauthenticated relay attempt is rejected. Synthetic safe send, signed webhook, replay rejection, and invalid-HMAC rejection pass; no controlled external delivery was authorized or attempted.
+- Forced-IPv4 outbound TCP/25 passes to two external MX hosts. Mautic authenticated SMTP login passes and an unauthenticated relay attempt is rejected. Odoo → Postal is not verifiable without Odoo access/configuration. No controlled external delivery was authorized or attempted.
 - The required outcome remains `BLOCKED-EXTERNAL`.
 
 ## P1/P2 backlog
