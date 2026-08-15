@@ -1,25 +1,35 @@
-# Deployment report — 2026-08-15
+# Deployment report — SaaS P0/P1 foundation — 2026-08-15
 
-## Deployed
+## Implemented
 
-Klyrow is deployed on `37.27.128.39` (`10.40.0.2`) from branch `agent/production-email-platform`. The stack includes the tenant-scoped FastAPI gateway and portal, PostgreSQL, Mautic 7.1.3, Postal 3.3.7, isolated MariaDB instances, RabbitMQ, Prometheus, Grafana, node-exporter, cron/workers, backup tooling, and systemd boot/timer units. Secrets exist only in root-readable environment/storage files.
+P0 is implemented additively on the Mautic 7.1.3 → Postal 3.3.7 stack: unified profiles/events and identity merging; nested behavioral segmentation with suppression-aware preview; journey graph validation, version records, lifecycle and per-profile goal history; consent/preferences with marketing enforcement; onboarding wizard/UI; deliverability snapshots/alerts; real-event analytics; OpenAPI, idempotency, correlation IDs and latency metrics; safe personalization; TOTP MFA, recovery hashes and revocable sessions; audit/admin hardening; private middleware service authentication; and a two-part production gate.
 
-Nginx serves valid Let's Encrypt TLS for `klyrow.com`, `app.klyrow.com`, `api.klyrow.com`, `track.klyrow.com`, and `bounce.klyrow.com`. Existing Kyqra/Telnexa routes were preserved. Databases, RabbitMQ, Postal administration, Docker, Prometheus, and internal workers have no public host ports. The private API binds `10.40.0.2:18000`; Postal SMTP is deliberately loopback-only at `127.0.0.1:2525` until its launch gates pass.
+Safe P1 foundations cover deterministic experiment assignment/results, disabled-by-default AI abstraction, connector records, provider-neutral plans/subscriptions/usage ledger, and admin operations. No billing or external AI call is active.
 
-## Verified
+Existing hardening is preserved: private SMTP binding, private-vSwitch gateway listener, node-exporter, Postal worker/SMTP health checks, systemd stack/backup units, safer middleware networking, backup/restore refinements, and controlled smoke tools.
 
-- Gateway tests: 6/6 pass, including tenant isolation, API-key rejection, HMAC rejection, replay defense, and idempotency.
-- Controlled production smoke: login, safe send, signed middleware event, replay rejection, and bad-HMAC rejection pass. No carrier submission occurred.
-- Middleware to Klyrow: private send, idempotent repeat, and invalid-key rejection pass.
-- Klyrow to middleware: signed events reached `10.40.0.1:8095` over the vSwitch.
-- Mautic, Postal web/worker/SMTP, databases, RabbitMQ, gateway, and monitoring containers are running; health-checked services report healthy.
-- SMTP authentication was validated without sending a message. Queue/application data persist across a controlled service restart.
-- HTTPS routes return 200. The systemd stack unit and daily backup timer are enabled; a complete database/config backup with checksums was created.
+## Deployed and tested
 
-## External launch gates
+- Live stack backed up to `backups/20260815T073357Z` before schema deployment.
+- Gateway rebuilt and additive PostgreSQL tables created; node-exporter deployed.
+- 14 automated tests pass: auth, isolation, idempotency, suppressions, profile resolution, event timeline, nested segmentation, consent/preferences, stream separation, journey lifecycle/goals, analytics, onboarding gate, OpenAPI, HTML safety, rate limiting, request IDs, MFA/session revocation, experiments, disabled AI, usage ledger and suspension.
+- Controlled deployed smoke passes admin login, accepted safe send, no carrier submission, valid signed event, replay rejection and invalid-HMAC rejection.
+- Mautic web/cron/worker remain healthy. Postal SMTP DSN is present and authenticated SMTP login passes without external delivery.
+- Postal web/SMTP/worker and databases/RabbitMQ are healthy. SMTP is host-bound only to `127.0.0.1:2525`.
+- Gateway health reports `safe_mode=true` and `production_gate_approved=false`.
+- Databases/queues remain unexposed. Compose validation and pre-deploy backup pass.
 
-Production delivery remains disabled with `KLYROW_SAFE_MODE=true`. `mail.klyrow.com` A, MX, SPF, Postal DKIM, SMTP TLS, and provider PTR are not fully published/verified. The currently observed PTR is not the mail hostname. See `docs/DNS_AND_DELIVERABILITY.md` for exact records.
+## External launch blockers
 
-Odoo and n8n writes are correctly routed through middleware, but production execution is disabled there (`ODOO_AUTOMATION_WRITES_ENABLED=false`, `N8N_EVENT_DELIVERY_ENABLED=false`, and `N8N_PRODUCTION_WORKFLOWS_ENABLED=false`). Credentials/workflow targets and owner approval are required before contact-sync and workflow tests can truthfully pass.
+- Publish and verify `mail` A, MX, SPF and deployed Postal DKIM. Review the existing DMARC record against the documented strict policy.
+- Provider must replace PTR `Ubuntu-jammy-latest-amd64-base.zst` with `mail.klyrow.com`.
+- Issue/mount trusted web and SMTP certificates; verify renewal and expiry monitoring.
+- Restore authenticated middleware connectivity to `10.40.0.1:8443`; calls currently fail fast and log safely.
+- Complete dedicated `klyrow-deploy` SSH account/authorized-key setup on the correct host.
+- Owner must authorize a controlled external recipient and validate delivered/bounce/complaint flows.
 
-Private application traffic works. Private SSH to `10.40.0.2` presents a host identity that does not match the verified server and no packets arrive at that server; it was not trusted. Management used the verified public host key. The provider/vSwitch SSH route must be corrected before using `ssh klyrow-server` privately.
+Unrestricted delivery remains disabled. Do not set both `KLYROW_SAFE_MODE=false` and `KLYROW_PRODUCTION_GATE_APPROVED=true` until every blocker and the consent/suppression acceptance test passes.
+
+## P1/P2 backlog
+
+P1 foundations still need production UI/workers for statistical confidence, external AI with tenant opt-in/redaction, cohort/revenue attribution from real events, connector execution/retry, invoice/payment adapters, and expanded admin visualizations. P2 remains SSO/SAML/OIDC, distributed rate limiting, multi-node orchestration/HA databases, rolling migrations, advanced support access, and a separately permissioned Telnexa contract.

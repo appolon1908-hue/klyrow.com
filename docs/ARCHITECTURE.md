@@ -8,3 +8,4 @@ Roles are `platform_admin`, `tenant_admin`, `tenant_user`, and optionally `read_
 
 Safe mode accepts validated mail into the Klyrow database without external delivery. Production mode calls Postal only after verified domains, suppression and quota checks.
 
+The additive SaaS schema contains profiles/events, append-only consent, preferences, segments/revisions, journeys/versions/runs, deliverability snapshots, onboarding, MFA/sessions, experiments, integrations, plans/subscriptions and usage ledger. It never writes directly to Odoo. Gateway replicas can share PostgreSQL; in-process rate limiting must move to a shared store before multi-node activation.

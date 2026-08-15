@@ -2,6 +2,8 @@
 
 Klyrow is a tenant-isolated email operations platform built around Mautic 7.1.3, Postal 3.3.7, and a public FastAPI gateway. It provides authenticated delivery submission, domain onboarding, RBAC, quotas, suppressions, webhook verification, an operator/client portal, metrics, backups, and a safe test mode.
 
+The SaaS layer adds profiles/events, consent/preferences, nested behavioral segmentation, journey graphs and runs, deliverability snapshots, internal-event analytics, onboarding, TOTP MFA/session revocation, OpenAPI/idempotency/correlation, and safe foundations for experiments, AI providers, integrations and billing. See [SaaS P0](docs/SAAS_P0.md) and [API/webhooks](docs/API.md).
+
 ## Quick start
 
 ```bash
@@ -11,6 +13,8 @@ scripts/health
 ```
 
 The generator creates `.env` with mode 0600 and prints the one-time admin password. Store it in an approved password manager. Production submission remains disabled while `KLYROW_SAFE_MODE=true`. Do not change that setting until Postal is bootstrapped, DNS/PTR is complete, abuse handling is staffed, and the Postal server API key is stored in `.env`.
+
+Delivery remains forced safe unless the independent `KLYROW_PRODUCTION_GATE_APPROVED=true` control is also set after every launch gate is verified.
 
 Public traffic is terminated by the existing host Nginx. The gateway, Mautic and Grafana bind only to `127.0.0.1`; databases and RabbitMQ have no host ports. Copy `docker/proxy/klyrow.conf` only after backing up and reviewing the shared Nginx configuration.
 
