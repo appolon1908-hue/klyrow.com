@@ -3,6 +3,8 @@ services:
   gateway:
     build: ./apps/gateway
     env_file: .env
+    volumes:
+      - ./secrets/postal/webhook-signing-public.pem:/run/klyrow/postal-webhook-signing-public.pem:ro
     depends_on:
       postgres: {condition: service_healthy}
     ports:
@@ -144,7 +146,8 @@ services:
     volumes: [./secrets/postal:/config:ro]
     depends_on:
       postal-web: {condition: service_healthy}
-    networks: [backend]
+    # Postal worker needs egress for recipient MX resolution and delivery.
+    networks: [frontend, backend]
     restart: unless-stopped
     healthcheck:
       test: [CMD-SHELL, "ruby -e 'Process.kill(0, 1)'" ]
@@ -157,8 +160,8 @@ services:
     volumes: [./secrets/postal:/config:ro]
     depends_on:
       postal-web: {condition: service_healthy}
-    # Keep SMTP private until mail DNS, PTR, and SMTP TLS launch gates pass.
-    ports: ["127.0.0.1:2525:25"]
+    # Standard MX/submission SMTP with STARTTLS; retain loopback diagnostics.
+    ports: ["37.27.128.39:25:25", "127.0.0.1:2525:25"]
     networks: [frontend, backend]
     restart: unless-stopped
     healthcheck:

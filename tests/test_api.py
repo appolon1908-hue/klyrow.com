@@ -1,4 +1,7 @@
-import hashlib,hmac,json,os,time,uuid
+import base64,hashlib,hmac,json,os,time,uuid
+from unittest.mock import AsyncMock,patch
+from cryptography.hazmat.primitives import hashes,serialization
+from cryptography.hazmat.primitives.asymmetric import padding,rsa
 os.environ.update(KLYROW_DATABASE_URL="sqlite:///./test.db",KLYROW_SESSION_SECRET="test-secret",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple")
 from fastapi.testclient import TestClient
 from apps.gateway.app.main import Base,DB,Domain,Suppression,Tenant,User,app,engine,ph
@@ -27,3 +30,13 @@ def test_contacts_campaigns_and_isolation():
 def test_webhook_signature_and_replay():
     body=json.dumps({"event":"email.delivered","message_id":"m","tenant_id":"a"},separators=(",",":")); ts=str(int(time.time())); eid=str(uuid.uuid4()); sig=hmac.new(b"hook-secret",f"{ts}.{eid}.{body}".encode(),hashlib.sha256).hexdigest(); h={"X-Klyrow-Timestamp":ts,"X-Klyrow-Event-Id":eid,"X-Klyrow-Signature":sig,"Content-Type":"application/json"}
     assert client.post("/v1/webhooks/postal",headers=h,content=body).status_code==202; assert client.post("/v1/webhooks/postal",headers=h,content=body).status_code==409; h["X-Klyrow-Signature"]="bad"; assert client.post("/v1/webhooks/postal",headers=h,content=body).status_code==401
+
+def test_postal_native_signature_normalization_and_idempotency(tmp_path):
+    private=rsa.generate_private_key(public_exponent=65537,key_size=2048); public=tmp_path/"postal-public.pem"; public.write_bytes(private.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo)); os.environ.update(KLYROW_POSTAL_WEBHOOK_PUBLIC_KEY=str(public),KLYROW_POSTAL_TENANT_ID="a")
+    payload={"event":"MessageDeliveryFailed","timestamp":time.time(),"uuid":str(uuid.uuid4()),"payload":{"message":{"id":1,"message_id":"provider-message","tag":"correlation-1","from":"sender@a.example.com","to":"person@example.net"},"status":"HardFail"}}
+    body=json.dumps(payload,separators=(",",":")).encode(); sig=base64.b64encode(private.sign(body,padding.PKCS1v15(),hashes.SHA256())).decode(); headers={"X-Postal-Signature-256":sig,"Content-Type":"application/json"}
+    with patch("apps.gateway.app.main.emit_middleware",new=AsyncMock(return_value=True)) as emit:
+        first=client.post("/v1/webhooks/postal-native",headers=headers,content=body); duplicate=client.post("/v1/webhooks/postal-native",headers=headers,content=body)
+    assert first.status_code==202 and duplicate.status_code==202 and duplicate.json()["duplicate"] is True
+    sent=emit.await_args.args; assert sent[0]=="klyrow.email.bounced" and sent[1]["correlation_id"]=="correlation-1"
+    assert client.post("/v1/webhooks/postal-native",headers={"X-Postal-Signature-256":"bad"},content=body).status_code==401

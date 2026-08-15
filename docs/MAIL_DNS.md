@@ -22,12 +22,37 @@ The prior DMARC TXT record was replaced rather than duplicated. After SPF/DKIM a
 
 Do not publish an AAAA for `mail.klyrow.com` until IPv6 outbound routing and PTR for `2a01:4f9:3071:100f::2` are deliberately approved. `track.klyrow.com` and `bounce.klyrow.com` already have A records to `37.27.128.39`; tracking is handled by the Klyrow gateway, not Postal's tracking-domain CNAME feature.
 
-## NEEDS-HOSTING-PROVIDER
+## CURRENT REVERSE-DNS STATUS
 
-Set PTR for `37.27.128.39` to `mail.klyrow.com.`. Confirm `37.27.128.39 → mail.klyrow.com → 37.27.128.39`.
+Verified 2026-08-15 20:22 CEST. All three authoritative Hetzner
+reverse nameservers, Cloudflare, and Google return `mail.klyrow.com.` for
+`37.27.128.39`; both authoritative forward nameservers return
+`mail.klyrow.com A 37.27.128.39`. PTR and identity-matched FCrDNS now pass. The
+host-local certificate and STARTTLS work described in `POSTAL_SMTP.md` is
+complete. No result relies on `/etc/hosts`. Bulk delivery remains disabled
+pending an approved canary.
 
-Public resolvers currently return `static.39.128.27.37.clients.your-server.de.`. Although that hostname resolves forward to `37.27.128.39`, it does not match Postal's `mail.klyrow.com` HELO identity. Forced-IPv4 outbound TCP/25 probes to external Google MX hosts pass. No SMTP message transaction occurred.
+During propagation, some Cloudflare and Google recursive edges intermittently
+returned the previous Hetzner hostname from cache. All authoritative reverse
+nameservers consistently return `mail.klyrow.com.`; recursive caches will
+converge when the prior 86400-second TTL expires.
 
-## BLOCKED-EXTERNAL
+## First-canary authentication correction
 
-Per the deployment gate, mail certificate issuance and SMTP STARTTLS activation wait for PTR to become `mail.klyrow.com.` and forward-confirm correctly. Controlled delivery also waits for an explicitly approved recipient. No result in this document relies on `/etc/hosts`.
+Message 1 proves receivers did not evaluate the apex SPF record. Because
+Postal's cached custom-return-path status was `Missing`, its delivery envelope
+fell back to `bounce.klyrow.com`. That domain has no TXT/SPF record, so Gmail
+returned SPF fail. Add exactly one authoritative record:
+
+| Type | Name | Value |
+|---|---|---|
+| TXT | `bounce.klyrow.com` | `v=spf1 include:spf.klyrow.com -all` |
+
+The include terminates at `v=spf1 ip4:37.27.128.39 -all`; it has no recursion,
+syntax, multiplicity, or lookup-limit issue. This record is still absent from
+authoritative and public resolvers, so readiness is `DNS-PROPAGATION` /
+`BLOCKED-DNS` until the owner publishes it.
+
+Postal's domain DNS cache was refreshed after worker egress repair and now
+reports SPF/DKIM/MX/return-path `OK`. The intended next envelope domain is
+`psrp.klyrow.com`, aligned with From `klyrow.com` under relaxed DMARC.

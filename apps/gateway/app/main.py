@@ -1,4 +1,4 @@
-import hashlib, hmac, json, os, secrets, time, uuid
+import base64, hashlib, hmac, json, os, secrets, time, uuid
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -6,6 +6,9 @@ from typing import Optional
 
 import httpx, jwt
 from argon2 import PasswordHasher
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from prometheus_client import Counter, Histogram, generate_latest
@@ -42,6 +45,8 @@ class Suppression(Base):
     __tablename__="suppressions"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); email:Mapped[str]=mapped_column(String,index=True); reason:Mapped[str]=mapped_column(String)
 class Replay(Base):
     __tablename__="webhook_replays"; id:Mapped[str]=mapped_column(String,primary_key=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+class PostalEvent(Base):
+    __tablename__="postal_events"; id:Mapped[str]=mapped_column(String,primary_key=True); event_type:Mapped[str]=mapped_column(String,index=True); correlation_id:Mapped[str]=mapped_column(String,index=True); message_id:Mapped[str]=mapped_column(String,index=True); tenant_id:Mapped[str]=mapped_column(String,index=True); payload:Mapped[str]=mapped_column(Text); state:Mapped[str]=mapped_column(String,default="pending",index=True); attempts:Mapped[int]=mapped_column(Integer,default=0); last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class Audit(Base):
     __tablename__="audit_log"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); actor:Mapped[str]=mapped_column(String); action:Mapped[str]=mapped_column(String); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class Contact(Base):
@@ -114,16 +119,66 @@ class TenantIn(BaseModel): name:str=Field(min_length=1,max_length=200); quota:in
 class QuotaIn(BaseModel): quota:int=Field(ge=0,le=10000000)
 class WebhookIn(BaseModel): url:str=Field(pattern=r"^https://")
 
-async def emit_middleware(event_type:str,payload:dict):
+async def emit_middleware(event_type:str,payload:dict)->bool:
     base=os.getenv("KLYROW_MIDDLEWARE_URL","").rstrip("/"); key=os.getenv("KLYROW_MIDDLEWARE_API_KEY",""); secret=os.getenv("KLYROW_WEBHOOK_SECRET","")
-    if not base or not key or not secret:return
+    if not base or not key or not secret:return False
     event_id=payload.get("event_id") or str(uuid.uuid4()); payload={"event_id":event_id,"source_system":"klyrow","event_type":event_type,"timestamp":datetime.now(timezone.utc).isoformat(),**payload}
     body=json.dumps(payload,separators=(",",":"),sort_keys=True).encode(); ts=str(int(time.time())); canonical=ts.encode()+b"\n"+event_id.encode()+b"\nklyrow\n"+body
     signature=hmac.new(secret.encode(),canonical,hashlib.sha256).hexdigest(); headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","X-Source-System":"klyrow","X-Klyrow-Timestamp":ts,"X-Klyrow-Event-Id":event_id,"X-Klyrow-Signature":"sha256="+signature}
     path={"klyrow.email.bounced":"bounces","klyrow.email.complained":"complaints","klyrow.email.unsubscribed":"unsubscribes"}.get(event_type,"events")
     try:
-        async with httpx.AsyncClient(timeout=1,trust_env=False) as client: response=await client.post(f"{base}/api/v1/klyrow/{path}",headers=headers,content=body); response.raise_for_status()
-    except Exception as exc: print(json.dumps({"level":"warning","system":"klyrow","event_id":event_id,"message_id":payload.get("message_id"),"event":"middleware_delivery_failed","error":type(exc).__name__}))
+        async with httpx.AsyncClient(timeout=3,trust_env=False) as client: response=await client.post(f"{base}/api/v1/klyrow/{path}",headers=headers,content=body); response.raise_for_status()
+        return True
+    except Exception as exc:
+        print(json.dumps({"level":"warning","system":"klyrow","event_id":event_id,"message_id":payload.get("message_id"),"event":"middleware_delivery_failed","error":type(exc).__name__}))
+        return False
+
+POSTAL_EVENTS={
+    "MessageSent":"email.delivered", "MessageDeliveryFailed":"email.bounced",
+    "MessageBounced":"email.bounced", "MessageDelayed":"email.deferred",
+    "MessageHeld":"email.held", "MessageLoaded":"email.opened",
+    "MessageLinkClicked":"email.clicked",
+}
+
+def verify_postal_signature(body:bytes,signature:str):
+    key_path=os.getenv("KLYROW_POSTAL_WEBHOOK_PUBLIC_KEY","")
+    if not key_path or not signature:raise HTTPException(401,"postal_signature_required")
+    try:
+        public_key=serialization.load_pem_public_key(Path(key_path).read_bytes())
+        public_key.verify(base64.b64decode(signature,validate=True),body,padding.PKCS1v15(),hashes.SHA256())
+    except (OSError,ValueError,TypeError,InvalidSignature):raise HTTPException(401,"invalid_postal_signature")
+
+@app.post("/v1/webhooks/postal-native",status_code=202)
+async def postal_native_hook(request:Request,x_postal_signature_256:str=Header(default=""),s:Session=Depends(db)):
+    body=await request.body(); verify_postal_signature(body,x_postal_signature_256)
+    try: raw=json.loads(body)
+    except ValueError:raise HTTPException(400,"invalid_json")
+    event_id=str(raw.get("uuid") or "")
+    if not event_id:raise HTTPException(400,"event_id_required")
+    try: event_timestamp=float(raw.get("timestamp"))
+    except (TypeError,ValueError):raise HTTPException(401,"invalid_postal_timestamp")
+    # Postal's native retry schedule can legitimately deliver an older event;
+    # reject future timestamps and stale captures outside one bounded day.
+    if event_timestamp>time.time()+300 or event_timestamp<time.time()-86400:raise HTTPException(401,"expired_postal_event")
+    event_name=str(raw.get("event") or ""); canonical=POSTAL_EVENTS.get(event_name)
+    if not canonical:raise HTTPException(422,"unsupported_postal_event")
+    payload=raw.get("payload") or {}; message=payload.get("message") or payload.get("original_message") or {}
+    tenant=os.getenv("KLYROW_POSTAL_TENANT_ID","")
+    if not tenant:raise HTTPException(503,"postal_tenant_not_configured")
+    message_id=str(message.get("id") or message.get("message_id") or "")
+    correlation=str(payload.get("correlation_id") or message.get("tag") or message.get("message_id") or event_id)
+    normalized={"event":canonical,"event_id":event_id,"tenant_id":tenant,"message_id":message_id,"correlation_id":correlation,"recipient":message.get("to"),"sender":message.get("from"),"provider":"postal","status":payload.get("status"),"occurred_at":event_timestamp,"provider_event":event_name,"provider_message_token":message.get("token")}
+    item=s.get(PostalEvent,event_id)
+    if item and item.state=="delivered":return {"accepted":True,"duplicate":True}
+    if not item:
+        item=PostalEvent(id=event_id,event_type=canonical,correlation_id=correlation,message_id=message_id,tenant_id=tenant,payload=json.dumps(normalized,separators=(",",":"),sort_keys=True)); s.add(item)
+    item.attempts=(item.attempts or 0)+1; item.updated_at=datetime.now(timezone.utc); s.commit()
+    delivered=await emit_middleware("klyrow."+canonical,{**normalized,"customer_id":tenant})
+    item=s.get(PostalEvent,event_id)
+    if delivered:
+        item.state="delivered"; item.last_error=None; s.add(Event(id=str(uuid.uuid4()),tenant_id=tenant,message_id=message_id,kind="klyrow."+canonical,payload=item.payload)); s.commit(); MAIL.labels(canonical.rsplit(".",1)[-1]).inc(); return {"accepted":True}
+    item.state="dlq" if item.attempts>=5 else "retry"; item.last_error="middleware_delivery_failed"; s.commit()
+    raise HTTPException(503,"middleware_delivery_pending")
 
 @app.on_event("startup")
 def startup():

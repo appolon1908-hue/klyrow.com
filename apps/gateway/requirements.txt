@@ -9,4 +9,4 @@ prometheus-client==0.22.1
 python-multipart==0.0.20
 email-validator==2.2.0
 dnspython==2.7.0
-
+cryptography==45.0.6
