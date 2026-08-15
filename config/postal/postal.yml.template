@@ -22,13 +22,27 @@ rabbitmq:
 dns:
   mx_records:
     - mail.klyrow.com
-  smtp_server_hostname: mail.klyrow.com
   spf_include: spf.klyrow.com
-  return_path: bounce.klyrow.com
+  return_path_domain: bounce.klyrow.com
+  route_domain: bounce.klyrow.com
+  track_domain: track.klyrow.com
+  helo_hostname: mail.klyrow.com
+  dkim_identifier: postal
+  custom_return_path_prefix: psrp
+postal:
+  web_hostname: app.klyrow.com
+  web_protocol: https
+  smtp_hostname: mail.klyrow.com
+  use_ip_pools: false
+  signing_key_path: /config/signing.key
 smtp_server:
-  port: 25
+  default_port: 25
+  default_bind_address: "::"
   # Enable only after a valid mail.klyrow.com certificate is mounted.
   tls_enabled: false
+  tls_certificate_path: $config-file-root/smtp.cert
+  tls_private_key_path: $config-file-root/smtp.key
+  log_connections: true
 logging:
   stdout: true
 rails:

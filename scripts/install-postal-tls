@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+cd "$(dirname "$0")/.."
+
+cert_dir="${1:-/etc/letsencrypt/live/mail.klyrow.com}"
+fullchain="$cert_dir/fullchain.pem"
+private_key="$cert_dir/privkey.pem"
+[[ -r "$fullchain" && -r "$private_key" ]] || { echo "Missing readable mail.klyrow.com certificate in $cert_dir" >&2; exit 1; }
+openssl x509 -in "$fullchain" -noout -checkhost mail.klyrow.com | grep -q 'does match certificate' || { echo "Certificate does not cover mail.klyrow.com" >&2; exit 1; }
+
+install -o 999 -g 999 -m 0644 "$fullchain" secrets/postal/smtp.cert
+install -o 999 -g 999 -m 0600 "$private_key" secrets/postal/smtp.key
+if grep -q 'tls_enabled: false' secrets/postal/postal.yml; then
+  sed -i '0,/tls_enabled: false/s//tls_enabled: true/' secrets/postal/postal.yml
+elif ! grep -q 'tls_enabled: true' secrets/postal/postal.yml; then
+  echo "Postal smtp_server.tls_enabled setting not found" >&2
+  exit 1
+fi
+chown 999:999 secrets/postal/postal.yml
+chmod 0600 secrets/postal/postal.yml
+docker compose restart postal-smtp
+echo "Postal SMTP TLS material installed; verify STARTTLS before changing any public bind or firewall rule."

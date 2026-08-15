@@ -1,4 +1,4 @@
-# Deployment report — SaaS P0/P1 foundation — 2026-08-15
+# Deployment report — SMTP and DNS production readiness — 2026-08-15
 
 ## Implemented
 
@@ -21,14 +21,24 @@ Existing hardening is preserved: private SMTP binding, private-vSwitch gateway l
 
 ## External launch blockers
 
-- Publish and verify `mail` A, MX, SPF and deployed Postal DKIM. Review the existing DMARC record against the documented strict policy.
+- Publish and verify the exact A, MX, SPF, live Postal DKIM, Postal verification, return-path CNAME, and staged DMARC records in `docs/MAIL_DNS.md`.
 - Provider must replace PTR `Ubuntu-jammy-latest-amd64-base.zst` with `mail.klyrow.com`.
-- Issue/mount trusted web and SMTP certificates; verify renewal and expiry monitoring.
-- Restore authenticated middleware connectivity to `10.40.0.1:8443`; calls currently fail fast and log safely.
+- Confirm the hosting provider permits outbound TCP/25; direct probes currently time out.
+- After DNS propagation, issue/mount the trusted mail SMTP certificate, enable STARTTLS, and verify renewal/reload.
+- Enable approved n8n/Odoo middleware targets and credentials; middleware itself is healthy at `10.40.0.1:8095`.
 - Complete dedicated `klyrow-deploy` SSH account/authorized-key setup on the correct host.
 - Owner must authorize a controlled external recipient and validate delivered/bounce/complaint flows.
 
 Unrestricted delivery remains disabled. Do not set both `KLYROW_SAFE_MODE=false` and `KLYROW_PRODUCTION_GATE_APPROVED=true` until every blocker and the consent/suppression acceptance test passes.
+
+## Mail readiness audit
+
+- Postal 3.3.7 and Mautic 7.1.3 containers are healthy. The verified outbound IPv4 is `37.27.128.39`; IPv6 is not authorized for mail.
+- The live Postal domain `klyrow.com` was created once in Development mode and generated selector `postal-QQaKrT`. The private key was not printed or committed.
+- Public DNS is missing mail A, apex/bounce MX, SPF, live DKIM, Postal verification, and return-path CNAME. Existing DMARC is conflicting with the staged monitoring contract. PTR is incorrect and forward-confirmed rDNS fails.
+- SMTP banner/HELO is `mail.klyrow.com`; STARTTLS and a mail-host certificate are absent. SMTP remains loopback-only, and the firewall exposes no SMTP ports.
+- Mautic-style authenticated SMTP login passes. An unauthenticated relay attempt is rejected. Synthetic safe send, signed webhook, replay rejection, and invalid-HMAC rejection pass; no controlled external delivery was authorized or attempted.
+- The required outcome remains `BLOCKED-EXTERNAL`.
 
 ## P1/P2 backlog
 
