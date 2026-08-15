@@ -2,6 +2,8 @@
 
 Observed from public authoritative DNS and the live Postal 3.3.7 database on 2026-08-15. TTL `3600` is recommended for all records during rollout. Postal created the sending domain once and generated selector `postal-QQaKrT`; its private key remains only in Postal's database and protected backups.
 
+Latest public recheck: both authoritative GoDaddy nameservers and Cloudflare DNS show all records in `NEEDS-DNS-PROVIDER` still absent except the pre-existing DMARC record. Current PTR is `static.39.128.27.37.clients.your-server.de.`, so PTR and FCrDNS fail.
+
 ## NEEDS-DNS-PROVIDER
 
 | Type | Host/name | Exact value | TTL | Purpose |

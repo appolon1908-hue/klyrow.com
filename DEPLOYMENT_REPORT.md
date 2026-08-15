@@ -31,6 +31,12 @@ Existing hardening is preserved: private SMTP binding, private-vSwitch gateway l
 
 Unrestricted delivery remains disabled. Do not set both `KLYROW_SAFE_MODE=false` and `KLYROW_PRODUCTION_GATE_APPROVED=true` until every blocker and the consent/suppression acceptance test passes.
 
+### Latest access and public-DNS recheck
+
+On the latest 2026-08-15 run, the dedicated `klyrow-deploy` key and all locally available administrative SSH identities were rejected by `37.27.128.39`. The reported Hetzner TCP/25 policy change therefore could not be verified from the source server, and no server configuration, backup, certificate, listener, or SMTP credential was changed.
+
+Cloudflare public DNS and both authoritative GoDaddy nameservers still return no mail A, apex/bounce MX, SPF/helper SPF, live DKIM, Postal verification, or PSRP CNAME. PTR now answers `static.39.128.27.37.clients.your-server.de.`, not `mail.klyrow.com`; FCrDNS fails. No DNS-provider credential or approved canary recipient is available locally. No delivery or bounce message was sent. Status remains **BLOCKED-EXTERNAL**.
+
 ## Mail readiness audit
 
 - Postal 3.3.7 and Mautic 7.1.3 containers are healthy. The verified outbound IPv4 is `37.27.128.39`; IPv6 is not authorized for mail.

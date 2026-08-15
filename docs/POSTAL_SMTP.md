@@ -15,3 +15,5 @@ After DNS/PTR pass:
 5. Expose only port 25 for server-to-server SMTP. Add 587 only if authenticated public submission is explicitly required. Do not open 465 or 2525 by default.
 
 The unauthenticated relay probe reached `RCPT TO` without DATA and was rejected with `530 Authentication required`. Repeat externally after port 25 is deliberately opened.
+
+The latest verification run could not repeat server-local TCP/25 or SMTP checks because `37.27.128.39` rejected every available SSH identity. Treat the earlier connection timeout as superseded only after a new connection-level test from that exact server succeeds; the provider's policy notification alone is not PASS evidence.
