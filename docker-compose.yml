@@ -59,6 +59,7 @@ services:
       MAUTIC_DB_PASSWORD: ${MAUTIC_DB_PASSWORD:?required}
       MAUTIC_URL: https://app.klyrow.com/mautic
       MAUTIC_RUN_MIGRATIONS: "true"
+      MAUTIC_MAILER_DSN: smtp://klyrow:${KLYROW_POSTAL_SERVER_KEY:?required}@postal-smtp:25
       DOCKER_MAUTIC_ROLE: mautic_web
     depends_on:
       mautic-db: {condition: service_healthy}
@@ -79,6 +80,17 @@ services:
       DOCKER_MAUTIC_ROLE: mautic_cron
     depends_on:
       mautic: {condition: service_healthy}
+    volumes: [mautic_data:/var/www/html]
+    networks: [backend]
+    restart: unless-stopped
+  mautic-worker:
+    image: mautic/mautic:7.1.3-20260707-apache
+    environment:
+      <<: *mautic_env
+      DOCKER_MAUTIC_ROLE: mautic_worker
+    depends_on:
+      mautic: {condition: service_healthy}
+      postal-smtp: {condition: service_started}
     volumes: [mautic_data:/var/www/html]
     networks: [backend]
     restart: unless-stopped

@@ -7,21 +7,22 @@ from typing import Optional
 import httpx, jwt
 from argon2 import PasswordHasher
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse
-from prometheus_client import Counter, generate_latest
-from pydantic import AliasChoices, BaseModel, EmailStr, Field
+from fastapi.responses import FileResponse, HTMLResponse
+from prometheus_client import Counter, Histogram, generate_latest
+from pydantic import BaseModel, EmailStr, Field, model_validator
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 DATABASE_URL=os.getenv("KLYROW_DATABASE_URL", "sqlite:///./klyrow.db")
 SECRET=os.getenv("KLYROW_SESSION_SECRET", "dev-only-change-me")
-SAFE_MODE=os.getenv("KLYROW_SAFE_MODE", "true").lower()=="true"
+SAFE_MODE=os.getenv("KLYROW_SAFE_MODE", "true").lower()=="true" or os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()!="true"
 engine=create_engine(DATABASE_URL, pool_pre_ping=True)
 DB=sessionmaker(engine, expire_on_commit=False)
 ph=PasswordHasher()
 app=FastAPI(title="Klyrow API", version="1.0.0", docs_url=None if os.getenv("KLYROW_ENV")=="production" else "/docs")
 REQUESTS=Counter("klyrow_http_requests_total","Requests",["path","status"])
 MAIL=Counter("klyrow_mail_total","Mail lifecycle",["event"])
+LATENCY=Histogram("klyrow_http_request_duration_seconds","Request latency",["path"])
 rate_buckets=defaultdict(deque)
 
 class Base(DeclarativeBase): pass
@@ -56,7 +57,9 @@ class WebhookEndpoint(Base):
 def db():
     with DB() as s: yield s
 def sha(v): return hashlib.sha256(v.encode()).hexdigest()
-def token(user): return jwt.encode({"sub":user.id,"tenant":user.tenant_id,"role":user.role,"exp":datetime.now(timezone.utc)+timedelta(hours=8)},SECRET,algorithm="HS256")
+def token(user,s):
+    from .saas import SessionRecord
+    sid=str(uuid.uuid4());s.add(SessionRecord(id=sid,user_id=user.id,tenant_id=user.tenant_id));s.commit();return jwt.encode({"sub":user.id,"tenant":user.tenant_id,"role":user.role,"sid":sid,"exp":datetime.now(timezone.utc)+timedelta(hours=8)},SECRET,algorithm="HS256")
 def audit(s, ctx, action): s.add(Audit(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],actor=ctx["sub"],action=action))
 def auth(authorization:str=Header(default=""), x_klyrow_tenant_id:Optional[str]=Header(default=None), s:Session=Depends(db)):
     if not authorization.startswith("Bearer "): raise HTTPException(401,"authentication_required")
@@ -73,7 +76,13 @@ def auth(authorization:str=Header(default=""), x_klyrow_tenant_id:Optional[str]=
             tenant=s.get(Tenant,key.tenant_id)
             if not tenant or not tenant.enabled: raise HTTPException(403,"account_suspended")
             ctx={"sub":key.id,"tenant":key.tenant_id,"role":"tenant_admin","api_key":True}
-        else: ctx=jwt.decode(raw,SECRET,algorithms=["HS256"])
+        else:
+            ctx=jwt.decode(raw,SECRET,algorithms=["HS256"])
+            from .saas import SessionRecord
+            session=s.get(SessionRecord,ctx.get("sid")) if ctx.get("sid") else None
+            if ctx.get("sid") and (not session or session.revoked):raise HTTPException(401,"session_revoked")
+            tenant=s.get(Tenant,ctx["tenant"])
+            if not tenant or not tenant.enabled:raise HTTPException(403,"account_suspended")
     except HTTPException: raise
     except Exception: raise HTTPException(401,"invalid_credentials")
     now=time.time(); q=rate_buckets[ctx["tenant"]]
@@ -86,13 +95,18 @@ def require(*roles):
         return ctx
     return inner
 
-class Login(BaseModel): email:EmailStr; password:str
+class Login(BaseModel): email:EmailStr; password:str; otp:Optional[str]=None
 class ResetRequest(BaseModel): email:EmailStr
 class Reset(BaseModel): token:str; password:str=Field(min_length=14)
 class KeyIn(BaseModel): name:str=Field(min_length=1,max_length=80)
 class DomainIn(BaseModel): domain:str=Field(pattern=r"^[a-z0-9][a-z0-9.-]+$")
 class MailIn(BaseModel):
-    customer_id:Optional[str]=None; to:EmailStr; sender:EmailStr=Field(validation_alias=AliasChoices("from","sender"),serialization_alias="from"); reply_to:Optional[EmailStr]=None; subject:str=Field(max_length=998); html:str=Field(max_length=100000); text:Optional[str]=None; template_id:Optional[str]=None; campaign_id:Optional[str]=None; tags:list[str]=Field(default_factory=list,max_length=50); tracking:dict=Field(default_factory=dict); callback_metadata:dict=Field(default_factory=dict)
+    customer_id:Optional[str]=None; to:EmailStr; sender:EmailStr; reply_to:Optional[EmailStr]=None; subject:str=Field(max_length=998); html:str=Field(max_length=100000); text:Optional[str]=None; template_id:Optional[str]=None; campaign_id:Optional[str]=None; tags:list[str]=Field(default_factory=list,max_length=50); tracking:dict=Field(default_factory=dict); callback_metadata:dict=Field(default_factory=dict); stream:str=Field(default="transactional",pattern="^(marketing|transactional)$"); topic:str="marketing"
+    @model_validator(mode="before")
+    @classmethod
+    def accept_from_alias(cls,data):
+        if isinstance(data,dict) and "sender" not in data and "from" in data:data={**data,"sender":data["from"]}
+        return data
 class BulkMailIn(BaseModel): messages:list[MailIn]=Field(min_length=1,max_length=100)
 class ContactIn(BaseModel): email:EmailStr; name:Optional[str]=Field(default=None,max_length=200); subscribed:bool=True; metadata:dict={}
 class CampaignIn(BaseModel): name:str=Field(min_length=1,max_length=200); subject:Optional[str]=Field(default=None,max_length=998)
@@ -108,7 +122,7 @@ async def emit_middleware(event_type:str,payload:dict):
     signature=hmac.new(secret.encode(),canonical,hashlib.sha256).hexdigest(); headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","X-Source-System":"klyrow","X-Klyrow-Timestamp":ts,"X-Klyrow-Event-Id":event_id,"X-Klyrow-Signature":"sha256="+signature}
     path={"klyrow.email.bounced":"bounces","klyrow.email.complained":"complaints","klyrow.email.unsubscribed":"unsubscribes"}.get(event_type,"events")
     try:
-        async with httpx.AsyncClient(timeout=5,trust_env=False) as client: response=await client.post(f"{base}/api/v1/klyrow/{path}",headers=headers,content=body); response.raise_for_status()
+        async with httpx.AsyncClient(timeout=1,trust_env=False) as client: response=await client.post(f"{base}/api/v1/klyrow/{path}",headers=headers,content=body); response.raise_for_status()
     except Exception as exc: print(json.dumps({"level":"warning","system":"klyrow","event_id":event_id,"message_id":payload.get("message_id"),"event":"middleware_delivery_failed","error":type(exc).__name__}))
 
 @app.on_event("startup")
@@ -122,13 +136,14 @@ def startup():
 
 @app.middleware("http")
 async def headers(request, call_next):
+    started=time.monotonic();request_id=request.headers.get("X-Request-Id") or str(uuid.uuid4())
     try: response=await call_next(request)
     except Exception: REQUESTS.labels(request.url.path,"500").inc(); raise
-    response.headers.update({"X-Content-Type-Options":"nosniff","X-Frame-Options":"DENY","Referrer-Policy":"no-referrer","Permissions-Policy":"camera=(), microphone=(), geolocation=()","Content-Security-Policy":"default-src 'self'; style-src 'self' 'unsafe-inline'"})
-    REQUESTS.labels(request.url.path,str(response.status_code)).inc(); return response
+    response.headers.update({"X-Request-Id":request_id,"X-Content-Type-Options":"nosniff","X-Frame-Options":"DENY","Referrer-Policy":"no-referrer","Permissions-Policy":"camera=(), microphone=(), geolocation=()","Content-Security-Policy":"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"})
+    REQUESTS.labels(request.url.path,str(response.status_code)).inc();LATENCY.labels(request.url.path).observe(time.monotonic()-started); return response
 
 @app.get("/v1/health")
-def health(s:Session=Depends(db)): s.execute(select(1)); return {"status":"ok","safe_mode":SAFE_MODE}
+def health(s:Session=Depends(db)): s.execute(select(1)); return {"status":"ok","safe_mode":SAFE_MODE,"production_gate_approved":os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()=="true"}
 @app.get("/metrics")
 def metrics(): from fastapi.responses import Response; return Response(generate_latest(),media_type="text/plain")
 @app.post("/v1/auth/login")
@@ -137,7 +152,10 @@ def login(x:Login,s:Session=Depends(db)):
     try: valid=u and u.enabled and ph.verify(u.password_hash,x.password)
     except Exception: valid=False
     if not valid: raise HTTPException(401,"invalid_credentials")
-    return {"access_token":token(u),"token_type":"bearer","role":u.role,"tenant_id":u.tenant_id}
+    from .saas import MfaConfig,verify_totp
+    m=s.get(MfaConfig,u.id)
+    if m and m.enabled and (not x.otp or not verify_totp(m.secret,x.otp)):raise HTTPException(401,"mfa_required")
+    return {"access_token":token(u,s),"token_type":"bearer","role":u.role,"tenant_id":u.tenant_id}
 @app.post("/v1/auth/logout",status_code=204)
 def logout(ctx=Depends(auth)): return None
 @app.post("/v1/auth/forgot-password",status_code=202)
@@ -183,6 +201,13 @@ async def send(x:MailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:
         if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
         return json.loads(prior.response_json)
     if s.scalar(select(Suppression).where(Suppression.tenant_id==ctx["tenant"],Suppression.email==x.to.lower())): raise HTTPException(422,"recipient_suppressed")
+    from .saas import Consent,Preference,Profile,UsageLedger
+    profile=s.scalar(select(Profile).where(Profile.tenant_id==ctx["tenant"],Profile.email==x.to.lower()))
+    if x.stream=="marketing":
+        if not profile:raise HTTPException(422,"marketing_consent_required")
+        pref=s.scalar(select(Preference).where(Preference.tenant_id==ctx["tenant"],Preference.profile_id==profile.id,Preference.topic==x.topic))
+        latest=s.scalar(select(Consent).where(Consent.tenant_id==ctx["tenant"],Consent.profile_id==profile.id,Consent.topic==x.topic).order_by(Consent.occurred_at.desc()))
+        if not pref or not pref.subscribed or not latest or latest.status!="granted":raise HTTPException(422,"marketing_consent_required")
     domain=x.sender.rsplit("@",1)[1]; allowed=s.scalar(select(Domain).where(Domain.tenant_id==ctx["tenant"],Domain.domain==domain,Domain.verified==True))
     if not allowed: raise HTTPException(422,"sender_domain_not_verified")
     since=datetime.now(timezone.utc)-timedelta(days=1); count=len(s.scalars(select(Message).where(Message.tenant_id==ctx["tenant"],Message.created_at>=since)).all()); tenant=s.get(Tenant,ctx["tenant"])
@@ -191,7 +216,7 @@ async def send(x:MailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:
     if not SAFE_MODE:
         headers={"X-Server-API-Key":os.environ["KLYROW_POSTAL_API_KEY"]}; payload={"to":[x.to],"from":x.sender,"subject":x.subject,"html_body":x.html,"plain_body":x.text}
         async with httpx.AsyncClient(timeout=10) as c: r=await c.post(os.environ["KLYROW_POSTAL_API_URL"]+"/api/v1/send/message",headers=headers,json=payload); r.raise_for_status()
-    result={"id":mid,"status":status,"safe_mode":SAFE_MODE}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=x.to.lower(),sender=x.sender.lower(),subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload="{}")); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result))); s.commit(); MAIL.labels("queued").inc(); await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{}}); return result
+    result={"id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=x.to.lower(),sender=x.sender.lower(),subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload=json.dumps({"stream":x.stream}))); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageLedger(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind="message."+x.stream,quantity=1,reference=mid)); s.commit(); MAIL.labels("queued").inc(); await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{"stream":x.stream}}); return result
 
 @app.post("/v1/email/bulk",status_code=202)
 async def bulk(x:BulkMailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
@@ -271,3 +296,8 @@ def admin_quota(tid:str,x:QuotaIn,ctx=Depends(require("platform_admin")),s:Sessi
     item.quota=x.quota; audit(s,ctx,"tenant.quota_changed"); s.commit(); return {"id":tid,"quota":item.quota}
 @app.get("/",response_class=HTMLResponse)
 def portal(): return Path(__file__).with_name("portal.html").read_text()
+@app.get("/assets/portal.js",include_in_schema=False)
+def portal_js():return FileResponse(Path(__file__).with_name("portal.js"),media_type="application/javascript")
+
+from .saas import router as saas_router
+app.include_router(saas_router)
