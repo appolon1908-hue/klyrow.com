@@ -1,0 +1,35 @@
+web:
+  host: 0.0.0.0
+  port: 5000
+web_server:
+  bind_address: 0.0.0.0
+  port: 5000
+main_db:
+  host: postal-db
+  username: postal
+  password: __POSTAL_DB_PASSWORD__
+  database: postal
+message_db:
+  host: postal-db
+  username: postal
+  password: __POSTAL_DB_PASSWORD__
+  prefix: postal
+rabbitmq:
+  host: rabbitmq
+  username: postal
+  password: __POSTAL_RABBITMQ_PASSWORD__
+  vhost: /
+dns:
+  mx_records:
+    - mail.klyrow.com
+  smtp_server_hostname: mail.klyrow.com
+  spf_include: spf.klyrow.com
+  return_path: bounce.klyrow.com
+smtp_server:
+  port: 25
+  # Enable only after a valid mail.klyrow.com certificate is mounted.
+  tls_enabled: false
+logging:
+  stdout: true
+rails:
+  secret_key: __POSTAL_SECRET_KEY__

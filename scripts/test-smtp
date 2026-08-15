@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+host="${1:-127.0.0.1}"; port="${2:-25}"
+openssl s_client -starttls smtp -connect "$host:$port" -servername mail.klyrow.com -brief </dev/null

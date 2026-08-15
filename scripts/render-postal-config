@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/lib.sh"; require_env
+set -a; source .env; set +a
+mkdir -p secrets/postal
+python3 - <<'PY'
+import os
+from pathlib import Path
+p=Path('config/postal/postal.yml.template').read_text()
+for key in ('POSTAL_DB_PASSWORD','POSTAL_RABBITMQ_PASSWORD','POSTAL_SECRET_KEY'):
+    p=p.replace('__'+key+'__',os.environ[key])
+Path('secrets/postal/postal.yml').write_text(p)
+PY
+chown 999:999 secrets/postal secrets/postal/postal.yml
+chmod 700 secrets/postal
+chmod 600 secrets/postal/postal.yml

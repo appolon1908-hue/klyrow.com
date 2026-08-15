@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/lib.sh"; require_env; set -a; source .env; set +a
+body='{"event":"email.delivered","message_id":"test","tenant_id":"test"}'; ts="$(date +%s)"; id="$(openssl rand -hex 16)"
+sig="$(printf '%s' "$ts.$id.$body" | openssl dgst -sha256 -hmac "$KLYROW_WEBHOOK_SECRET" -hex | awk '{print $2}')"
+curl -fsS -X POST http://127.0.0.1:18000/v1/webhooks/postal -H "Content-Type: application/json" -H "X-Klyrow-Timestamp: $ts" -H "X-Klyrow-Event-Id: $id" -H "X-Klyrow-Signature: $sig" --data "$body"
+

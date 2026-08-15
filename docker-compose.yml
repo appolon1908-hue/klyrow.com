@@ -1,0 +1,195 @@
+name: klyrow
+services:
+  gateway:
+    build: ./apps/gateway
+    env_file: .env
+    depends_on:
+      postgres: {condition: service_healthy}
+    ports:
+      - "127.0.0.1:18000:8000"
+      - "10.40.0.2:18000:8000"
+    networks: [frontend, backend]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/health')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+  postgres:
+    image: postgres:17.6-bookworm
+    environment:
+      POSTGRES_DB: klyrow
+      POSTGRES_USER: klyrow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    networks: [backend]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U klyrow -d klyrow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  mautic-db:
+    image: mariadb:11.4.8
+    environment:
+      MARIADB_DATABASE: mautic
+      MARIADB_USER: mautic
+      MARIADB_PASSWORD: ${MAUTIC_DB_PASSWORD:?required}
+      MARIADB_ROOT_PASSWORD: ${MAUTIC_DB_ROOT_PASSWORD:?required}
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    volumes: [mautic_db:/var/lib/mysql]
+    networks: [backend]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+  mautic:
+    image: mautic/mautic:7.1.3-20260707-apache
+    environment: &mautic_env
+      MAUTIC_DB_HOST: mautic-db
+      MAUTIC_DB_PORT: 3306
+      MAUTIC_DB_DATABASE: mautic
+      MAUTIC_DB_USER: mautic
+      MAUTIC_DB_PASSWORD: ${MAUTIC_DB_PASSWORD:?required}
+      MAUTIC_URL: https://app.klyrow.com/mautic
+      MAUTIC_RUN_MIGRATIONS: "true"
+      DOCKER_MAUTIC_ROLE: mautic_web
+    depends_on:
+      mautic-db: {condition: service_healthy}
+    volumes: [mautic_data:/var/www/html]
+    ports: ["127.0.0.1:18001:80"]
+    networks: [frontend, backend]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "curl -fsS http://127.0.0.1/ >/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 15
+      start_period: 120s
+  mautic-cron:
+    image: mautic/mautic:7.1.3-20260707-apache
+    environment:
+      <<: *mautic_env
+      DOCKER_MAUTIC_ROLE: mautic_cron
+    depends_on:
+      mautic: {condition: service_healthy}
+    volumes: [mautic_data:/var/www/html]
+    networks: [backend]
+    restart: unless-stopped
+  postal-db:
+    image: mariadb:11.4.8
+    environment:
+      MARIADB_DATABASE: postal
+      MARIADB_USER: postal
+      MARIADB_PASSWORD: ${POSTAL_DB_PASSWORD:?required}
+      MARIADB_ROOT_PASSWORD: ${POSTAL_DB_PASSWORD:?required}
+    volumes: [postal_db:/var/lib/mysql]
+    networks: [backend]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, healthcheck.sh, --connect, --innodb_initialized]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+  rabbitmq:
+    image: rabbitmq:4.1.3-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: postal
+      RABBITMQ_DEFAULT_PASS: ${POSTAL_RABBITMQ_PASSWORD:?required}
+    volumes: [rabbitmq_data:/var/lib/rabbitmq]
+    networks: [backend]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD, rabbitmq-diagnostics, -q, ping]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+  postal-web:
+    image: ghcr.io/postalserver/postal:3.3.7
+    command: postal web-server
+    volumes: [./secrets/postal:/config:ro, postal_assets:/opt/postal/public]
+    depends_on:
+      postal-db: {condition: service_healthy}
+      rabbitmq: {condition: service_healthy}
+    ports: ["127.0.0.1:18002:5000"]
+    networks: [frontend, backend]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "ruby -rnet/http -e 'r=Net::HTTP.get_response(URI(\"http://127.0.0.1:5000/\")); exit(r.code.to_i < 500 ? 0 : 1)'"]
+      interval: 30s
+      timeout: 10s
+      retries: 15
+      start_period: 60s
+  postal-worker:
+    image: ghcr.io/postalserver/postal:3.3.7
+    command: postal worker
+    volumes: [./secrets/postal:/config:ro]
+    depends_on:
+      postal-web: {condition: service_healthy}
+    networks: [backend]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "ruby -e 'Process.kill(0, 1)'" ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+  postal-smtp:
+    image: ghcr.io/postalserver/postal:3.3.7
+    command: postal smtp-server
+    volumes: [./secrets/postal:/config:ro]
+    depends_on:
+      postal-web: {condition: service_healthy}
+    # Keep SMTP private until mail DNS, PTR, and SMTP TLS launch gates pass.
+    ports: ["127.0.0.1:2525:25"]
+    networks: [frontend, backend]
+    restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "ruby -rnet/http -e 'exit(Net::HTTP.get_response(URI(\"http://127.0.0.1:9091/\")).code.to_i < 500 ? 0 : 1)'" ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.retention.time=30d]
+    volumes: [./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro, prometheus_data:/prometheus]
+    networks: [backend]
+    restart: unless-stopped
+  grafana:
+    image: grafana/grafana:12.1.1
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?required}
+      GF_SERVER_ROOT_URL: https://app.klyrow.com/ops/
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    volumes: [grafana_data:/var/lib/grafana]
+    ports: ["127.0.0.1:18003:3000"]
+    networks: [frontend, backend]
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+  node-exporter:
+    image: prom/node-exporter:v1.9.1
+    command: [--path.rootfs=/host]
+    volumes:
+      - /:/host:ro,rslave
+    networks: [backend]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+networks:
+  frontend: {}
+  backend: {internal: true}
+volumes:
+  postgres_data: {}
+  mautic_db: {}
+  mautic_data: {}
+  postal_db: {}
+  rabbitmq_data: {}
+  postal_assets: {}
+  prometheus_data: {}
+  grafana_data: {}

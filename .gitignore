@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+test.db
+*.db
+backups/
+.env.*
+!.env.example
+__pycache__/
+.pytest_cache/
+*.pyc
+backups/
+secrets/
+postal-data/
+*.pem
+*.key
