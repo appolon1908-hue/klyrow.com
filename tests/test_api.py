@@ -4,7 +4,8 @@ from cryptography.hazmat.primitives import hashes,serialization
 from cryptography.hazmat.primitives.asymmetric import padding,rsa
 os.environ.update(KLYROW_DATABASE_URL="sqlite:///./test.db",KLYROW_SESSION_SECRET="test-secret",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple")
 from fastapi.testclient import TestClient
-from apps.gateway.app.main import Base,DB,Domain,Suppression,Tenant,User,app,engine,ph
+from sqlalchemy import select
+from apps.gateway.app.main import Audit,Base,DB,Domain,Event,Message,Suppression,Tenant,User,app,engine,ph
 
 def setup_module():
     Base.metadata.drop_all(engine); Base.metadata.create_all(engine)
@@ -29,7 +30,22 @@ def test_contacts_campaigns_and_isolation():
     c=client.post("/v1/campaigns",headers={**a,"Idempotency-Key":"campaign-1"},json={"name":"Mock campaign","subject":"Test"}); assert c.status_code==201; cid=c.json()["id"]; assert client.get("/v1/campaigns/"+cid,headers=b).status_code==404
 def test_webhook_signature_and_replay():
     body=json.dumps({"event":"email.delivered","message_id":"m","tenant_id":"a"},separators=(",",":")); ts=str(int(time.time())); eid=str(uuid.uuid4()); sig=hmac.new(b"hook-secret",f"{ts}.{eid}.{body}".encode(),hashlib.sha256).hexdigest(); h={"X-Klyrow-Timestamp":ts,"X-Klyrow-Event-Id":eid,"X-Klyrow-Signature":sig,"Content-Type":"application/json"}
-    assert client.post("/v1/webhooks/postal",headers=h,content=body).status_code==202; assert client.post("/v1/webhooks/postal",headers=h,content=body).status_code==409; h["X-Klyrow-Signature"]="bad"; assert client.post("/v1/webhooks/postal",headers=h,content=body).status_code==401
+    with patch("apps.gateway.app.main.emit_middleware",new=AsyncMock(return_value=True)):
+        assert client.post("/v1/webhooks/postal",headers=h,content=body).status_code==202; replay=client.post("/v1/webhooks/postal",headers=h,content=body); assert replay.status_code==202 and replay.json()["duplicate"] is True
+    h["X-Klyrow-Signature"]="bad"; assert client.post("/v1/webhooks/postal",headers=h,content=body).status_code==401
+
+def test_webhook_status_suppression_audit_and_duplicate():
+    with DB() as s:
+        s.add(Message(id="event-message",tenant_id="a",recipient="bounce@example.net",sender="sender@a.example.com",subject="synthetic",status="accepted_test"));s.commit()
+    body=json.dumps({"event":"email.bounced","message_id":"event-message","correlation_id":"event-message","tenant_id":"a","recipient":"bounce@example.net","status":"HardBounce"},separators=(",",":"));ts=str(int(time.time()));eid=str(uuid.uuid4());sig=hmac.new(b"hook-secret",f"{ts}.{eid}.{body}".encode(),hashlib.sha256).hexdigest();h={"X-Klyrow-Timestamp":ts,"X-Klyrow-Event-Id":eid,"X-Klyrow-Signature":sig,"Content-Type":"application/json"}
+    with patch("apps.gateway.app.main.emit_middleware",new=AsyncMock(return_value=True)):
+        first=client.post("/v1/webhooks/postal",headers=h,content=body);duplicate=client.post("/v1/webhooks/postal",headers=h,content=body)
+    assert first.status_code==202 and duplicate.json()["duplicate"] is True
+    with DB() as s:
+        assert s.get(Message,"event-message").status=="hard_bounce"
+        assert len(list(s.scalars(select(Suppression).where(Suppression.tenant_id=="a",Suppression.email=="bounce@example.net"))))==1
+        assert s.get(Event,eid) is not None
+        assert s.scalar(select(Audit).where(Audit.action=="email.status.hard_bounce")) is not None
 
 def test_postal_native_signature_normalization_and_idempotency(tmp_path):
     private=rsa.generate_private_key(public_exponent=65537,key_size=2048); public=tmp_path/"postal-public.pem"; public.write_bytes(private.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo)); os.environ.update(KLYROW_POSTAL_WEBHOOK_PUBLIC_KEY=str(public),KLYROW_POSTAL_TENANT_ID="a")

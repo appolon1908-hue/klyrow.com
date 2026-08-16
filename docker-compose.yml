@@ -3,13 +3,15 @@ services:
   gateway:
     build: ./apps/gateway
     env_file: .env
+    environment:
+      KLYROW_EMAIL_EVENT_URL: http://10.40.0.1:18080/internal/provider-events/klyrow
     volumes:
       - ./secrets/postal/webhook-signing-public.pem:/run/klyrow/postal-webhook-signing-public.pem:ro
     depends_on:
       postgres: {condition: service_healthy}
     ports:
       - "127.0.0.1:18000:8000"
-      - "10.40.0.2:18000:8000"
+      - "10.40.0.4:18000:8000"
     networks: [frontend, backend]
     restart: unless-stopped
     read_only: true

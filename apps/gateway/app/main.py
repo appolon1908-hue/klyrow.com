@@ -1,4 +1,4 @@
-import base64, hashlib, hmac, json, os, secrets, time, uuid
+import asyncio, base64, hashlib, hmac, json, os, secrets, time, uuid
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -126,8 +126,14 @@ async def emit_middleware(event_type:str,payload:dict)->bool:
     body=json.dumps(payload,separators=(",",":"),sort_keys=True).encode(); ts=str(int(time.time())); canonical=ts.encode()+b"\n"+event_id.encode()+b"\nklyrow\n"+body
     signature=hmac.new(secret.encode(),canonical,hashlib.sha256).hexdigest(); headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","X-Source-System":"klyrow","X-Klyrow-Timestamp":ts,"X-Klyrow-Event-Id":event_id,"X-Klyrow-Signature":"sha256="+signature}
     path={"klyrow.email.bounced":"bounces","klyrow.email.complained":"complaints","klyrow.email.unsubscribed":"unsubscribes"}.get(event_type,"events")
+    targets=[f"{base}/api/v1/klyrow/{path}"]
+    email_target=os.getenv("KLYROW_EMAIL_EVENT_URL","").strip()
+    if email_target:targets.append(email_target)
     try:
-        async with httpx.AsyncClient(timeout=3,trust_env=False) as client: response=await client.post(f"{base}/api/v1/klyrow/{path}",headers=headers,content=body); response.raise_for_status()
+        async with httpx.AsyncClient(timeout=3,trust_env=False) as client:
+            for target in targets:
+                response=await client.post(target,headers=headers,content=body)
+                response.raise_for_status()
         return True
     except Exception as exc:
         print(json.dumps({"level":"warning","system":"klyrow","event_id":event_id,"message_id":payload.get("message_id"),"event":"middleware_delivery_failed","error":type(exc).__name__}))
@@ -139,6 +145,30 @@ POSTAL_EVENTS={
     "MessageHeld":"email.held", "MessageLoaded":"email.opened",
     "MessageLinkClicked":"email.clicked",
 }
+
+TERMINAL_MESSAGE_STATUSES={
+    "email.sent":"sent", "email.delivered":"delivered", "email.soft_bounce":"soft_bounce",
+    "email.deferred":"soft_bounce",
+    "email.hard_bounce":"hard_bounce", "email.bounced":"hard_bounce",
+    "email.complained":"complaint", "email.complaint":"complaint",
+    "email.rejected":"rejected", "email.failed":"failed",
+}
+SUPPRESSION_STATUSES={"hard_bounce", "complaint"}
+
+def persist_email_event(s:Session, *, event_id:str, tenant_id:str, message_id:str, correlation_id:str, event_type:str, recipient:Optional[str], raw_status:Optional[str], payload:str):
+    canonical_status=TERMINAL_MESSAGE_STATUSES.get(event_type,event_type.rsplit(".",1)[-1])
+    local_message=s.get(Message,message_id) or s.get(Message,correlation_id)
+    if local_message:local_message.status=canonical_status
+    if not s.get(Event,event_id):
+        s.add(Event(id=event_id,tenant_id=tenant_id,message_id=local_message.id if local_message else message_id,kind="klyrow."+event_type,payload=payload))
+        s.add(Audit(id=str(uuid.uuid4()),tenant_id=tenant_id,actor="provider:postal",action="email.status."+canonical_status))
+    if canonical_status in SUPPRESSION_STATUSES and recipient:
+        email=recipient.lower()
+        suppression=s.scalar(select(Suppression).where(Suppression.tenant_id==tenant_id,Suppression.email==email))
+        if not suppression:s.add(Suppression(id=str(uuid.uuid4()),tenant_id=tenant_id,email=email,reason=canonical_status))
+        elif suppression.reason!=canonical_status:suppression.reason=canonical_status
+    s.commit()
+    return canonical_status
 
 def verify_postal_signature(body:bytes,signature:str):
     key_path=os.getenv("KLYROW_POSTAL_WEBHOOK_PUBLIC_KEY","")
@@ -173,10 +203,12 @@ async def postal_native_hook(request:Request,x_postal_signature_256:str=Header(d
     if not item:
         item=PostalEvent(id=event_id,event_type=canonical,correlation_id=correlation,message_id=message_id,tenant_id=tenant,payload=json.dumps(normalized,separators=(",",":"),sort_keys=True)); s.add(item)
     item.attempts=(item.attempts or 0)+1; item.updated_at=datetime.now(timezone.utc); s.commit()
+    canonical_status=persist_email_event(s,event_id=event_id,tenant_id=tenant,message_id=message_id,correlation_id=correlation,event_type=canonical,recipient=normalized.get("recipient"),raw_status=normalized.get("status"),payload=item.payload)
+    normalized["canonical_status"]=canonical_status
     delivered=await emit_middleware("klyrow."+canonical,{**normalized,"customer_id":tenant})
     item=s.get(PostalEvent,event_id)
     if delivered:
-        item.state="delivered"; item.last_error=None; s.add(Event(id=str(uuid.uuid4()),tenant_id=tenant,message_id=message_id,kind="klyrow."+canonical,payload=item.payload)); s.commit(); MAIL.labels(canonical.rsplit(".",1)[-1]).inc(); return {"accepted":True}
+        item.state="delivered"; item.last_error=None; s.commit(); MAIL.labels(canonical.rsplit(".",1)[-1]).inc(); return {"accepted":True}
     item.state="dlq" if item.attempts>=5 else "retry"; item.last_error="middleware_delivery_failed"; s.commit()
     raise HTTPException(503,"middleware_delivery_pending")
 
@@ -188,6 +220,34 @@ def startup():
             email=os.getenv("KLYROW_ADMIN_EMAIL"); password=os.getenv("KLYROW_ADMIN_PASSWORD")
             if email and password and len(password)>=14:
                 t=Tenant(id=str(uuid.uuid4()),name="Klyrow",quota=int(os.getenv("KLYROW_DAILY_QUOTA","10000"))); s.add(t); s.add(User(id=str(uuid.uuid4()),tenant_id=t.id,email=email.lower(),password_hash=ph.hash(password),role="platform_admin")); s.commit()
+
+async def postal_retry_loop():
+    while True:
+        await asyncio.sleep(5)
+        try:
+            with DB() as s:
+                pending=list(s.scalars(select(PostalEvent).where(PostalEvent.state=="retry",PostalEvent.attempts<5).order_by(PostalEvent.updated_at).limit(20)).all())
+            for snapshot in pending:
+                updated=snapshot.updated_at
+                if updated.tzinfo is None:updated=updated.replace(tzinfo=timezone.utc)
+                if (datetime.now(timezone.utc)-updated).total_seconds()<min(60,2**max(snapshot.attempts,1)):continue
+                payload=json.loads(snapshot.payload)
+                delivered=await emit_middleware("klyrow."+snapshot.event_type,{**payload,"customer_id":snapshot.tenant_id})
+                with DB() as s:
+                    item=s.get(PostalEvent,snapshot.id)
+                    if not item or item.state!="retry":continue
+                    item.attempts=(item.attempts or 0)+1;item.updated_at=datetime.now(timezone.utc)
+                    if delivered:
+                        item.state="delivered";item.last_error=None
+                    elif item.attempts>=5:
+                        item.state="dlq";item.last_error="middleware_delivery_failed"
+                    s.commit()
+        except Exception as exc:
+            print(json.dumps({"level":"warning","system":"klyrow","event":"postal_retry_worker_error","error":type(exc).__name__}))
+
+@app.on_event("startup")
+async def start_postal_retry_worker():
+    asyncio.create_task(postal_retry_loop())
 
 @app.middleware("http")
 async def headers(request, call_next):
@@ -297,13 +357,21 @@ async def postal_hook(request:Request,x_klyrow_timestamp:str=Header(),x_klyrow_e
     if abs(time.time()-ts)>300: raise HTTPException(401,"expired_signature")
     expected=hmac.new(secret,x_klyrow_timestamp.encode()+b"."+x_klyrow_event_id.encode()+b"."+body,hashlib.sha256).hexdigest()
     if not secret or not hmac.compare_digest(expected,x_klyrow_signature): raise HTTPException(401,"invalid_signature")
-    if s.get(Replay,x_klyrow_event_id): raise HTTPException(409,"replayed_event")
-    s.add(Replay(id=x_klyrow_event_id)); payload=json.loads(body); mid=payload.get("message_id"); tenant=payload.get("tenant_id")
-    if mid and tenant: s.add(Event(id=str(uuid.uuid4()),tenant_id=tenant,message_id=mid,kind=payload.get("event","email.unknown"),payload=body.decode()))
+    if s.get(Replay,x_klyrow_event_id): return {"accepted":True,"duplicate":True}
+    s.add(Replay(id=x_klyrow_event_id)); payload=json.loads(body); mid=str(payload.get("message_id") or ""); tenant=payload.get("tenant_id")
     event_type=payload.get("event","klyrow.email.unknown"); event_type=event_type if event_type.startswith("klyrow.") else "klyrow."+event_type
-    if event_type in {"klyrow.email.bounced","klyrow.email.complained","klyrow.email.unsubscribed"} and tenant and payload.get("recipient"):
-        if not s.scalar(select(Suppression).where(Suppression.tenant_id==tenant,Suppression.email==payload["recipient"].lower())): s.add(Suppression(id=str(uuid.uuid4()),tenant_id=tenant,email=payload["recipient"].lower(),reason=event_type.rsplit(".",1)[-1]))
-    s.commit(); await emit_middleware(event_type,{**payload,"event_id":x_klyrow_event_id,"customer_id":tenant}); return {"accepted":True}
+    local_type=event_type.removeprefix("klyrow.")
+    correlation=str(payload.get("correlation_id") or mid or x_klyrow_event_id)
+    if tenant:persist_email_event(s,event_id=x_klyrow_event_id,tenant_id=tenant,message_id=mid,correlation_id=correlation,event_type=local_type,recipient=payload.get("recipient"),raw_status=payload.get("status"),payload=body.decode())
+    else:s.commit()
+    normalized={**payload,"event_id":x_klyrow_event_id,"customer_id":tenant,"canonical_status":TERMINAL_MESSAGE_STATUSES.get(local_type,local_type.rsplit(".",1)[-1])}
+    delivery=s.get(PostalEvent,x_klyrow_event_id)
+    if not delivery:
+        delivery=PostalEvent(id=x_klyrow_event_id,event_type=local_type,correlation_id=correlation,message_id=mid,tenant_id=tenant,payload=json.dumps(normalized,separators=(",",":"),sort_keys=True),state="pending",attempts=0);s.add(delivery)
+    delivery.attempts=(delivery.attempts or 0)+1;delivery.updated_at=datetime.now(timezone.utc);s.commit()
+    if await emit_middleware(event_type,normalized):
+        delivery=s.get(PostalEvent,x_klyrow_event_id);delivery.state="delivered";delivery.last_error=None;s.commit();return {"accepted":True,"duplicate":False}
+    delivery=s.get(PostalEvent,x_klyrow_event_id);delivery.state="dlq" if delivery.attempts>=5 else "retry";delivery.last_error="middleware_delivery_failed";s.commit();raise HTTPException(503,"middleware_delivery_pending")
 
 @app.get("/v1/contacts")
 def contacts(ctx=Depends(auth),s:Session=Depends(db)): return s.scalars(select(Contact).where(Contact.tenant_id==ctx["tenant"])).all()
