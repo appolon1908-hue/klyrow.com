@@ -1,0 +1,40 @@
+name: Klyrow gateway CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: apps/gateway/requirements.txt
+      - name: Install gateway and test dependencies
+        run: pip install -r apps/gateway/requirements.txt pytest
+      - name: Compile and test
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m compileall -q apps/gateway
+          pytest -q tests
+      - name: Build immutable candidate
+        run: docker build -t "klyrow-gateway:${GITHUB_SHA}" apps/gateway
+
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
