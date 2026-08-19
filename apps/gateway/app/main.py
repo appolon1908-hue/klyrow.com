@@ -94,6 +94,20 @@ def auth(authorization:str=Header(default=""), x_klyrow_tenant_id:Optional[str]=
     while q and q[0]<now-60:q.popleft()
     if len(q)>=int(os.getenv("KLYROW_RATE_PER_MINUTE","60")): raise HTTPException(429,"rate_limit_exceeded")
     q.append(now); return ctx
+
+def beyvra_service_auth(authorization:str=Header(default=""),x_service_identity:str=Header(default=""),x_service_scopes:str=Header(default=""),s:Session=Depends(db)):
+    """Dedicated Server A identity that grants email send/status only."""
+    token_file=os.getenv("BEYVRA_EMAIL_SERVICE_TOKEN_FILE","")
+    try: expected=Path(token_file).read_text(encoding="utf-8").strip()
+    except OSError: raise HTTPException(503,"service_identity_unavailable")
+    supplied=authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
+    scopes=set(x_service_scopes.split())
+    if not expected or not hmac.compare_digest(supplied,expected):raise HTTPException(401,"invalid_service_identity")
+    if x_service_identity!="codestra-server-a:beyvra-email-production":raise HTTPException(403,"wrong_service_identity")
+    if "email.send" not in scopes:raise HTTPException(403,"email_send_scope_required")
+    tenant_id=os.getenv("BEYVRA_EMAIL_TENANT_ID","");tenant=s.get(Tenant,tenant_id) if tenant_id else None
+    if not tenant or not tenant.enabled:raise HTTPException(403,"beyvra_tenant_unavailable")
+    return {"sub":"beyvra-email-production","tenant":tenant.id,"role":"email_service","service":True,"scopes":scopes}
 def require(*roles):
     def inner(ctx=Depends(auth)):
         if ctx["role"] not in roles: raise HTTPException(403,"insufficient_role")
@@ -309,6 +323,16 @@ def domain_verify(did:str,ctx=Depends(require("platform_admin","tenant_admin")),
     s.commit(); return {"verified":d.verified}
 @app.post("/v1/email/send",status_code=202)
 async def send(x:MailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
+    return await _send(x,ctx,s,idempotency_key)
+
+@app.post("/v1/internal/email/send",status_code=202)
+async def beyvra_send(x:MailIn,ctx=Depends(beyvra_service_auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
+    if x.stream!="transactional":raise HTTPException(403,"transactional_only")
+    allowed={"no-reply@beyvra.com","security@beyvra.com","trading@beyvra.com","statements@beyvra.com","support@beyvra.com"}
+    if x.sender.lower() not in allowed:raise HTTPException(403,"sender_spoofing_denied")
+    return await _send(x,ctx,s,idempotency_key)
+
+async def _send(x:MailIn,ctx,s,idempotency_key):
     if not idempotency_key: raise HTTPException(400,"idempotency_key_required")
     request_hash=sha(x.model_dump_json())
     prior=s.scalar(select(Idempotency).where(Idempotency.key==idempotency_key,Idempotency.tenant_id==ctx["tenant"]))
@@ -331,7 +355,7 @@ async def send(x:MailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:
     if not SAFE_MODE:
         headers={"X-Server-API-Key":os.environ["KLYROW_POSTAL_API_KEY"]}; payload={"to":[x.to],"from":x.sender,"subject":x.subject,"html_body":x.html,"plain_body":x.text}
         async with httpx.AsyncClient(timeout=10) as c: r=await c.post(os.environ["KLYROW_POSTAL_API_URL"]+"/api/v1/send/message",headers=headers,json=payload); r.raise_for_status()
-    result={"id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=x.to.lower(),sender=x.sender.lower(),subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload=json.dumps({"stream":x.stream}))); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageLedger(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind="message."+x.stream,quantity=1,reference=mid)); s.commit(); MAIL.labels("queued").inc(); await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{"stream":x.stream}}); return result
+    result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=x.to.lower(),sender=x.sender.lower(),subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload=json.dumps({"stream":x.stream}))); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageLedger(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind="message."+x.stream,quantity=1,reference=mid)); s.commit(); MAIL.labels("queued").inc(); await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{"stream":x.stream}}); return result
 
 @app.post("/v1/email/bulk",status_code=202)
 async def bulk(x:BulkMailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
