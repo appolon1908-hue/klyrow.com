@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -u
+cd "$(dirname "$0")/.."
+
+pass=0
+fail=0
+check() { if "$@" >/dev/null 2>&1; then printf 'PASS  %s\n' "$*"; pass=$((pass+1)); else printf 'FAIL  %s\n' "$*"; fail=$((fail+1)); fi; }
+has_dns() { dig @1.1.1.1 +short "$2" "$1" | grep -Fq "$3"; }
+has_authoritative_ptr() {
+  local ns
+  for ns in $(dig +short NS 128.27.37.in-addr.arpa); do
+    [[ "$(dig @"$ns" +short PTR 39.128.27.37.in-addr.arpa)" == mail.klyrow.com. ]] || return 1
+  done
+}
+smtp_banner() {
+  local domain="$1" mx
+  mx="$(dig @1.1.1.1 +short MX "$domain" | sort -n | awk 'NR==1 {print $2}' | sed 's/\.$//')"
+  [[ -n "$mx" ]] || return 1
+  timeout 10 bash -c "exec 3<>/dev/tcp/$mx/25; IFS= read -r -t 5 line <&3; [[ \$line == 220* ]]; exec 3<&-; exec 3>&-"
+}
+
+check docker compose ps --status running
+check has_dns mail.klyrow.com A 37.27.128.39
+check has_dns klyrow.com MX mail.klyrow.com.
+check has_dns bounce.klyrow.com MX mail.klyrow.com.
+check has_dns klyrow.com TXT 'include:spf.klyrow.com'
+check has_dns spf.klyrow.com TXT 'v=spf1 ip4:37.27.128.39 -all'
+check has_dns bounce.klyrow.com TXT 'v=spf1 include:spf.klyrow.com -all'
+check has_dns postal-QQaKrT._domainkey.klyrow.com TXT 'v=DKIM1;'
+check has_dns klyrow.com TXT 'postal-verification rjXOtdO7qcqtmMocTcnpMv0xiczgwY1w'
+check has_dns _dmarc.klyrow.com TXT 'p=none'
+check bash -c "[[ \$(dig @1.1.1.1 +short TXT _dmarc.klyrow.com | wc -l) -eq 1 ]]"
+check has_dns psrp.klyrow.com CNAME bounce.klyrow.com.
+check has_authoritative_ptr
+check bash -c "[[ \$(dig @1.1.1.1 +short A mail.klyrow.com) == 37.27.128.39 ]]"
+check smtp_banner gmail.com
+check smtp_banner outlook.com
+check bash -c "{ sleep 1; printf 'EHLO readiness.klyrow.com\\r\\nQUIT\\r\\n'; } | timeout 8 nc 127.0.0.1 2525 | grep -q STARTTLS && openssl s_client -starttls smtp -connect 127.0.0.1:2525 -servername mail.klyrow.com -verify_hostname mail.klyrow.com -verify_return_error </dev/null 2>&1 | grep -q 'Verify return code: 0'"
+check bash -c "timeout 10 nc -4 -z gmail-smtp-in.l.google.com 25"
+check bash -c "docker compose exec -T rabbitmq rabbitmq-diagnostics -q ping"
+check bash -c "docker compose exec -T postgres pg_isready -U klyrow -d klyrow"
+check bash -c "docker compose exec -T postal-db healthcheck.sh --connect --innodb_initialized"
+check bash -c "docker compose exec -T mautic-db healthcheck.sh --connect --innodb_initialized"
+check bash -c "df -P / | awk 'NR==2 {gsub(/%/,\"\",\$5); exit !(\$5 < 85)}'"
+
+printf 'SUMMARY pass=%d fail=%d\n' "$pass" "$fail"
+(( fail == 0 ))

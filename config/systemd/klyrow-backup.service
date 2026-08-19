@@ -1,0 +1,9 @@
+[Unit]
+Description=Klyrow encrypted-storage-ready database and configuration backup
+After=docker.service klyrow-stack.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/klyrow.com
+ExecStart=/root/klyrow.com/scripts/backup
+UMask=0077

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/lib.sh"; require_env; set -a; source .env; set +a
+tenant_id="$(docker compose exec -T postgres psql -U klyrow -d klyrow -Atqc 'SELECT id FROM tenants ORDER BY id LIMIT 1')"
+[[ -n "$tenant_id" ]] || { echo "No Klyrow tenant exists for the synthetic webhook test" >&2; exit 1; }
+body="{\"event\":\"email.delivered\",\"message_id\":\"synthetic-webhook-test\",\"tenant_id\":\"$tenant_id\"}"; ts="$(date +%s)"; id="$(openssl rand -hex 16)"
+sig="$(printf '%s' "$ts.$id.$body" | openssl dgst -sha256 -hmac "$KLYROW_WEBHOOK_SECRET" -hex | awk '{print $2}')"
+curl -fsS -X POST http://127.0.0.1:18000/v1/webhooks/postal -H "Content-Type: application/json" -H "X-Klyrow-Timestamp: $ts" -H "X-Klyrow-Event-Id: $id" -H "X-Klyrow-Signature: $sig" --data "$body"

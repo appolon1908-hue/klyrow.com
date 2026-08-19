@@ -1,0 +1,55 @@
+version: 2
+postal:
+  web_hostname: app.klyrow.com
+  web_protocol: https
+  smtp_hostname: mail.klyrow.com
+  use_ip_pools: false
+  signing_key_path: $config-file-root/signing.key
+  # Postal webhooks terminate at the signed Klyrow normalization adapter.
+  # Other RFC1918 destinations remain blocked by Postal's SSRF guard.
+  allowed_request_destinations:
+    - gateway
+web_server:
+  default_port: 5000
+  default_bind_address: 0.0.0.0
+worker:
+  threads: 2
+main_db:
+  host: postal-db
+  port: 3306
+  username: postal
+  password: __POSTAL_DB_PASSWORD__
+  database: postal
+message_db:
+  host: postal-db
+  port: 3306
+  username: postal
+  password: __POSTAL_DB_PASSWORD__
+  database_name_prefix: postal
+rabbitmq:
+  host: rabbitmq
+  username: postal
+  password: __POSTAL_RABBITMQ_PASSWORD__
+  vhost: /
+logging:
+  enabled: true
+  highlighting_enabled: false
+smtp_server:
+  default_port: 25
+  default_bind_address: "::"
+  tls_enabled: true
+  tls_certificate_path: $config-file-root/smtp.cert
+  tls_private_key_path: $config-file-root/smtp.key
+  log_connections: true
+dns:
+  mx_records: [mail.klyrow.com]
+  spf_include: spf.klyrow.com
+  return_path_domain: bounce.klyrow.com
+  route_domain: bounce.klyrow.com
+  track_domain: track.klyrow.com
+  helo_hostname: mail.klyrow.com
+  dkim_identifier: postal
+  custom_return_path_prefix: psrp
+rails:
+  environment: production
+  secret_key: __POSTAL_SECRET_KEY__

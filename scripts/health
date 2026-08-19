@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/lib.sh"; require_env
+docker compose ps
+curl --fail --silent --show-error http://127.0.0.1:18000/v1/health
+docker compose exec -T rabbitmq rabbitmq-diagnostics -q ping
+docker compose exec -T postgres pg_isready -U klyrow -d klyrow
+docker compose exec -T postal-db healthcheck.sh --connect --innodb_initialized
+docker compose exec -T mautic-db healthcheck.sh --connect --innodb_initialized
+df -P /

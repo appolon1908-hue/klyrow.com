@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/lib.sh"; require_env
+umask 077; stamp="$(date -u +%Y%m%dT%H%M%SZ)"; dest="${1:-backups/$stamp}"; mkdir -p "$dest"
+docker compose exec -T postgres pg_dump -U klyrow -Fc klyrow > "$dest/klyrow.dump"
+docker compose exec -T mautic-db mariadb-dump -umautic -p"$(sed -n 's/^MAUTIC_DB_PASSWORD=//p' .env)" --single-transaction mautic | gzip > "$dest/mautic.sql.gz"
+docker compose exec -T postal-db mariadb-dump -upostal -p"$(sed -n 's/^POSTAL_DB_PASSWORD=//p' .env)" --single-transaction --all-databases | gzip > "$dest/postal.sql.gz"
+tar -czf "$dest/config.tar.gz" config docker docs scripts secrets docker-compose.yml .env
+sha256sum "$dest"/* > "$dest/SHA256SUMS"
+echo "$dest"
