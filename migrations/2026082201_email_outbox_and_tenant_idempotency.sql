@@ -17,10 +17,20 @@ WHERE id IS NULL;
 ALTER TABLE idempotency_keys ALTER COLUMN id SET NOT NULL;
 ALTER TABLE idempotency_keys DROP CONSTRAINT IF EXISTS idempotency_keys_pkey;
 ALTER TABLE idempotency_keys ADD CONSTRAINT idempotency_keys_pkey PRIMARY KEY (id);
-DO $$ BEGIN
-  ALTER TABLE idempotency_keys
-    ADD CONSTRAINT uq_idempotency_tenant_key UNIQUE (tenant_id, key);
-EXCEPTION WHEN duplicate_object THEN NULL;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'idempotency_keys'::regclass
+      AND conname = 'uq_idempotency_tenant_key'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM pg_class
+    WHERE relname = 'uq_idempotency_tenant_key'
+      AND relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = 'idempotency_keys'::regclass)
+  ) THEN
+    ALTER TABLE idempotency_keys
+      ADD CONSTRAINT uq_idempotency_tenant_key UNIQUE (tenant_id, key);
+  END IF;
 END $$;
 
 CREATE TABLE IF NOT EXISTS email_outbox (
@@ -41,5 +51,27 @@ ALTER TABLE email_outbox ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz;
 CREATE INDEX IF NOT EXISTS email_outbox_claim
   ON email_outbox(state, next_attempt_at, created_at)
   WHERE state IN ('pending', 'retry');
+
+CREATE TABLE IF NOT EXISTS production_canary_gate (
+  gate_key text PRIMARY KEY,
+  reserved_deliveries integer NOT NULL DEFAULT 0,
+  claimed_deliveries integer NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT production_canary_gate_nonnegative CHECK (reserved_deliveries >= 0),
+  CONSTRAINT production_canary_gate_claimed_nonnegative CHECK (claimed_deliveries >= 0),
+  CONSTRAINT production_canary_gate_claim_bounds CHECK (claimed_deliveries <= reserved_deliveries)
+);
+ALTER TABLE production_canary_gate ADD COLUMN IF NOT EXISTS claimed_deliveries integer NOT NULL DEFAULT 0;
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='production_canary_gate_claimed_nonnegative' AND conrelid='production_canary_gate'::regclass) THEN
+  ALTER TABLE production_canary_gate ADD CONSTRAINT production_canary_gate_claimed_nonnegative CHECK (claimed_deliveries >= 0);
+ END IF;
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='production_canary_gate_claim_bounds' AND conrelid='production_canary_gate'::regclass) THEN
+  ALTER TABLE production_canary_gate ADD CONSTRAINT production_canary_gate_claim_bounds CHECK (claimed_deliveries <= reserved_deliveries);
+ END IF;
+END $$;
+INSERT INTO production_canary_gate(gate_key, reserved_deliveries)
+VALUES ('klyrow-single-domain', 0)
+ON CONFLICT (gate_key) DO NOTHING;
 
 COMMIT;

@@ -1,7 +1,18 @@
 BEGIN;
-DO $$ BEGIN
- ALTER TABLE domains ADD CONSTRAINT uq_domain_tenant_name UNIQUE (tenant_id,domain);
-EXCEPTION WHEN duplicate_object THEN NULL;
+DO $$
+BEGIN
+ IF NOT EXISTS (
+   SELECT 1 FROM pg_constraint
+   WHERE conrelid = 'domains'::regclass
+     AND conname = 'uq_domain_tenant_name'
+ ) AND NOT EXISTS (
+   SELECT 1 FROM pg_class
+   WHERE relname = 'uq_domain_tenant_name'
+     AND relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = 'domains'::regclass)
+ ) THEN
+   ALTER TABLE domains
+     ADD CONSTRAINT uq_domain_tenant_name UNIQUE (tenant_id,domain);
+ END IF;
 END $$;
 CREATE TABLE IF NOT EXISTS allowed_senders (
  id VARCHAR PRIMARY KEY, tenant_id VARCHAR NOT NULL REFERENCES tenants(id), address VARCHAR NOT NULL,
