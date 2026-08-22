@@ -1,0 +1,28 @@
+groups:
+  - name: klyrow-mail-engine
+    rules:
+      - alert: KlyrowGatewayUnavailable
+        expr: up{job="klyrow"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "Klyrow provider gateway unavailable"}
+      - alert: KlyrowMailDeadLetter
+        expr: klyrow_provider_queue_messages{status="DEAD_LETTER"} > 0
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "Klyrow mail entered dead letter"}
+      - alert: KlyrowEventDeliveryStalled
+        expr: klyrow_provider_events{state=~"RETRY|DEAD_LETTER"} > 0
+        for: 10m
+        labels: {severity: critical}
+        annotations: {summary: "Klyrow provider events are not reaching Server A"}
+      - alert: KlyrowUsageDeliveryStalled
+        expr: klyrow_provider_usage_events{state=~"RETRY|DEAD_LETTER"} > 0
+        for: 10m
+        labels: {severity: critical}
+        annotations: {summary: "Klyrow usage events are not reaching its billing control plane"}
+      - alert: KlyrowHostDiskPressure
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.15
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Klyrow host disk space below 15 percent"}

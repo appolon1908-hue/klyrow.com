@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
-from prometheus_client import Counter, Histogram, generate_latest
+from prometheus_client import Counter, Gauge, Histogram, generate_latest
 from pydantic import BaseModel, EmailStr, Field, model_validator
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -37,6 +37,9 @@ app=FastAPI(title="Klyrow API", version="1.0.0", docs_url=None if os.getenv("KLY
 REQUESTS=Counter("klyrow_http_requests_total","Requests",["path","status"])
 MAIL=Counter("klyrow_mail_total","Mail lifecycle",["event"])
 LATENCY=Histogram("klyrow_http_request_duration_seconds","Request latency",["path"])
+PROVIDER_QUEUE=Gauge("klyrow_provider_queue_messages","Provider messages by status",["status"])
+PROVIDER_EVENTS=Gauge("klyrow_provider_events","Provider events by state",["state"])
+PROVIDER_USAGE=Gauge("klyrow_provider_usage_events","Provider usage events by state",["state"])
 rate_buckets=defaultdict(deque)
 _jwks_clients={}
 
@@ -280,6 +283,16 @@ def persist_email_event(s:Session, *, event_id:str, tenant_id:str, message_id:st
     canonical_status=TERMINAL_MESSAGE_STATUSES.get(event_type,event_type.rsplit(".",1)[-1])
     local_message=s.get(Message,message_id) or s.get(Message,correlation_id)
     if local_message:local_message.status=canonical_status
+    from .provider import ProviderMessage
+    provider_message=s.scalar(select(ProviderMessage).where(ProviderMessage.tenant_id==tenant_id,
+        or_(ProviderMessage.id==message_id,ProviderMessage.provider_message_id==message_id,
+            ProviderMessage.correlation_id==correlation_id)))
+    if provider_message:
+        provider_status={"sent":"SENT","delivered":"DELIVERED","soft_bounce":"BOUNCED_SOFT",
+            "hard_bounce":"BOUNCED_HARD","complaint":"COMPLAINED","failed":"FAILED",
+            "rejected":"FAILED"}.get(canonical_status,canonical_status.upper())
+        if provider_status in {"SENT","DELIVERED","BOUNCED_SOFT","BOUNCED_HARD","COMPLAINED","FAILED","DEFERRED"}:
+            provider_message.status=provider_status;provider_message.updated_at=datetime.now(timezone.utc)
     if not s.get(Event,event_id):
         s.add(Event(id=event_id,tenant_id=tenant_id,message_id=local_message.id if local_message else message_id,kind="klyrow."+event_type,payload=payload))
         s.add(Audit(id=str(uuid.uuid4()),tenant_id=tenant_id,actor="provider:postal",action="email.status."+canonical_status))
@@ -457,6 +470,13 @@ def metrics(authorization:str=Header(default="")):
     except OSError:raise HTTPException(404,"not_found")
     supplied=authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
     if not expected or not hmac.compare_digest(supplied,expected):raise HTTPException(404,"not_found")
+    from .provider import ProviderEvent, ProviderMessage, ProviderUsageEvent
+    with DB() as s:
+        for status in ("QUEUED","PROCESSING","DEFERRED","FAILED","DEAD_LETTER"):
+            PROVIDER_QUEUE.labels(status).set(s.scalar(select(func.count()).select_from(ProviderMessage).where(ProviderMessage.status==status)) or 0)
+        for state in ("PENDING","RETRY","DELIVERED","DEAD_LETTER"):
+            PROVIDER_EVENTS.labels(state).set(s.scalar(select(func.count()).select_from(ProviderEvent).where(ProviderEvent.state==state)) or 0)
+            PROVIDER_USAGE.labels(state).set(s.scalar(select(func.count()).select_from(ProviderUsageEvent).where(ProviderUsageEvent.state==state)) or 0)
     from fastapi.responses import Response; return Response(generate_latest(),media_type="text/plain")
 @app.post("/v1/auth/login")
 def login(x:Login,request:Request,s:Session=Depends(db)):
@@ -519,7 +539,7 @@ def domain_verify(did:str,ctx=Depends(require("platform_admin","tenant_admin")),
 async def send(x:MailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
     return await _send(x,ctx,s,idempotency_key)
 
-@app.post("/v1/internal/email/send",status_code=202)
+@app.post("/v1/internal/email/beyvra/send",status_code=202)
 async def beyvra_send(x:MailIn,ctx=Depends(beyvra_service_auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
     if x.stream!="transactional":raise HTTPException(403,"transactional_only")
     allowed={"no-reply@beyvra.com","security@beyvra.com","trading@beyvra.com","statements@beyvra.com","support@beyvra.com"}
@@ -678,3 +698,15 @@ from .delivery_controls import router as delivery_controls_router
 app.include_router(delivery_controls_router)
 from .preferences import router as preferences_router
 app.include_router(preferences_router)
+from .provider import provider_worker_loop, reconcile_legacy_registry, router as provider_router, status_router as provider_status_router
+app.include_router(provider_router)
+app.include_router(provider_status_router)
+
+@app.on_event("startup")
+def reconcile_provider_registry_on_startup():
+    with DB() as s:
+        reconcile_legacy_registry(s)
+
+@app.on_event("startup")
+async def start_provider_worker():
+    asyncio.create_task(provider_worker_loop())

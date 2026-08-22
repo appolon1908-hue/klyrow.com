@@ -9,6 +9,7 @@ services:
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
       KLYROW_POSTAL_API_KEY_FILE: /run/secrets/klyrow_postal_api_key
       KLYROW_METRICS_TOKEN_FILE: /run/secrets/klyrow_metrics_token
+      KLYROW_DKIM_KEY_DIR: /var/lib/klyrow/dkim
       KLYROW_CANARY_ALLOWED_DOMAIN: ${KLYROW_CANARY_ALLOWED_DOMAIN:-}
       KLYROW_CANARY_ALLOWED_SENDER: ${KLYROW_CANARY_ALLOWED_SENDER:-}
       KLYROW_CANARY_ALLOWED_RECIPIENT: ${KLYROW_CANARY_ALLOWED_RECIPIENT:-}
@@ -25,6 +26,7 @@ services:
     secrets: [klyrow_session_secret, klyrow_postal_api_key, klyrow_metrics_token]
     volumes:
       - ./secrets/postal/webhook-signing-public.pem:/run/klyrow/postal-webhook-signing-public.pem:ro
+      - dkim_keys:/var/lib/klyrow/dkim
     depends_on:
       postgres: {condition: service_healthy}
       gateway-migrate: {condition: service_completed_successfully}
@@ -39,6 +41,36 @@ services:
     cap_drop: [ALL]
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/health')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+  smtp-relay:
+    build: ./apps/gateway
+    environment:
+      KLYROW_DATABASE_URL: ${KLYROW_DATABASE_URL:?required}
+      KLYROW_SMTP_PORT: "8025"
+      KLYROW_SMTP_HELO: mail.klyrow.com
+      KLYROW_SANDBOX_DOMAIN: klyrow-sink.test
+      KLYROW_SAFE_MODE: "true"
+      KLYROW_SMTP_TLS_CERT: /run/klyrow/smtp.cert
+      KLYROW_SMTP_TLS_KEY: /run/klyrow/smtp.key
+    command: ["python", "-m", "app.smtp_relay"]
+    user: "999:999"
+    volumes:
+      - ./secrets/postal/smtp.cert:/run/klyrow/smtp.cert:ro
+      - ./secrets/postal/smtp.key:/run/klyrow/smtp.key:ro
+    depends_on:
+      postgres: {condition: service_healthy}
+      gateway-migrate: {condition: service_completed_successfully}
+    ports: ["10.40.0.4:587:8025"]
+    networks: [frontend, backend]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, python, -c, "import socket; s=socket.create_connection(('127.0.0.1',8025),3); assert s.recv(256).startswith(b'220'); s.close()"]
       interval: 20s
       timeout: 5s
       retries: 5
@@ -207,7 +239,7 @@ services:
   prometheus:
     image: prom/prometheus:v3.5.0
     command: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.retention.time=30d]
-    volumes: [./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro, prometheus_data:/prometheus]
+    volumes: [./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro, ./config/alerts.yml:/etc/prometheus/alerts.yml:ro, prometheus_data:/prometheus]
     secrets: [klyrow_metrics_token]
     networks: [backend]
     restart: unless-stopped
@@ -244,6 +276,7 @@ volumes:
   postal_assets: {}
   prometheus_data: {}
   grafana_data: {}
+  dkim_keys: {}
 secrets:
   klyrow_session_secret:
     file: '${KLYROW_SESSION_SECRET_FILE:?set the root-owned session secret path}'

@@ -64,11 +64,11 @@ def test_webhook_ssrf_targets_are_rejected():
 def test_beyvra_service_scope_sender_policy_and_idempotency():
     base={"Authorization":"Bearer bounded-beyvra-test-token","X-Service-Identity":"codestra-server-a:beyvra-email-production","X-Service-Scopes":"email.send email.status","Idempotency-Key":"beyvra-1"}
     payload={"to":"synthetic@example.net","sender":"support@beyvra.com","subject":"Synthetic","html":"<p>Synthetic</p>","text":"Synthetic","stream":"transactional"}
-    assert client.post("/v1/internal/email/send",headers={**base,"X-Service-Scopes":"email.status"},json=payload).status_code==403
-    assert client.post("/v1/internal/email/send",headers={**base,"Idempotency-Key":"beyvra-spoof"},json={**payload,"sender":"spoof@beyvra.com"}).status_code==403
+    assert client.post("/v1/internal/email/beyvra/send",headers={**base,"X-Service-Scopes":"email.status"},json=payload).status_code==403
+    assert client.post("/v1/internal/email/beyvra/send",headers={**base,"Idempotency-Key":"beyvra-spoof"},json={**payload,"sender":"spoof@beyvra.com"}).status_code==403
     with DB() as s:s.add(Domain(id="beyvra-domain",tenant_id="a",domain="beyvra.com",token="fixture",verified=True));s.add(AllowedSender(id="beyvra-support",tenant_id="a",address="support@beyvra.com",role="support"));s.commit()
     with patch("apps.gateway.app.main.emit_middleware",new=AsyncMock(return_value=True)):
-        first=client.post("/v1/internal/email/send",headers=base,json=payload);second=client.post("/v1/internal/email/send",headers=base,json=payload)
+        first=client.post("/v1/internal/email/beyvra/send",headers=base,json=payload);second=client.post("/v1/internal/email/beyvra/send",headers=base,json=payload)
     assert first.status_code==202 and first.json()["provider_message_id"]==second.json()["provider_message_id"]
 def test_contacts_campaigns_and_isolation():
     a,b=hdr("a"),hdr("b"); assert client.post("/v1/contacts",headers=a,json={"email":"one@example.net","name":"One"}).status_code==200; assert len(client.get("/v1/contacts",headers=a).json())==1; assert client.get("/v1/contacts",headers=b).json()==[]
