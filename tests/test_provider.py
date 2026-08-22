@@ -1,0 +1,285 @@
+import base64
+import asyncio
+import os
+import pytest
+
+os.environ.update(
+    KLYROW_DATABASE_URL="sqlite:///./test-provider.db",
+    KLYROW_SESSION_SECRET="test-secret-provider-32-characters-minimum",
+    KLYROW_SAFE_MODE="true",
+    KLYROW_ENV="test",
+    KLYROW_SANDBOX_DOMAIN="klyrow-sink.test",
+)
+
+from fastapi.testclient import TestClient
+
+from apps.gateway.app.main import AllowedSender, Base, DB, Domain, InboundRouteConfig, Tenant, app, auth, engine
+from apps.gateway.app.provider import DkimKey, ProviderDomain, ProviderEvent, ProviderInbound, ProviderMessage, ProviderUsageEvent, SandboxCapture, SenderIdentity, SmtpCredential, dispatch_provider_outbox, now, recover_expired_leases
+from datetime import timedelta
+from unittest.mock import AsyncMock, patch
+
+client = TestClient(app)
+identity = {"sub": "server-a-test", "tenant": "tenant-a", "role": "platform_admin", "service": True, "permissions": ["klyrow.send"]}
+
+
+@pytest.fixture(autouse=True)
+def provider_identity():
+    app.dependency_overrides[auth] = lambda: identity
+    yield
+    app.dependency_overrides.pop(auth, None)
+
+
+def setup_module():
+    Base.metadata.drop_all(engine)
+    Base.metadata.create_all(engine)
+    with DB() as session:
+        session.add_all([Tenant(id="tenant-a", name="A", quota=100), Tenant(id="tenant-b", name="B", quota=100)])
+        session.add(Domain(id="legacy-domain", tenant_id="tenant-a", domain="codestra.co", token="verified", verified=True))
+        session.add(AllowedSender(id="allowed-support", tenant_id="tenant-a", address="support@codestra.co", role="support", enabled=True))
+        session.add(InboundRouteConfig(id="route-support", tenant_id="tenant-a", address="support@codestra.co", destination_kind="webhook", destination_ref="server-a:odoo-support", verified=True, enabled=True))
+        session.commit()
+
+
+def headers(key="provider-idempotency-1", correlation="provider-correlation-1"):
+    return {"Idempotency-Key": key, "X-Correlation-Id": correlation}
+
+
+def mail(**changes):
+    payload = {"sender": "support@codestra.co", "recipient": "capture@klyrow-sink.test", "subject": "Sandbox", "text": "No Internet delivery", "stream": "TRANSACTIONAL", "sandbox": True}
+    return {**payload, **changes}
+
+
+def provision():
+    made = client.post("/v1/internal/email/domains/register", json={"domain": "codestra.co"})
+    domain_id = made.json()["id"]
+    assert client.post("/v1/internal/email/domains/verify", params={"domain_id": domain_id}).json()["verified"] is True
+    assert client.post("/v1/internal/email/senders", json={"domain_id": domain_id, "email": "support@codestra.co", "stream": "TRANSACTIONAL"}).status_code in {200, 201}
+    assert client.put("/v1/internal/email/policy", json={"sending_disabled": True, "sandbox_mode": True, "daily_limit": 100, "hourly_limit": 100, "max_message_bytes": 100000, "max_attachment_bytes": 10000, "allowed_test_recipients": [], "reputation_state": "GOOD"}).status_code == 200
+    return domain_id
+
+
+def test_preflight_has_zero_queue_delta_and_blocks_internet():
+    provision()
+    with DB() as session:
+        before = session.query(ProviderMessage).count()
+    result = client.post("/v1/internal/email/preflight", headers={"X-Correlation-Id": "preflight-correlation"}, json=mail())
+    assert result.status_code == 200 and result.json()["dry_run"] is True and result.json()["postal_submitted"] is False
+    with DB() as session:
+        assert session.query(ProviderMessage).count() == before
+    assert client.post("/v1/internal/email/preflight", headers={"X-Correlation-Id": "blocked-correlation"}, json=mail(recipient="person@example.net")).status_code == 403
+
+
+def test_send_idempotency_and_altered_replay():
+    first = client.post("/v1/internal/email/send", headers=headers(), json=mail())
+    assert first.status_code == 202 and first.json()["status"] == "QUEUED" and first.json()["sandbox"] is True, first.text
+    replay = client.post("/v1/internal/email/send", headers=headers(), json=mail())
+    assert replay.status_code == 202 and replay.json()["message_id"] == first.json()["message_id"]
+    altered = client.post("/v1/internal/email/send", headers=headers(), json=mail(subject="Changed"))
+    assert altered.status_code == 409
+
+
+def test_sandbox_worker_captures_content_and_bills_once():
+    result = client.post("/v1/internal/email/operations/process-sandbox")
+    assert result.status_code == 200
+    assert result.json()["provider"] == "internal-smtp-sink"
+    with DB() as session:
+        message = session.query(ProviderMessage).filter_by(idempotency_key="provider-idempotency-1").one()
+        assert message.status == "DELIVERED"
+        capture = session.query(SandboxCapture).filter_by(message_id=message.id).one()
+        assert capture.envelope_to == "capture@klyrow-sink.test"
+        assert "No Internet delivery" in capture.content_json
+        assert session.query(ProviderUsageEvent).filter_by(message_id=message.id).count() == 1
+        assert session.query(ProviderEvent).filter_by(message_id=message.id, kind="message.delivered").count() == 1
+    assert client.post("/v1/internal/email/operations/process-sandbox").json()["count"] == 0
+    with DB() as session:
+        assert session.query(ProviderUsageEvent).filter_by(message_id=message.id).count() == 1
+
+
+def test_suppression_size_filename_and_tenant_isolation():
+    with DB() as session:
+        from apps.gateway.app.main import Suppression
+        session.add(Suppression(id="suppressed", tenant_id="tenant-a", email="capture@klyrow-sink.test", reason="hard_bounce"))
+        session.commit()
+    assert client.post("/v1/internal/email/preflight", headers={"X-Correlation-Id": "suppression-check"}, json=mail()).status_code == 422
+    with DB() as session:
+        session.query(Suppression).delete()
+        session.commit()
+    bad = mail(attachments=[{"filename": "../payload.exe", "content_type": "application/octet-stream", "size": 1}])
+    assert client.post("/v1/internal/email/preflight", headers={"X-Correlation-Id": "filename-check"}, json=bad).status_code == 422
+    identity["tenant"] = "tenant-b"
+    assert client.post("/v1/internal/email/domains/register", json={"domain": "codestra.co"}).status_code == 409
+    identity["tenant"] = "tenant-a"
+
+
+def test_domain_and_sender_kill_switches_are_scoped():
+    domain = client.post("/v1/internal/email/domains/register", json={"domain": "codestra.co"}).json()
+    sender = client.post("/v1/internal/email/senders", json={"domain_id": domain["id"], "email": "support@codestra.co", "stream": "TRANSACTIONAL"}).json()
+    assert client.post(f"/v1/internal/email/senders/{sender['id']}/suspend").json()["status"] == "SUSPENDED"
+    assert client.post("/v1/internal/email/preflight", headers={"X-Correlation-Id": "sender-suspended"}, json=mail()).status_code == 403
+    assert client.post(f"/v1/internal/email/domains/{domain['id']}/suspend").json()["status"] == "SUSPENDED"
+
+
+def inbound_payload(event="postal-event-0001", filename="invoice.pdf"):
+    raw = ("From: Sender <person@example.net>\r\nTo: support@codestra.co\r\n"
+           f"Message-ID: <{event}@example.net>\r\nSubject: Help\r\nMIME-Version: 1.0\r\n"
+           f"Content-Type: application/octet-stream; name=\"{filename}\"\r\n"
+           f"Content-Disposition: attachment; filename=\"{filename}\"\r\n\r\ndata\r\n").encode()
+    return {"provider_event_id": event, "envelope_to": "support@codestra.co", "raw_message_b64": base64.b64encode(raw).decode()}
+
+
+def test_inbound_exact_route_mime_idempotency_and_quarantine():
+    first = client.post("/v1/internal/email/inbound/receive", json=inbound_payload())
+    assert first.status_code == 202 and first.json()["disposition"] == "ACCEPT" and first.json()["duplicate"] is False
+    assert client.post("/v1/internal/email/inbound/receive", json=inbound_payload()).json()["duplicate"] is True
+    same_message = inbound_payload("postal-event-0002")
+    raw = base64.b64decode(same_message["raw_message_b64"]).replace(b"<postal-event-0002@example.net>", b"<postal-event-0001@example.net>")
+    same_message["raw_message_b64"] = base64.b64encode(raw).decode()
+    assert client.post("/v1/internal/email/inbound/receive", json=same_message).json()["duplicate"] is True
+    quarantined = client.post("/v1/internal/email/inbound/receive", json=inbound_payload("postal-event-0003", "payload.exe"))
+    assert quarantined.json()["duplicate"] is False and quarantined.json()["disposition"] == "QUARANTINE"
+    unknown = {**inbound_payload("postal-event-0004"), "envelope_to": "unknown@codestra.co"}
+    assert client.post("/v1/internal/email/inbound/receive", json=unknown).status_code == 404
+    assert client.post("/v1/internal/email/inbound/receive", json={**inbound_payload("postal-event-0005"), "destination_override": "https://attacker.invalid"}).status_code == 403
+    with DB() as session:
+        assert session.query(ProviderInbound).count() == 2
+
+
+def test_inbound_dangerous_filename_rejected():
+    raw = b"From: x@example.net\r\nTo: support@codestra.co\r\nMessage-ID: <unsafe@example.net>\r\nContent-Disposition: attachment; filename=\"../x.exe\"\r\n\r\nx"
+    payload = {"provider_event_id": "postal-event-unsafe", "envelope_to": "support@codestra.co", "raw_message_b64": base64.b64encode(raw).decode()}
+    assert client.post("/v1/internal/email/inbound/receive", json=payload).status_code == 422
+
+
+def test_smtp_credential_once_rotation_revocation_and_tenant_isolation():
+    with DB() as session:
+        domain = session.query(ProviderDomain).filter_by(tenant_id="tenant-a", domain="codestra.co").one()
+        domain.status = "VERIFIED"
+        sender = session.query(SenderIdentity).filter_by(tenant_id="tenant-a", email="support@codestra.co").one()
+        sender.status = "ACTIVE"
+        session.commit()
+        sender_id = sender.id
+    created = client.post("/v1/internal/email/smtp/credentials", json={"allowed_sender_ids": [sender_id], "allowed_streams": ["TRANSACTIONAL"], "expires_in_days": 30})
+    assert created.status_code == 201 and created.json()["secret_display"] == "ONCE"
+    credential = created.json()
+    request = {"username": credential["username"], "password": credential["password"], "sender": "support@codestra.co", "recipient": "capture@klyrow-sink.test", "stream": "TRANSACTIONAL"}
+    assert client.post("/v1/internal/email/smtp/preflight", json=request).json()["authorized"] is True
+    with DB() as session:
+        stored = session.get(SmtpCredential, credential["credential_id"])
+        assert credential["password"] not in stored.secret_hash
+    identity["tenant"] = "tenant-b"
+    assert client.post("/v1/internal/email/smtp/preflight", json=request).status_code == 401
+    identity["tenant"] = "tenant-a"
+    rotated = client.post(f"/v1/internal/email/smtp/credentials/{credential['credential_id']}/rotate").json()
+    assert rotated["password"] != credential["password"]
+    assert client.post("/v1/internal/email/smtp/preflight", json=request).status_code == 401
+    request["password"] = rotated["password"]
+    assert client.post("/v1/internal/email/smtp/preflight", json=request).status_code == 200
+    assert client.post(f"/v1/internal/email/smtp/credentials/{credential['credential_id']}/revoke").status_code == 204
+    assert client.post("/v1/internal/email/smtp/preflight", json=request).status_code == 401
+
+
+def test_worker_lease_recovery_and_dead_letter():
+    with DB() as session:
+        base = dict(tenant_id="tenant-a", sender="support@codestra.co", recipient="capture@klyrow-sink.test",
+            subject="lease", payload_json="{}", stream="TRANSACTIONAL", sandbox=True, request_hash="lease")
+        retry = ProviderMessage(id="lease-retry", correlation_id="lease-retry-corr", idempotency_key="lease-retry-key",
+            status="PROCESSING", attempts=1, lease_expires_at=now()-timedelta(seconds=1), **base)
+        dead = ProviderMessage(id="lease-dead", correlation_id="lease-dead-corr", idempotency_key="lease-dead-key",
+            status="PROCESSING", attempts=5, lease_expires_at=now()-timedelta(seconds=1), **base)
+        session.add_all([retry, dead]);session.commit()
+        assert recover_expired_leases(session) == 2
+        assert session.get(ProviderMessage, "lease-retry").status == "DEFERRED"
+        assert session.get(ProviderMessage, "lease-dead").status == "DEAD_LETTER"
+
+
+def test_dkim_private_key_protection_and_rotation(tmp_path):
+    with DB() as session:
+        domain = session.query(ProviderDomain).filter_by(tenant_id="tenant-a", domain="codestra.co").one()
+        domain.status = "VERIFIED"
+        session.commit()
+        domain_id = domain.id
+    with patch.dict(os.environ, {"KLYROW_DKIM_KEY_DIR": str(tmp_path)}):
+        first = client.post(f"/v1/internal/email/domains/{domain_id}/dkim/rotate")
+        assert first.status_code == 201 and first.json()["private_key"] == "PROTECTED_SECRET_REFERENCE"
+        assert "PRIVATE KEY" not in first.text and str(tmp_path) not in first.text
+        with DB() as session:
+            first_key = session.get(DkimKey, first.json()["dkim_key_id"])
+            first_path = first_key.private_secret_ref.removeprefix("file:")
+            public = first_key.public_value
+        assert os.stat(first_path).st_mode & 0o777 == 0o600
+        answer = type("Answer", (), {"strings": [public.encode()]})()
+        with patch("apps.gateway.app.provider.dns.resolver.resolve", return_value=[answer]):
+            assert client.post(f"/v1/internal/email/domains/{domain_id}/dkim/{first.json()['dkim_key_id']}/verify").json()["verified"] is True
+        second = client.post(f"/v1/internal/email/domains/{domain_id}/dkim/rotate").json()
+        with DB() as session:
+            second_key = session.get(DkimKey, second["dkim_key_id"])
+            answer = type("Answer", (), {"strings": [second_key.public_value.encode()]})()
+        with patch("apps.gateway.app.provider.dns.resolver.resolve", return_value=[answer]):
+            activated = client.post(f"/v1/internal/email/domains/{domain_id}/dkim/{second['dkim_key_id']}/verify").json()
+        assert activated["verified"] is True and activated["retired_prior_keys"] == 1
+        with DB() as session:
+            assert session.get(DkimKey, first.json()["dkim_key_id"]).status == "RETIRED"
+
+
+def test_domain_execution_dns_matrix_requires_single_spf_and_dmarc():
+    with DB() as session:
+        domain = session.query(ProviderDomain).filter_by(domain="codestra.co").one()
+        domain.inbound_enabled = True
+        domain.status = "VERIFIED"
+        key = session.query(DkimKey).filter_by(domain_id=domain.id, status="ACTIVE").one()
+        domain_id, selector, public = domain.id, key.selector, key.public_value
+        session.commit()
+    def txt(name):
+        if name == "codestra.co": return ["v=spf1 include:spf.klyrow.com -all"]
+        if name == "_dmarc.codestra.co": return ["v=DMARC1; p=reject"]
+        if name == f"{selector}._domainkey.codestra.co": return [public]
+        return []
+    def values(name, kind):
+        if name == "codestra.co" and kind == "MX": return ["10 mail.klyrow.com"]
+        if name in {"bounce.codestra.co", "track.codestra.co"}: return ["37.27.128.39"]
+        return []
+    with patch("apps.gateway.app.provider.dns_txt", side_effect=txt), patch("apps.gateway.app.provider.dns_values", side_effect=values):
+        result = client.post(f"/v1/internal/email/domains/{domain_id}/dns-check")
+    assert result.status_code == 200 and result.json()["verified"] is True
+    def duplicate_txt(name):
+        if name == "codestra.co": return ["v=spf1 include:spf.klyrow.com -all", "v=spf1 -all"]
+        return txt(name)
+    with patch("apps.gateway.app.provider.dns_txt", side_effect=duplicate_txt), patch("apps.gateway.app.provider.dns_values", side_effect=values):
+        result = client.post(f"/v1/internal/email/domains/{domain_id}/dns-check")
+    assert result.json()["verified"] is False and result.json()["spf_record_count"] == 2
+
+
+def test_event_and_usage_outbox_retries_without_double_billing():
+    with patch("apps.gateway.app.main.emit_middleware", new=AsyncMock(return_value=False)):
+        result = asyncio.run(dispatch_provider_outbox())
+    assert result["events_failed"] >= 1
+    with DB() as session:
+        event = session.query(ProviderEvent).filter_by(kind="message.delivered").first()
+        usage = session.query(ProviderUsageEvent).first()
+        assert event.state == "RETRY" and usage.state == "RETRY"
+        event.available_at = now()-timedelta(seconds=1)
+        usage.available_at = now()-timedelta(seconds=1)
+        usage_count = session.query(ProviderUsageEvent).count()
+        session.commit()
+    with patch("apps.gateway.app.main.emit_middleware", new=AsyncMock(return_value=True)):
+        asyncio.run(dispatch_provider_outbox())
+    with DB() as session:
+        assert session.get(ProviderEvent, event.id).state == "DELIVERED"
+        assert session.get(ProviderUsageEvent, usage.id).state == "DELIVERED"
+        assert session.query(ProviderUsageEvent).count() == usage_count
+
+
+def test_restricted_operations_retry_and_reconciliation():
+    retried = client.post("/v1/internal/email/operations/messages/lease-dead/retry")
+    assert retried.status_code == 200 and retried.json()["status"] == "QUEUED"
+    with DB() as session:
+        event = session.query(ProviderEvent).filter_by(kind="message.delivered").first()
+        event.state = "DEAD_LETTER"
+        session.commit()
+        event_id = event.id
+    assert client.post(f"/v1/internal/email/operations/events/{event_id}/retry").json()["state"] == "RETRY"
+    reconciliation = client.post("/v1/internal/email/operations/reconcile")
+    assert reconciliation.status_code == 200 and reconciliation.json()["status"] == "PASS"
+    identity["role"] = "tenant_admin"
+    assert client.post("/v1/internal/email/operations/reconcile").status_code == 403
+    identity["role"] = "platform_admin"

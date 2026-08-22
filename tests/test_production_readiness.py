@@ -56,7 +56,9 @@ def test_single_domain_canary_is_durable_and_fail_closed():
     source = (ROOT / "apps/gateway/app/main.py").read_text()
     migration = (ROOT / "migrations/2026082201_email_outbox_and_tenant_idempotency.sql").read_text()
     compose = (ROOT / "docker-compose.yml").read_text()
-    assert '("klyrow.com","support@klyrow.com","appolon1908@gmail.com",1)' in source
+    assert "def canary_configuration_valid()" in source
+    assert "maximum==1" in source
+    assert 'sender.endswith("@"+domain)' in source
     assert 'with_for_update()' in source
     assert 'production_canary_limit_reached' in source
     assert 'bulk_delivery_disabled_during_canary' in source
@@ -83,7 +85,7 @@ def test_canary_ledger_has_a_forward_migration_for_existing_installations():
 def test_health_counts_outbox_and_reflects_durable_canary_capacity():
     source = (ROOT / "apps/gateway/app/main.py").read_text()
     assert "select(func.count()).select_from(EmailOutbox)" in source
-    assert "gate.reserved_deliveries<1" in source
+    assert "gate.reserved_deliveries<maximum" in source
     assert "production_gate_open(s)" in source
 
 

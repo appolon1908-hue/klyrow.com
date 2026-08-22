@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
-from prometheus_client import Counter, Histogram, generate_latest
+from prometheus_client import Counter, Gauge, Histogram, generate_latest
 from pydantic import BaseModel, EmailStr, Field, model_validator
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
@@ -36,6 +36,9 @@ app=FastAPI(title="Klyrow API", version="1.0.0", docs_url=None if os.getenv("KLY
 REQUESTS=Counter("klyrow_http_requests_total","Requests",["path","status"])
 MAIL=Counter("klyrow_mail_total","Mail lifecycle",["event"])
 LATENCY=Histogram("klyrow_http_request_duration_seconds","Request latency",["path"])
+PROVIDER_QUEUE=Gauge("klyrow_provider_queue_messages","Provider messages by status",["status"])
+PROVIDER_EVENTS=Gauge("klyrow_provider_events","Provider events by state",["state"])
+PROVIDER_USAGE=Gauge("klyrow_provider_usage_events","Provider usage events by state",["state"])
 rate_buckets=defaultdict(deque)
 
 class Base(DeclarativeBase): pass
@@ -101,28 +104,44 @@ def auth_rate(request:Request,action:str):
     limit=int(os.getenv("KLYROW_AUTH_RATE_PER_MINUTE","10"))
     if len(bucket)>=limit:raise HTTPException(429,"rate_limit_exceeded")
     bucket.append(now)
-def auth(authorization:str=Header(default=""), x_klyrow_tenant_id:Optional[str]=Header(default=None), s:Session=Depends(db)):
+def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id:Optional[str]=Header(default=None),s:Session=Depends(db)):
     if not authorization.startswith("Bearer "): raise HTTPException(401,"authentication_required")
     raw=authorization[7:]
     try:
-        middleware_key=os.getenv("KLYROW_MIDDLEWARE_API_KEY","")
-        if middleware_key and hmac.compare_digest(raw.encode(),middleware_key.encode()):
-            tenant=s.get(Tenant,x_klyrow_tenant_id) if x_klyrow_tenant_id else None
-            if not tenant or not tenant.enabled:raise HTTPException(403,"valid_tenant_required")
-            ctx={"sub":"middleware-service","tenant":tenant.id,"role":"tenant_admin","service":True}
-        elif raw.startswith("kly_"):
-            key=s.scalar(select(ApiKey).where(ApiKey.key_hash==sha(raw),ApiKey.revoked==False))
-            if not key: raise ValueError()
-            tenant=s.get(Tenant,key.tenant_id)
-            if not tenant or not tenant.enabled: raise HTTPException(403,"account_suspended")
-            ctx={"sub":key.id,"tenant":key.tenant_id,"role":"tenant_admin","api_key":True}
-        else:
-            ctx=jwt.decode(raw,SECRET,algorithms=["HS256"])
-            from .saas import SessionRecord
-            session=s.get(SessionRecord,ctx.get("sid")) if ctx.get("sid") else None
-            if ctx.get("sid") and (not session or session.revoked):raise HTTPException(401,"session_revoked")
+        resolver=os.getenv("KLYROW_TENANT_RESOLVER_URL","").strip()
+        if resolver:
+            if any(name.lower() in {"x-codestra-tenant-id","x-codestra-identity-id","x-codestra-tenant","x-codestra-subject"} for name in request.headers):raise HTTPException(403,"not_found")
+            permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send" if request.method not in {"GET","HEAD","OPTIONS"} else "klyrow.read"
+            headers={"Authorization":"Bearer "+raw,"X-Codestra-Required-Permission":permission}
+            if x_klyrow_tenant_id:headers["X-Klyrow-Tenant-Id"]=x_klyrow_tenant_id
+            response=httpx.get(resolver,headers=headers,timeout=5,follow_redirects=False)
+            if response.status_code==401:raise HTTPException(401,"invalid_credentials")
+            if response.status_code==404:raise HTTPException(404,"not_found")
+            if response.status_code!=200:raise HTTPException(403,"not_found")
+            resolved=response.json()
+            if not resolved.get("authorized") or resolved.get("permission")!=permission:raise HTTPException(403,"not_found")
+            ctx={"sub":resolved["identity_id"],"tenant":resolved["tenant_id"],"role":resolved.get("role","tenant_user"),"service":True,"permissions":[permission]}
             tenant=s.get(Tenant,ctx["tenant"])
-            if not tenant or not tenant.enabled:raise HTTPException(403,"account_suspended")
+            if not tenant or not tenant.enabled:raise HTTPException(403,"tenant_suspended")
+        else:
+            middleware_key=os.getenv("KLYROW_MIDDLEWARE_API_KEY","")
+            if middleware_key and hmac.compare_digest(raw.encode(),middleware_key.encode()):
+                tenant=s.get(Tenant,x_klyrow_tenant_id) if x_klyrow_tenant_id else None
+                if not tenant or not tenant.enabled:raise HTTPException(403,"valid_tenant_required")
+                ctx={"sub":"middleware-service","tenant":tenant.id,"role":"tenant_admin","service":True}
+            elif raw.startswith("kly_"):
+                key=s.scalar(select(ApiKey).where(ApiKey.key_hash==sha(raw),ApiKey.revoked==False))
+                if not key: raise ValueError()
+                tenant=s.get(Tenant,key.tenant_id)
+                if not tenant or not tenant.enabled: raise HTTPException(403,"account_suspended")
+                ctx={"sub":key.id,"tenant":key.tenant_id,"role":"tenant_admin","api_key":True}
+            else:
+                ctx=jwt.decode(raw,SECRET,algorithms=["HS256"])
+                from .saas import SessionRecord
+                session=s.get(SessionRecord,ctx.get("sid")) if ctx.get("sid") else None
+                if ctx.get("sid") and (not session or session.revoked):raise HTTPException(401,"session_revoked")
+                tenant=s.get(Tenant,ctx["tenant"])
+                if not tenant or not tenant.enabled:raise HTTPException(403,"account_suspended")
     except HTTPException: raise
     except Exception: raise HTTPException(401,"invalid_credentials")
     now=time.time(); q=rate_buckets[ctx["tenant"]]
@@ -154,25 +173,34 @@ def canary_configuration()->tuple[str,str,str,int]:
     except (TypeError,ValueError):maximum=-1
     return (os.getenv("KLYROW_CANARY_ALLOWED_DOMAIN","").lower(),os.getenv("KLYROW_CANARY_ALLOWED_SENDER","").lower(),os.getenv("KLYROW_CANARY_ALLOWED_RECIPIENT","").lower(),maximum)
 
+def canary_gate_key()->str:return os.getenv("KLYROW_CANARY_GATE_KEY","klyrow-single-domain")
+
+def canary_configuration_valid()->bool:
+    domain,sender,recipient,maximum=canary_configuration()
+    return bool(domain and sender and recipient and maximum==1 and sender.endswith("@"+domain))
+
 def production_gate_open(s:Session)->bool:
-    if SAFE_MODE or os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()!="true" or canary_configuration()!=("klyrow.com","support@klyrow.com","appolon1908@gmail.com",1):return False
-    gate=s.get(ProductionCanaryGate,"klyrow-single-domain")
-    return bool(gate and gate.reserved_deliveries<1 and gate.claimed_deliveries<=gate.reserved_deliveries)
+    if SAFE_MODE or os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()!="true" or not canary_configuration_valid():return False
+    gate=s.get(ProductionCanaryGate,canary_gate_key())
+    maximum=canary_configuration()[3]
+    return bool(gate and gate.reserved_deliveries<maximum and gate.claimed_deliveries<=gate.reserved_deliveries)
 
 def canary_payload_allowed(payload:dict)->bool:
     domain,sender,recipient,maximum=canary_configuration()
     recipients=payload.get("to")
     normalized_recipients=[value.lower() for value in recipients] if isinstance(recipients,list) and all(isinstance(value,str) for value in recipients) else []
-    return (domain,sender,recipient,maximum)==("klyrow.com","support@klyrow.com","appolon1908@gmail.com",1) and payload.get("from","").lower()==sender and sender.endswith("@"+domain) and normalized_recipients==[recipient]
+    allowed_campaign=os.getenv("KLYROW_CANARY_ALLOWED_CAMPAIGN","")
+    return canary_configuration_valid() and bool(allowed_campaign) and payload.get("campaign_id")==allowed_campaign and payload.get("from","").lower()==sender and normalized_recipients==[recipient]
 
 def enforce_production_canary(x,s):
     if SAFE_MODE:return
     domain,sender,recipient,maximum=canary_configuration()
-    if (domain,sender,recipient,maximum)!=("klyrow.com","support@klyrow.com","appolon1908@gmail.com",1):raise HTTPException(503,"production_canary_configuration_invalid")
-    if x.stream!="transactional" or x.campaign_id:raise HTTPException(403,"canary_transactional_only")
+    if not canary_configuration_valid():raise HTTPException(503,"production_canary_configuration_invalid")
+    allowed_campaign=os.getenv("KLYROW_CANARY_ALLOWED_CAMPAIGN","")
+    if x.stream!="transactional" or not allowed_campaign or x.campaign_id!=allowed_campaign:raise HTTPException(403,"canary_campaign_denied")
     if x.sender.lower()!=sender or x.sender.lower().rsplit("@",1)[1]!=domain:raise HTTPException(403,"canary_sender_denied")
     if str(x.to).lower()!=recipient:raise HTTPException(403,"canary_recipient_denied")
-    gate=s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key=="klyrow-single-domain").with_for_update())
+    gate=s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key==canary_gate_key()).with_for_update())
     if not gate:raise HTTPException(503,"production_canary_ledger_missing")
     if gate.reserved_deliveries>=maximum:raise HTTPException(409,"production_canary_limit_reached")
     gate.reserved_deliveries+=1;gate.updated_at=datetime.now(timezone.utc)
@@ -236,6 +264,16 @@ def persist_email_event(s:Session, *, event_id:str, tenant_id:str, message_id:st
     canonical_status=TERMINAL_MESSAGE_STATUSES.get(event_type,event_type.rsplit(".",1)[-1])
     local_message=s.get(Message,message_id) or s.get(Message,correlation_id)
     if local_message:local_message.status=canonical_status
+    from .provider import ProviderMessage
+    provider_message=s.scalar(select(ProviderMessage).where(ProviderMessage.tenant_id==tenant_id,
+        or_(ProviderMessage.id==message_id,ProviderMessage.provider_message_id==message_id,
+            ProviderMessage.correlation_id==correlation_id)))
+    if provider_message:
+        provider_status={"sent":"SENT","delivered":"DELIVERED","soft_bounce":"BOUNCED_SOFT",
+            "hard_bounce":"BOUNCED_HARD","complaint":"COMPLAINED","failed":"FAILED",
+            "rejected":"FAILED"}.get(canonical_status,canonical_status.upper())
+        if provider_status in {"SENT","DELIVERED","BOUNCED_SOFT","BOUNCED_HARD","COMPLAINED","FAILED","DEFERRED"}:
+            provider_message.status=provider_status;provider_message.updated_at=datetime.now(timezone.utc)
     if not s.get(Event,event_id):
         s.add(Event(id=event_id,tenant_id=tenant_id,message_id=local_message.id if local_message else message_id,kind="klyrow."+event_type,payload=payload))
         s.add(Audit(id=str(uuid.uuid4()),tenant_id=tenant_id,actor="provider:postal",action="email.status."+canonical_status))
@@ -338,8 +376,9 @@ async def email_outbox_loop():
                     item.state="quarantined";item.last_error="invalid_outbox_payload";item.updated_at=current;s.commit();continue
                 if not isinstance(payload,dict):
                     item.state="quarantined";item.last_error="invalid_outbox_payload";item.updated_at=current;s.commit();continue
-                gate=s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key=="klyrow-single-domain").with_for_update())
-                if not canary_payload_allowed(payload) or not gate or gate.claimed_deliveries>=gate.reserved_deliveries or gate.claimed_deliveries>=1:
+                gate=s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key==canary_gate_key()).with_for_update())
+                maximum=canary_configuration()[3]
+                if not canary_payload_allowed(payload) or not gate or gate.claimed_deliveries>=gate.reserved_deliveries or gate.claimed_deliveries>=maximum:
                     item.state="quarantined";item.last_error="production_canary_policy_denied";item.updated_at=current
                     message=s.get(Message,item.message_id)
                     if message:message.status="quarantined"
@@ -398,6 +437,13 @@ def metrics(authorization:str=Header(default="")):
     except OSError:raise HTTPException(404,"not_found")
     supplied=authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
     if not expected or not hmac.compare_digest(supplied,expected):raise HTTPException(404,"not_found")
+    from .provider import ProviderEvent, ProviderMessage, ProviderUsageEvent
+    with DB() as s:
+        for status in ("QUEUED","PROCESSING","DEFERRED","FAILED","DEAD_LETTER"):
+            PROVIDER_QUEUE.labels(status).set(s.scalar(select(func.count()).select_from(ProviderMessage).where(ProviderMessage.status==status)) or 0)
+        for state in ("PENDING","RETRY","DELIVERED","DEAD_LETTER"):
+            PROVIDER_EVENTS.labels(state).set(s.scalar(select(func.count()).select_from(ProviderEvent).where(ProviderEvent.state==state)) or 0)
+            PROVIDER_USAGE.labels(state).set(s.scalar(select(func.count()).select_from(ProviderUsageEvent).where(ProviderUsageEvent.state==state)) or 0)
     from fastapi.responses import Response; return Response(generate_latest(),media_type="text/plain")
 @app.post("/v1/auth/login")
 def login(x:Login,request:Request,s:Session=Depends(db)):
@@ -459,7 +505,7 @@ def domain_verify(did:str,ctx=Depends(require("platform_admin","tenant_admin")),
 async def send(x:MailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
     return await _send(x,ctx,s,idempotency_key)
 
-@app.post("/v1/internal/email/send",status_code=202)
+@app.post("/v1/internal/email/beyvra/send",status_code=202)
 async def beyvra_send(x:MailIn,ctx=Depends(beyvra_service_auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
     if x.stream!="transactional":raise HTTPException(403,"transactional_only")
     allowed={"no-reply@beyvra.com","security@beyvra.com","trading@beyvra.com","statements@beyvra.com","support@beyvra.com"}
@@ -469,7 +515,7 @@ async def beyvra_send(x:MailIn,ctx=Depends(beyvra_service_auth),s:Session=Depend
 async def _send(x:MailIn,ctx,s,idempotency_key):
     if not idempotency_key: raise HTTPException(400,"idempotency_key_required")
     from .agent_mailboxes import authorize_agent_sender
-    authorize_agent_sender(s,ctx,x.sender,x.campaign_id)
+    authorize_agent_sender(s,ctx,x.sender,x.campaign_id,x.reply_to)
     request_hash=sha(x.model_dump_json())
     prior=s.scalar(select(Idempotency).where(Idempotency.key==idempotency_key,Idempotency.tenant_id==ctx["tenant"]))
     if prior:
@@ -493,7 +539,7 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
     if count>=tenant.quota: raise HTTPException(429,"daily_quota_exceeded")
     mid=str(uuid.uuid4()); status="accepted_test" if SAFE_MODE else "queued"
     result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=x.to.lower(),sender=x.sender.lower(),subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload=json.dumps({"stream":x.stream}))); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageLedger(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind="message."+x.stream,quantity=1,reference=mid))
-    if not SAFE_MODE:s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,payload=json.dumps({"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text},separators=(",",":"),sort_keys=True)))
+    if not SAFE_MODE:s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,payload=json.dumps({"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text,"campaign_id":x.campaign_id},separators=(",",":"),sort_keys=True)))
     s.commit(); MAIL.labels("queued").inc(); await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{"stream":x.stream}}); return result
 
 @app.post("/v1/email/bulk",status_code=202)
@@ -591,3 +637,15 @@ from .saas import router as saas_router
 app.include_router(saas_router)
 from .agent_mailboxes import router as agent_mailbox_router
 app.include_router(agent_mailbox_router)
+from .provider import provider_worker_loop, reconcile_legacy_registry, router as provider_router, status_router as provider_status_router
+app.include_router(provider_router)
+app.include_router(provider_status_router)
+
+@app.on_event("startup")
+def reconcile_provider_registry_on_startup():
+    with DB() as s:
+        reconcile_legacy_registry(s)
+
+@app.on_event("startup")
+async def start_provider_worker():
+    asyncio.create_task(provider_worker_loop())

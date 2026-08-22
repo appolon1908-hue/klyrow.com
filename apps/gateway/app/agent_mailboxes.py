@@ -3,7 +3,7 @@
 This module reserves identities and validates local policy only. Provider, Odoo,
 VICIdial and Keycloak adapters must attest their steps before activation.
 """
-import json, re, unicodedata, uuid
+import json, os, re, unicodedata, uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -140,7 +140,16 @@ def list_mailboxes(ctx=Depends(auth),s:Session=Depends(db)):
     if ctx.get("role")=="codestra-email-agent":q=q.where(AgentMailbox.keycloak_user_id==ctx["sub"])
     return {"items":[mailbox_json(m) for m in s.scalars(q).all()]}
 
-def authorize_agent_sender(s:Session,ctx:dict,sender:str,campaign_id:Optional[str]):
-    if ctx.get("role")!="codestra-email-agent":return
-    m=s.scalar(select(AgentMailbox).where(AgentMailbox.tenant_id==ctx["tenant"],AgentMailbox.keycloak_user_id==ctx["sub"],AgentMailbox.primary_email==sender.lower(),AgentMailbox.campaign_id==campaign_id,AgentMailbox.mailbox_status=="ACTIVE",AgentMailbox.sending_enabled==True))
-    if not m:raise HTTPException(403,"agent_sender_not_authorized")
+def authorize_agent_sender(s:Session,ctx:dict,sender:str,campaign_id:Optional[str],reply_to:Optional[str]=None):
+    if not campaign_id:
+        if ctx.get("role")=="codestra-email-agent" or os.getenv("KLYROW_CAMPAIGN_REQUIRED","false").lower()=="true":raise HTTPException(403,"campaign_required")
+        return
+    normalized=sender.lower()
+    mapping=s.scalar(select(CampaignEmailDomain).where(CampaignEmailDomain.tenant_id==ctx["tenant"],CampaignEmailDomain.campaign_id==campaign_id,CampaignEmailDomain.status=="active",CampaignEmailDomain.sender_domain_verified==True,CampaignEmailDomain.sending_enabled==True))
+    if not mapping or normalized.rsplit("@",1)[-1]!=mapping.primary_domain:raise HTTPException(403,"campaign_sender_domain_denied")
+    if mapping.default_reply_to and (not reply_to or reply_to.lower()!=mapping.default_reply_to.lower()):raise HTTPException(403,"campaign_reply_to_denied")
+    authorization=s.scalar(select(OutboundSenderAuthorization).where(OutboundSenderAuthorization.tenant_id==ctx["tenant"],OutboundSenderAuthorization.campaign_id==campaign_id,OutboundSenderAuthorization.sender==normalized,OutboundSenderAuthorization.enabled==True))
+    if not authorization:raise HTTPException(403,"campaign_sender_not_authorized")
+    if ctx.get("role")=="codestra-email-agent":
+        m=s.scalar(select(AgentMailbox).where(AgentMailbox.mailbox_id==authorization.mailbox_id,AgentMailbox.keycloak_user_id==ctx["sub"],AgentMailbox.mailbox_status=="ACTIVE",AgentMailbox.sending_enabled==True))
+        if not m:raise HTTPException(403,"agent_sender_not_authorized")
