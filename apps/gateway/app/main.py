@@ -659,3 +659,5 @@ from .messaging import router as messaging_router
 app.include_router(messaging_router)
 from .operations import router as operations_router
 app.include_router(operations_router)
+from .reseller import router as reseller_router
+app.include_router(reseller_router)
