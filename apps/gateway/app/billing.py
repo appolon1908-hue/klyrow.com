@@ -4,7 +4,7 @@ This module deliberately has no dependency on Telnexa and never accepts or
 stores raw payment-card data. Payment methods are opaque provider references.
 """
 import json, secrets, uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
@@ -49,6 +49,10 @@ class TaxRule(Base):
     __tablename__="klyrow_tax_rules"; id:Mapped[str]=mapped_column(String,primary_key=True); jurisdiction:Mapped[str]=mapped_column(String); mode:Mapped[str]=mapped_column(String); rate:Mapped[Decimal]=mapped_column(Numeric(8,6),default=0); evidence_label:Mapped[str]=mapped_column(String); active:Mapped[bool]=mapped_column(Boolean,default=True)
 class BillingEvent(Base):
     __tablename__="klyrow_billing_events"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); kind:Mapped[str]=mapped_column(String); reference:Mapped[str]=mapped_column(String,index=True); payload_json:Mapped[str]=mapped_column(Text,default="{}"); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+class CheckoutSession(Base):
+    __tablename__="klyrow_checkout_sessions"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); plan_id:Mapped[str]=mapped_column(String); price_id:Mapped[str]=mapped_column(String); provider:Mapped[str]=mapped_column(String); state:Mapped[str]=mapped_column(String); provider_reference:Mapped[str]=mapped_column(String,unique=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+class CreditNote(Base):
+    __tablename__="klyrow_credit_notes"; id:Mapped[str]=mapped_column(String,primary_key=True); number:Mapped[str]=mapped_column(String,unique=True); tenant_id:Mapped[str]=mapped_column(String,index=True); invoice_id:Mapped[str]=mapped_column(String,index=True); amount:Mapped[Decimal]=mapped_column(Numeric(18,2)); currency:Mapped[str]=mapped_column(String); reason:Mapped[str]=mapped_column(String); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 
 class CatalogIn(BaseModel):
     code:str=Field(pattern=r"^[A-Z][A-Z0-9_]{1,39}$"); name:str; currency:str=Field(pattern=r"^[A-Z]{3}$"); cycle:str=Field(pattern="^(FREE|TRIAL|MONTHLY|ANNUAL|USAGE_BASED|CUSTOM)$"); base_amount:Decimal=Field(ge=0); included_units:int=Field(ge=0); overage_amount:Decimal=Field(ge=0); features:dict=Field(default_factory=dict)
@@ -59,6 +63,10 @@ class InvoiceIn(BaseModel): due_at:datetime; jurisdiction:Optional[str]=None
 class PaymentIn(BaseModel): invoice_id:str; provider:str=Field(pattern="^(MANUAL_OFFLINE|SANDBOX)$"); provider_reference:str=Field(min_length=8,max_length=200); amount:Decimal=Field(gt=0)
 class RefundIn(BaseModel): amount:Decimal=Field(gt=0); provider_reference:str=Field(min_length=8,max_length=200)
 class PaymentMethodIn(BaseModel): provider:str=Field(pattern="^(MANUAL_OFFLINE|SANDBOX|EXTERNAL_TOKENIZED)$"); provider_reference:str=Field(min_length=6,max_length=300); label:str=Field(min_length=1,max_length=100); is_default:bool=False
+class CheckoutIn(BaseModel): plan_code:str; provider:str=Field(pattern="^(MANUAL_OFFLINE|SANDBOX)$"); provider_reference:str=Field(min_length=8,max_length=200)
+class PlanChangeIn(BaseModel): plan_code:str
+class CreditNoteIn(BaseModel): amount:Decimal=Field(gt=0); reason:str=Field(min_length=3,max_length=500)
+class DunningIn(BaseModel): grace_days:int=Field(default=7,ge=1,le=90); suspend_days:int=Field(default=21,ge=2,le=180)
 
 STATES={"TRIALING":{"ACTIVE","CANCELLED"},"ACTIVE":{"PAST_DUE","CANCEL_AT_PERIOD_END","SUSPENDED"},"PAST_DUE":{"ACTIVE","GRACE_PERIOD","SUSPENDED"},"GRACE_PERIOD":{"ACTIVE","SUSPENDED"},"SUSPENDED":{"ACTIVE","CANCELLED"},"CANCEL_AT_PERIOD_END":{"ACTIVE","CANCELLED"},"CANCELLED":{"ACTIVE","CLOSED"},"CLOSED":set()}
 
@@ -157,6 +165,55 @@ def refund(payment_id:str,x:RefundIn,ctx=Depends(auth),s:Session=Depends(db)):
     payment=tenant_item(s,Payment,payment_id,ctx["tenant"]);already=s.scalar(select(func.sum(Refund.amount)).where(Refund.payment_id==payment.id,Refund.status=="CONFIRMED")) or 0
     if money(already)+money(x.amount)>money(payment.amount):raise HTTPException(409,"refund_exceeds_payment")
     item=Refund(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],payment_id=payment.id,amount=money(x.amount),status="CONFIRMED" if payment.provider=="SANDBOX" else "PENDING_RECONCILIATION",provider_reference=x.provider_reference);s.add(item);audit(s,ctx,"billing.refund.created");s.commit();return {"id":item.id,"status":item.status}
+
+@router.post("/billing/checkout",status_code=201)
+def checkout(x:CheckoutIn,ctx=Depends(auth),s:Session=Depends(db)):
+    if s.scalar(select(CheckoutSession).where(CheckoutSession.provider==x.provider,CheckoutSession.provider_reference==x.provider_reference)):raise HTTPException(409,"checkout_reference_exists")
+    plan=s.scalar(select(BillingPlan).where(BillingPlan.code==x.plan_code,BillingPlan.active==True))
+    if not plan:raise HTTPException(404,"plan_not_found")
+    price=s.scalar(select(BillingPrice).where(BillingPrice.plan_id==plan.id,BillingPrice.retired_at==None).order_by(BillingPrice.version.desc()))
+    if not price:raise HTTPException(409,"plan_has_no_active_price")
+    existing=s.scalar(select(BillingSubscription).where(BillingSubscription.tenant_id==ctx["tenant"]))
+    if existing and existing.status not in {"CANCELLED","CLOSED"}:raise HTTPException(409,"active_subscription_exists")
+    state="COMPLETED" if x.provider=="SANDBOX" else "PAYMENT_PENDING"
+    item=CheckoutSession(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],plan_id=plan.id,price_id=price.id,provider=x.provider,state=state,provider_reference=x.provider_reference)
+    start=now();sub=existing or BillingSubscription(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],plan_id=plan.id,price_id=price.id,period_end=start+timedelta(days=30))
+    sub.plan_id=plan.id;sub.price_id=price.id;sub.period_start=start;sub.period_end=start+timedelta(days=365 if price.billing_cycle=="ANNUAL" else 30);sub.status="ACTIVE" if state=="COMPLETED" else "TRIALING"
+    s.add_all([item,sub,BillingEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind="checkout."+state.lower(),reference=item.id,payload_json=json.dumps({"provider":x.provider,"raw_card_storage":False},sort_keys=True))]);audit(s,ctx,"billing.checkout.created");s.commit()
+    return {"id":item.id,"state":state,"subscription_id":sub.id,"payment_instructions_required":x.provider=="MANUAL_OFFLINE","raw_card_storage":False}
+
+@router.post("/billing/subscription-plan-change")
+def change_plan(x:PlanChangeIn,ctx=Depends(auth),s:Session=Depends(db)):
+    sub=s.scalar(select(BillingSubscription).where(BillingSubscription.tenant_id==ctx["tenant"]).with_for_update())
+    if not sub or sub.status not in {"TRIALING","ACTIVE"}:raise HTTPException(409,"subscription_not_changeable")
+    plan=s.scalar(select(BillingPlan).where(BillingPlan.code==x.plan_code,BillingPlan.active==True));new=s.scalar(select(BillingPrice).where(BillingPrice.plan_id==plan.id,BillingPrice.retired_at==None).order_by(BillingPrice.version.desc())) if plan else None
+    if not new:raise HTTPException(404,"active_plan_price_not_found")
+    old=s.get(BillingPrice,sub.price_id);period_start=sub.period_start if sub.period_start.tzinfo else sub.period_start.replace(tzinfo=timezone.utc);period_end=sub.period_end if sub.period_end.tzinfo else sub.period_end.replace(tzinfo=timezone.utc);total=max(1,(period_end-period_start).total_seconds());remaining=max(0,(period_end-now()).total_seconds());ratio=Decimal(str(remaining/total))
+    delta=money((Decimal(new.base_amount)-Decimal(old.base_amount))*ratio)
+    if delta<0:
+        s.add(BillingEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind="subscription.downgrade_scheduled",reference=sub.id,payload_json=json.dumps({"next_plan_id":plan.id,"next_price_id":new.id,"effective_at":sub.period_end.isoformat()},sort_keys=True)));audit(s,ctx,"billing.subscription.downgrade_scheduled");s.commit();return {"effective":"NEXT_PERIOD","credit":"0.00","charge":"0.00"}
+    sub.plan_id=plan.id;sub.price_id=new.id;sub.version+=1
+    s.add(BillingEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind="subscription.upgraded",reference=sub.id,payload_json=json.dumps({"old_price_id":old.id,"new_price_id":new.id,"proration_charge":str(delta)},sort_keys=True)));audit(s,ctx,"billing.subscription.upgraded");s.commit();return {"effective":"IMMEDIATE","charge":str(delta),"credit":"0.00","price_version":new.version}
+
+@router.post("/billing/invoices/{invoice_id}/credit-notes",status_code=201)
+def credit_note(invoice_id:str,x:CreditNoteIn,ctx=Depends(auth),s:Session=Depends(db)):
+    inv=tenant_item(s,Invoice,invoice_id,ctx["tenant"]);amount=money(x.amount)
+    if amount>money(inv.total)-money(inv.credits):raise HTTPException(409,"credit_exceeds_invoice_balance")
+    item=CreditNote(id=str(uuid.uuid4()),number="KLY-CN-"+now().strftime("%Y%m%d")+"-"+secrets.token_hex(4).upper(),tenant_id=ctx["tenant"],invoice_id=inv.id,amount=amount,currency=inv.currency,reason=x.reason)
+    credit=Credit(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],invoice_id=inv.id,amount=amount,currency=inv.currency,reason=x.reason);inv.credits=money(inv.credits)+amount
+    if money(inv.credits)>=money(inv.total):inv.status="CREDITED"
+    s.add_all([item,credit]);audit(s,ctx,"billing.credit_note.created");s.commit();return {"id":item.id,"number":item.number,"amount":str(item.amount),"invoice_status":inv.status}
+
+@router.post("/admin/billing/dunning")
+def dunning(x:DunningIn,ctx=Depends(require("platform_admin")),s:Session=Depends(db)):
+    changed=[];current=now()
+    for inv in s.scalars(select(Invoice).where(Invoice.status.in_(("OPEN","PAST_DUE")),Invoice.due_at<current).with_for_update()).all():
+        due_at=inv.due_at if inv.due_at.tzinfo else inv.due_at.replace(tzinfo=timezone.utc);overdue=(current-due_at).days;sub=s.get(BillingSubscription,inv.subscription_id)
+        inv.status="PAST_DUE"
+        target="SUSPENDED" if overdue>=x.suspend_days else "GRACE_PERIOD" if overdue>=x.grace_days else "PAST_DUE"
+        if sub and sub.status not in {"CANCELLED","CLOSED"}:sub.status=target;sub.version+=1
+        s.add(BillingEvent(id=str(uuid.uuid4()),tenant_id=inv.tenant_id,kind="dunning."+target.lower(),reference=inv.id,payload_json=json.dumps({"days_overdue":overdue,"login_enabled":True,"sending_enabled":target!="SUSPENDED"},sort_keys=True)));changed.append({"invoice_id":inv.id,"subscription_status":target})
+    audit(s,ctx,"billing.dunning.run");s.commit();return {"processed":len(changed),"items":changed,"login_disabled":False}
 
 @router.get("/billing/reconciliation")
 def reconcile(ctx=Depends(auth),s:Session=Depends(db)):

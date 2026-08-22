@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
-from apps.gateway.app.billing import BillingPrice, Invoice, Payment
 from apps.gateway.app.main import Base, DB, Tenant, User, app, engine, ph
+from apps.gateway.app.billing import BillingPrice, Invoice, Payment
 from fastapi.testclient import TestClient
 
 
@@ -76,3 +76,22 @@ def test_cross_tenant_billing_access_is_denied():
         invoice=session.query(Invoice).filter(Invoice.tenant_id=="a").first()
     response=client.post("/v1/billing/payments",headers=other,json={"invoice_id":invoice.id,"provider":"SANDBOX","provider_reference":"cross-tenant-payment","amount":"1.00"})
     assert response.status_code==404
+
+
+def test_checkout_proration_credit_note_and_dunning_are_auditable():
+    root=login();tenant_a=login("a@example.com");tenant_b=login("b@example.com")
+    growth=client.post("/v1/admin/billing/catalog",headers=root,json={"code":"GROWTH","name":"Growth","currency":"USD","cycle":"MONTHLY","base_amount":"30.00","included_units":1000,"overage_amount":"0.01","features":{"domains":10}})
+    assert growth.status_code==201
+    changed=client.post("/v1/billing/subscription-plan-change",headers=tenant_a,json={"plan_code":"GROWTH"})
+    assert changed.status_code==200 and changed.json()["effective"]=="IMMEDIATE" and float(changed.json()["charge"])>=0
+    checkout=client.post("/v1/billing/checkout",headers=tenant_b,json={"plan_code":"STARTER","provider":"MANUAL_OFFLINE","provider_reference":"manual-checkout-0001"})
+    assert checkout.status_code==201 and checkout.json()["state"]=="PAYMENT_PENDING" and checkout.json()["raw_card_storage"] is False
+    assert client.post("/v1/billing/checkout",headers=tenant_b,json={"plan_code":"STARTER","provider":"MANUAL_OFFLINE","provider_reference":"manual-checkout-0001"}).status_code==409
+    invoice=client.post("/v1/billing/invoices",headers=tenant_a,json={"due_at":(datetime.now(timezone.utc)-timedelta(days=10)).isoformat()})
+    note=client.post(f"/v1/billing/invoices/{invoice.json()['id']}/credit-notes",headers=tenant_a,json={"amount":"1.00","reason":"Service availability credit"})
+    assert note.status_code==201 and note.json()["amount"]=="1.00"
+    with DB() as session:
+        item=session.get(Invoice,invoice.json()["id"]);item.status="OPEN";session.commit()
+    dunning=client.post("/v1/admin/billing/dunning",headers=root,json={"grace_days":7,"suspend_days":21})
+    assert dunning.status_code==200 and any(item["invoice_id"]==invoice.json()["id"] and item["subscription_status"]=="GRACE_PERIOD" for item in dunning.json()["items"])
+    assert dunning.json()["login_disabled"] is False
