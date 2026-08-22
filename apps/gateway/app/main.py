@@ -108,7 +108,7 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
         resolver=os.getenv("KLYROW_TENANT_RESOLVER_URL","").strip()
         if resolver:
             if any(name.lower() in {"x-codestra-tenant-id","x-codestra-identity-id","x-codestra-tenant","x-codestra-subject"} for name in request.headers):raise HTTPException(403,"not_found")
-            permission="klyrow.send" if request.url.path in {"/v1/send","/v1/send/bulk","/v1/email/send","/v1/email/bulk"} else "klyrow.webhook" if "webhook" in request.url.path else "klyrow.read"
+            permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send" if request.method not in {"GET","HEAD","OPTIONS"} else "klyrow.read"
             headers={"Authorization":"Bearer "+raw,"X-Codestra-Required-Permission":permission}
             if x_klyrow_tenant_id:headers["X-Klyrow-Tenant-Id"]=x_klyrow_tenant_id
             response=httpx.get(resolver,headers=headers,timeout=5,follow_redirects=False)
@@ -186,7 +186,8 @@ def canary_payload_allowed(payload:dict)->bool:
     domain,sender,recipient,maximum=canary_configuration()
     recipients=payload.get("to")
     normalized_recipients=[value.lower() for value in recipients] if isinstance(recipients,list) and all(isinstance(value,str) for value in recipients) else []
-    return canary_configuration_valid() and payload.get("from","").lower()==sender and normalized_recipients==[recipient]
+    allowed_campaign=os.getenv("KLYROW_CANARY_ALLOWED_CAMPAIGN","")
+    return canary_configuration_valid() and bool(allowed_campaign) and payload.get("campaign_id")==allowed_campaign and payload.get("from","").lower()==sender and normalized_recipients==[recipient]
 
 def enforce_production_canary(x,s):
     if SAFE_MODE:return
@@ -518,7 +519,7 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
     if count>=tenant.quota: raise HTTPException(429,"daily_quota_exceeded")
     mid=str(uuid.uuid4()); status="accepted_test" if SAFE_MODE else "queued"
     result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=x.to.lower(),sender=x.sender.lower(),subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload=json.dumps({"stream":x.stream}))); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageLedger(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind="message."+x.stream,quantity=1,reference=mid))
-    if not SAFE_MODE:s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,payload=json.dumps({"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text},separators=(",",":"),sort_keys=True)))
+    if not SAFE_MODE:s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,payload=json.dumps({"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text,"campaign_id":x.campaign_id},separators=(",",":"),sort_keys=True)))
     s.commit(); MAIL.labels("queued").inc(); await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{"stream":x.stream}}); return result
 
 @app.post("/v1/email/bulk",status_code=202)

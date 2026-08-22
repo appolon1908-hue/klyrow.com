@@ -142,7 +142,7 @@ def list_mailboxes(ctx=Depends(auth),s:Session=Depends(db)):
 
 def authorize_agent_sender(s:Session,ctx:dict,sender:str,campaign_id:Optional[str],reply_to:Optional[str]=None):
     if not campaign_id:
-        if os.getenv("KLYROW_CAMPAIGN_REQUIRED","false").lower()=="true":raise HTTPException(403,"campaign_required")
+        if ctx.get("role")=="codestra-email-agent" or os.getenv("KLYROW_CAMPAIGN_REQUIRED","false").lower()=="true":raise HTTPException(403,"campaign_required")
         return
     normalized=sender.lower()
     mapping=s.scalar(select(CampaignEmailDomain).where(CampaignEmailDomain.tenant_id==ctx["tenant"],CampaignEmailDomain.campaign_id==campaign_id,CampaignEmailDomain.status=="active",CampaignEmailDomain.sender_domain_verified==True,CampaignEmailDomain.sending_enabled==True))
