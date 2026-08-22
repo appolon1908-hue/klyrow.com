@@ -7,3 +7,5 @@ Key resources include profiles/timelines, event ingestion, consent/preferences, 
 Postal inbound webhooks sign `timestamp + "." + event_id + "." + exact_body` with HMAC-SHA256. Middleware outbound events sign `timestamp + "\n" + event_id + "\nklyrow\n" + canonical_json`, use bearer service authentication and fail fast when middleware is unavailable. Event IDs are persisted to reject replay.
 
 Safe mode returns an accepted message ID but never invokes Postal delivery. AI is unavailable unless an administrator explicitly configures and enables a provider; results always require human confirmation and never send.
+
+Reference clients are maintained in `sdk/python/klyrow.py` and `sdk/typescript/src/index.ts`. Both add bearer authentication, optional organization context, idempotency keys, structured error handling, message pagination, and webhook verification. They intentionally accept tokens or provider references only; neither client handles nor stores raw payment-card data.
