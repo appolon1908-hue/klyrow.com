@@ -390,12 +390,16 @@ async def email_outbox_loop():
                     item.state="quarantined";item.last_error="invalid_outbox_payload";item.updated_at=current;s.commit();continue
                 gate=s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key==canary_gate_key()).with_for_update())
                 maximum=canary_configuration()[3]
-                if not canary_payload_allowed(payload) or not gate or gate.claimed_deliveries>=gate.reserved_deliveries or gate.claimed_deliveries>=maximum:
+                first_attempt=(item.attempts or 0)==0
+                reservation_denied=(not gate or (first_attempt and
+                    (gate.claimed_deliveries>=gate.reserved_deliveries or gate.claimed_deliveries>=maximum)))
+                if not canary_payload_allowed(payload) or reservation_denied:
                     item.state="quarantined";item.last_error="production_canary_policy_denied";item.updated_at=current
                     message=s.get(Message,item.message_id)
                     if message:message.status="quarantined"
                     s.commit();continue
-                gate.claimed_deliveries+=1;gate.updated_at=current
+                if first_attempt:
+                    gate.claimed_deliveries+=1;gate.updated_at=current
                 item.state="sending";item.attempts+=1;item.next_attempt_at=None;item.updated_at=current;snapshot=(item.id,item.message_id,item.payload);s.commit()
             key_file=os.getenv("KLYROW_POSTAL_API_KEY_FILE","")
             key=Path(key_file).read_text(encoding="utf-8").strip() if key_file else ""
@@ -413,7 +417,7 @@ async def email_outbox_loop():
                 if snapshot is not None:
                     item=s.get(EmailOutbox,snapshot[0])
                     if item:
-                        failed=(not SAFE_MODE) or item.attempts>=5;item.state="failed" if failed else "retry";item.last_error=type(exc).__name__;item.updated_at=datetime.now(timezone.utc);item.next_attempt_at=None if failed else item.updated_at+timedelta(seconds=min(300,2**max(item.attempts,1)))
+                        failed=item.attempts>=5;item.state="failed" if failed else "retry";item.last_error=type(exc).__name__;item.updated_at=datetime.now(timezone.utc);item.next_attempt_at=None if failed else item.updated_at+timedelta(seconds=min(300,2**max(item.attempts,1)))
                         if failed:
                             message=s.get(Message,item.message_id)
                             if message:message.status="failed"

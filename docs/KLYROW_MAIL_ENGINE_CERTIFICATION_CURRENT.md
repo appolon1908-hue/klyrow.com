@@ -102,7 +102,7 @@ TEST_SEND_ENGINE=PASS_ISOLATED
 DOMAIN_SUSPENSION=PASS_ISOLATED
 SENDER_SUSPENSION=PASS_ISOLATED
 
-POSTAL_OUTAGE_RECOVERY=NOT_CERTIFIED
+POSTAL_OUTAGE_RECOVERY=PASS_ISOLATED
 QUEUE_FAILURE_RECOVERY=NOT_CERTIFIED
 WORKER_CRASH_RECOVERY=PASS_ISOLATED
 SERVER_A_OUTAGE_EVENT_RECOVERY=PASS_ISOLATED
@@ -155,7 +155,7 @@ FINAL_STATUS=NOT_CERTIFIED
 
 1. Server A must expose its event receiver over HTTPS with a trusted CA and require the Klyrow client certificate. The current private receiver answers HTTP with `401` and has no HTTPS listener. This host has no administrative SSH command for Server A.
 2. Run the cross-host event and delivery-event E2E after mounting the client certificate, key, and CA through protected secret files.
-3. Run isolated Postal-unavailable and RabbitMQ-unavailable recovery drills and preserve their evidence.
+3. Run the isolated RabbitMQ-unavailable recovery drill and preserve its evidence. The Postal-unavailable retry/recovery drill now passes without message loss or a duplicate canary claim.
 4. Hetzner/provider control must change the PTR from `Ubuntu-jammy-latest-amd64-base.zst` to `mail.klyrow.com`; forward A already resolves to `37.27.128.39`.
 
 External PTR readiness is reported separately and does not invalidate sandbox software behavior. Cross-host Server A event delivery is an internal production contract and remains required for terminal certification.

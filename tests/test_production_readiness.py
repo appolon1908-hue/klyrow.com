@@ -46,6 +46,8 @@ def test_outbox_retries_back_off_and_terminal_failure_updates_message():
     source = (ROOT / "apps/gateway/app/main.py").read_text()
     migration = (ROOT / "migrations/2026082201_email_outbox_and_tenant_idempotency.sql").read_text()
     assert "EmailOutbox.next_attempt_at<=current" in source
+    assert "failed=item.attempts>=5" in source
+    assert "if first_attempt:" in source
     assert "min(300,2**max(item.attempts,1))" in source
     assert 'message.status="failed"' in source
     assert 'kind="klyrow.email.failed"' in source
