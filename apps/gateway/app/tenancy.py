@@ -93,6 +93,12 @@ def switch(tenant_id:str,ctx=Depends(auth),s:Session=Depends(db)):
 @router.post("/team/invitations",status_code=201)
 def invite(x:InviteIn,ctx=Depends(auth),s:Session=Depends(db)):
     manage(ctx,s);role=validate_role(x.role);raw=secrets.token_urlsafe(32);item=TenantInvitation(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],email=x.email.lower(),role=role,token_hash=sha(raw),expires_at=now()+timedelta(hours=x.expires_hours),created_by=ctx["sub"]);s.add(item);audit(s,ctx,"tenant.invitation.created");s.commit();return {"id":item.id,"token":raw,"expires_at":item.expires_at}
+@router.get("/team/members")
+def team_members(ctx=Depends(auth),s:Session=Depends(db)):
+    return s.scalars(select(TenantMember).where(TenantMember.tenant_id==ctx["tenant"],TenantMember.active==True).order_by(TenantMember.created_at)).all()
+@router.get("/team/invitations")
+def team_invitations(ctx=Depends(auth),s:Session=Depends(db)):
+    manage(ctx,s);return s.scalars(select(TenantInvitation).where(TenantInvitation.tenant_id==ctx["tenant"]).order_by(TenantInvitation.created_at.desc())).all()
 @router.post("/team/invitations/accept",status_code=201)
 def accept(x:AcceptIn,s:Session=Depends(db)):
     item=s.scalar(select(TenantInvitation).where(TenantInvitation.token_hash==sha(x.token)))
@@ -114,6 +120,10 @@ def remove_member(user_id:str,ctx=Depends(auth),s:Session=Depends(db)):
     m.active=False;audit(s,ctx,"tenant.member.removed");s.commit()
 
 def new_service_secret():return "klys_"+secrets.token_urlsafe(36)
+@router.get("/service-accounts")
+def service_accounts(ctx=Depends(auth),s:Session=Depends(db)):
+    manage(ctx,s);rows=s.scalars(select(ServiceAccount).where(ServiceAccount.tenant_id==ctx["tenant"]).order_by(ServiceAccount.created_at.desc())).all()
+    return [{"id":row.id,"name":row.name,"client_id":row.client_id,"scopes":json.loads(row.scopes_json),"expires_at":row.expires_at,"revoked_at":row.revoked_at,"rotated_at":row.rotated_at,"created_at":row.created_at} for row in rows]
 @router.post("/service-accounts",status_code=201)
 def service_create(x:ServiceIn,ctx=Depends(auth),s:Session=Depends(db)):
     manage(ctx,s);validate_scopes(x.scopes);raw=new_service_secret();item=ServiceAccount(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],name=x.name,client_id="klyrow_"+secrets.token_hex(12),secret_hash=ph.hash(raw),scopes_json=json.dumps(sorted(set(x.scopes))),expires_at=x.expires_at,created_by=ctx["sub"]);s.add(item);audit(s,ctx,"service_account.created");s.commit();return {"id":item.id,"client_id":item.client_id,"client_secret":raw,"scopes":json.loads(item.scopes_json)}
@@ -131,6 +141,10 @@ def service_revoke(item_id:str,ctx=Depends(auth),s:Session=Depends(db)):
 @router.post("/developer/api-keys",status_code=201)
 def api_key_create(x:KeyIn,ctx=Depends(auth),s:Session=Depends(db)):
     manage(ctx,s);validate_scopes(x.scopes);raw="kly_live_"+secrets.token_urlsafe(36);item=ScopedApiKey(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],name=x.name,prefix=raw[:16],verifier_hash=sha(raw),scopes_json=json.dumps(sorted(set(x.scopes))),environment=x.environment,ip_allowlist_json=json.dumps(x.ip_allowlist),created_by=ctx["sub"],expires_at=x.expires_at);s.add(item);audit(s,ctx,"api_key.created");s.commit();return {"id":item.id,"secret":raw,"prefix":item.prefix,"scopes":json.loads(item.scopes_json)}
+@router.get("/developer/api-keys")
+def api_keys(ctx=Depends(auth),s:Session=Depends(db)):
+    manage(ctx,s);rows=s.scalars(select(ScopedApiKey).where(ScopedApiKey.tenant_id==ctx["tenant"]).order_by(ScopedApiKey.created_at.desc())).all()
+    return [{"id":row.id,"name":row.name,"prefix":row.prefix,"scopes":json.loads(row.scopes_json),"environment":row.environment,"ip_allowlist":json.loads(row.ip_allowlist_json),"last_used_at":row.last_used_at,"expires_at":row.expires_at,"revoked_at":row.revoked_at,"created_at":row.created_at} for row in rows]
 @router.delete("/developer/api-keys/{item_id}",status_code=204)
 def api_key_revoke(item_id:str,ctx=Depends(auth),s:Session=Depends(db)):
     manage(ctx,s);item=s.scalar(select(ScopedApiKey).where(ScopedApiKey.id==item_id,ScopedApiKey.tenant_id==ctx["tenant"]));
@@ -141,6 +155,10 @@ def smtp_create(x:SmtpIn,ctx=Depends(auth),s:Session=Depends(db)):
     manage(ctx,s)
     if set(x.scopes)!={"smtp.send"}:raise HTTPException(422,"invalid_smtp_scope")
     password=secrets.token_urlsafe(36);item=SmtpCredential(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],username="smtp_"+secrets.token_hex(10),verifier_hash=ph.hash(password),scopes_json='["smtp.send"]',created_by=ctx["sub"],expires_at=x.expires_at);s.add(item);audit(s,ctx,"smtp_credential.created");s.commit();return {"id":item.id,"username":item.username,"password":password,"tls_required":True}
+@router.get("/developer/smtp-credentials")
+def smtp_credentials(ctx=Depends(auth),s:Session=Depends(db)):
+    manage(ctx,s);rows=s.scalars(select(SmtpCredential).where(SmtpCredential.tenant_id==ctx["tenant"]).order_by(SmtpCredential.created_at.desc())).all()
+    return [{"id":row.id,"username":row.username,"scopes":json.loads(row.scopes_json),"tls_required":True,"expires_at":row.expires_at,"revoked_at":row.revoked_at,"rotated_at":row.rotated_at,"created_at":row.created_at} for row in rows]
 @router.post("/developer/smtp-credentials/{item_id}/rotate")
 def smtp_rotate(item_id:str,ctx=Depends(auth),s:Session=Depends(db)):
     manage(ctx,s);item=s.scalar(select(SmtpCredential).where(SmtpCredential.id==item_id,SmtpCredential.tenant_id==ctx["tenant"],SmtpCredential.revoked_at==None));

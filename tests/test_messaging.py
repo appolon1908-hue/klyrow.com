@@ -26,6 +26,9 @@ def test_domain_global_ownership_dkim_rotation_and_sender_spoof_denial():
     denied=client.post("/v1/senders",headers=h,json={"domain_claim_id":claim,"email":"spoof@other.example","display_name":"Spoof","stream":"MARKETING"});assert denied.status_code==403
     sender=client.post("/v1/senders",headers=h,json={"domain_claim_id":claim,"email":"news@tenant-a.example","display_name":"News","stream":"MARKETING"});assert sender.status_code==201
     assert client.post("/v1/senders",headers=headers("b"),json={"domain_claim_id":claim,"email":"bad@tenant-a.example","display_name":"Bad","stream":"MARKETING"}).status_code==404
+    assert {row["domain"] for row in client.get("/v1/domains/claims",headers=h).json()}=={"tenant-a.example"}
+    assert {row["address"] for row in client.get("/v1/senders",headers=h).json()}=={"news@tenant-a.example"}
+    assert client.get("/v1/domains/claims",headers=headers("b")).json()==[]
 
 def test_stream_separation_template_version_render_rollback_and_campaign_safety():
     h=headers("a")
@@ -44,6 +47,10 @@ def test_stream_separation_template_version_render_rollback_and_campaign_safety(
     preflight=client.post(f"/v1/campaign-definitions/{cid}/preflight",headers=h,json={"estimated_recipients":10,"estimated_suppressed":1,"estimated_invalid":1,"quota_remaining":100,"estimated_unit_cost":"0.001"});assert preflight.json()["eligible"]==8 and preflight.json()["allowed"] is True
     scheduled=client.post(f"/v1/campaign-definitions/{cid}/schedule",headers=h,json={"scheduled_at":(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()});assert scheduled.json()["status"]=="SCHEDULED"
     assert client.post(f"/v1/campaign-definitions/{cid}/cancel",headers=h).json()["status"]=="CANCELLED"
+    assert len(client.get("/v1/templates",headers=h).json())==1
+    assert len(client.get("/v1/streams",headers=h).json())==1
+    assert len(client.get("/v1/campaign-definitions",headers=h).json())==1
+    assert client.get("/v1/templates",headers=headers("b")).json()==[]
 
 def test_exact_inbound_routing_duplicate_protection_and_quarantine():
     h,claim=claim_domain("a","inbound.example")
@@ -52,12 +59,16 @@ def test_exact_inbound_routing_duplicate_protection_and_quarantine():
     accepted=client.post("/v1/inbound/fixtures",headers=h,json=base);duplicate=client.post("/v1/inbound/fixtures",headers=h,json=base);assert accepted.json()["state"]=="ROUTED" and duplicate.json()["duplicate"] is True
     infected=client.post("/v1/inbound/fixtures",headers=h,json={**base,"message_id":"<message-2@outside.example>","malware_status":"INFECTED"});assert infected.json()["state"]=="QUARANTINED"
     assert client.post("/v1/inbound/fixtures",headers=headers("b"),json=base).status_code==404
+    assert len(client.get("/v1/inbound/routes",headers=h).json())==1
+    assert len(client.get("/v1/inbound/messages",headers=h).json())==2
+    assert client.get("/v1/inbound/messages",headers=headers("b")).json()==[]
 
 def test_webhook_event_idempotency_and_delivery_retry_policy():
     h=headers("a")
     webhook=client.post("/v1/webhook-subscriptions",headers=h,json={"url":"https://example.com/events","events":["message.delivered"]});assert webhook.status_code==201,webhook.text;wid=webhook.json()["id"]
     event={"event_id":"event-00000001","event_type":"message.delivered","payload":{"message_id":"m"}}
     first=client.post(f"/v1/webhook-subscriptions/{wid}/test",headers=h,json=event);duplicate=client.post(f"/v1/webhook-subscriptions/{wid}/test",headers=h,json=event);assert first.status_code==202 and duplicate.json()["duplicate"] is True
+    listed=client.get("/v1/webhook-subscriptions",headers=h).json();assert listed[0]["id"]==wid and "secret_hash" not in listed[0] and "encrypted_secret_ref" not in listed[0]
     with DB() as s:s.add(Message(id="retry-message",tenant_id="a",recipient="r@example.com",sender="s@example.com",subject="x",status="QUEUED"));s.commit()
     job=client.post("/v1/delivery-jobs/retry-message",headers=h).json();leased=client.post(f"/v1/delivery-jobs/{job['id']}/lease",headers=h,json={"worker_id":"worker-1","lease_seconds":30});assert leased.json()["state"]=="PROCESSING"
     temporary=client.post(f"/v1/delivery-jobs/{job['id']}/fail",headers=h,json={"error_class":"NETWORK_FAILURE"});assert temporary.json()["state"]=="RETRY"

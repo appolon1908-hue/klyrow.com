@@ -227,7 +227,7 @@ class Reset(BaseModel): token:str; password:str=Field(min_length=14)
 class KeyIn(BaseModel): name:str=Field(min_length=1,max_length=80)
 class DomainIn(BaseModel): domain:str=Field(pattern=r"^[a-z0-9][a-z0-9.-]+$")
 class MailIn(BaseModel):
-    customer_id:Optional[str]=None; to:EmailStr; sender:EmailStr; reply_to:Optional[EmailStr]=None; subject:str=Field(max_length=998); html:str=Field(max_length=100000); text:Optional[str]=None; template_id:Optional[str]=None; campaign_id:Optional[str]=None; tags:list[str]=Field(default_factory=list,max_length=50); tracking:dict=Field(default_factory=dict); callback_metadata:dict=Field(default_factory=dict); stream:str=Field(default="transactional",pattern="^(marketing|transactional)$"); topic:str="marketing"
+    customer_id:Optional[str]=None; to:EmailStr; sender:EmailStr; reply_to:Optional[EmailStr]=None; subject:str=Field(max_length=998); html:str=Field(max_length=100000); text:Optional[str]=None; template_id:Optional[str]=None; campaign_id:Optional[str]=None; tags:list[str]=Field(default_factory=list,max_length=50); tracking:dict=Field(default_factory=dict); callback_metadata:dict=Field(default_factory=dict); stream:str=Field(default="transactional",pattern="^(marketing|transactional|security|system|bulk)$"); topic:str="marketing"
     @model_validator(mode="before")
     @classmethod
     def accept_from_alias(cls,data):
@@ -575,6 +575,11 @@ def message(mid:str,ctx=Depends(auth),s:Session=Depends(db)):
 @app.get("/v1/messages/{mid}")
 def message_alias(mid:str,ctx=Depends(auth),s:Session=Depends(db)):
     return message(mid,ctx,s)
+@app.get("/v1/messages")
+def messages(ctx=Depends(auth),s:Session=Depends(db),status:Optional[str]=None,limit:int=50,offset:int=0):
+    limit=max(1,min(limit,200));offset=max(0,offset);query=select(Message).where(Message.tenant_id==ctx["tenant"])
+    if status:query=query.where(Message.status==status)
+    return s.scalars(query.order_by(Message.created_at.desc()).offset(offset).limit(limit)).all()
 @app.get("/v1/email/{mid}/events")
 def events(mid:str,ctx=Depends(auth),s:Session=Depends(db)): return s.scalars(select(Event).where(Event.message_id==mid,Event.tenant_id==ctx["tenant"])).all()
 @app.post("/v1/webhooks/postal",status_code=202)
@@ -650,6 +655,10 @@ def admin_quota(tid:str,x:QuotaIn,ctx=Depends(require("platform_admin")),s:Sessi
 def portal(): return Path(__file__).with_name("portal.html").read_text()
 @app.get("/assets/portal.js",include_in_schema=False)
 def portal_js():return FileResponse(Path(__file__).with_name("portal.js"),media_type="application/javascript")
+@app.get("/admin",response_class=HTMLResponse,include_in_schema=False)
+def admin_portal():return Path(__file__).with_name("admin.html").read_text()
+@app.get("/assets/admin.js",include_in_schema=False)
+def admin_js():return FileResponse(Path(__file__).with_name("admin.js"),media_type="application/javascript")
 
 from .saas import router as saas_router
 app.include_router(saas_router)

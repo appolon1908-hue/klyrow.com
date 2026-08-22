@@ -49,6 +49,7 @@ def test_service_account_secret_is_displayed_once_rotatable_and_revocable():
     assert created.status_code==201 and created.json()["client_secret"].startswith("klys_")
     with DB() as session:
         row=session.get(ServiceAccount,created.json()["id"]);assert created.json()["client_secret"] not in row.secret_hash and json.loads(row.scopes_json)==["mail.read","mail.send"]
+    listed=client.get("/v1/service-accounts",headers=owner).json();assert listed[0]["client_id"]==created.json()["client_id"] and "secret_hash" not in listed[0]
     rotated=client.post(f"/v1/service-accounts/{created.json()['id']}/rotate",headers=owner)
     assert rotated.status_code==200 and rotated.json()["client_secret"]!=created.json()["client_secret"]
     assert client.delete(f"/v1/service-accounts/{created.json()['id']}",headers=owner).status_code==204
@@ -62,6 +63,9 @@ def test_scoped_api_and_smtp_credentials_are_hashed_and_tenant_scoped():
         stored_key=session.get(ScopedApiKey,key.json()["id"]);stored_smtp=session.get(SmtpCredential,smtp.json()["id"])
         assert stored_key.tenant_id==tenant and key.json()["secret"] not in stored_key.verifier_hash
         assert stored_smtp.tenant_id==tenant and smtp.json()["password"] not in stored_smtp.verifier_hash
+    keys=client.get("/v1/developer/api-keys",headers=owner).json();smtp_rows=client.get("/v1/developer/smtp-credentials",headers=owner).json()
+    assert keys[0]["prefix"]==key.json()["prefix"] and "verifier_hash" not in keys[0]
+    assert smtp_rows[0]["username"]==smtp.json()["username"] and "verifier_hash" not in smtp_rows[0]
     rotated=client.post(f"/v1/developer/smtp-credentials/{smtp.json()['id']}/rotate",headers=owner)
     assert rotated.status_code==200 and rotated.json()["password"]!=smtp.json()["password"]
     assert client.delete(f"/v1/developer/api-keys/{key.json()['id']}",headers=owner).status_code==204

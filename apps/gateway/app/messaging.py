@@ -72,6 +72,10 @@ def render_version(version,variables):
         return value
     return {"subject":apply(version.subject),"html":apply(version.html_body),"text":apply(version.text_body)}
 
+@router.get("/domains/claims")
+def domain_claims(ctx=Depends(auth),s:Session=Depends(db)):
+    return s.scalars(select(DomainClaim).where(DomainClaim.tenant_id==ctx["tenant"]).order_by(DomainClaim.created_at.desc())).all()
+
 @router.post("/domains/claims",status_code=201)
 def domain_claim(x:DomainClaimIn,ctx=Depends(auth),s:Session=Depends(db)):
     name=x.domain.lower().rstrip(".")
@@ -95,13 +99,22 @@ def sender_create(x:SenderIn,ctx=Depends(auth),s:Session=Depends(db)):
     if x.email.lower().rsplit("@",1)[1]!=claim.domain:raise HTTPException(403,"sender_spoofing_denied")
     if kind not in STREAMS:raise HTTPException(422,"invalid_message_stream")
     item=SenderIdentity(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],domain_claim_id=claim.id,address=x.email.lower(),display_name=x.display_name,reply_to=str(x.reply_to).lower() if x.reply_to else None,stream=kind,status="ACTIVE",verified=True);s.add(item);audit(s,ctx,"sender.created");s.commit();return {"id":item.id,"status":item.status,"verified":item.verified}
+@router.get("/senders")
+def senders(ctx=Depends(auth),s:Session=Depends(db)):
+    return s.scalars(select(SenderIdentity).where(SenderIdentity.tenant_id==ctx["tenant"]).order_by(SenderIdentity.address)).all()
 @router.post("/streams",status_code=201)
 def stream_create(x:StreamIn,ctx=Depends(auth),s:Session=Depends(db)):
     kind=x.kind.upper()
     if kind not in STREAMS:raise HTTPException(422,"invalid_message_stream")
     if kind in {"TRANSACTIONAL","SECURITY"} and x.suppression_policy=="MARKETING_GLOBAL":raise HTTPException(422,"stream_suppression_policy_invalid")
     item=MessageStream(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],name=x.name,kind=kind,rate_limit=x.rate_limit,retention_days=x.retention_days,tracking_enabled=x.tracking_enabled,suppression_policy=x.suppression_policy);s.add(item);audit(s,ctx,"stream.created");s.commit();return {"id":item.id,"kind":item.kind,"reputation_state":item.reputation_state}
+@router.get("/streams")
+def streams(ctx=Depends(auth),s:Session=Depends(db)):
+    return s.scalars(select(MessageStream).where(MessageStream.tenant_id==ctx["tenant"]).order_by(MessageStream.name)).all()
 
+@router.get("/templates")
+def templates(ctx=Depends(auth),s:Session=Depends(db)):
+    return s.scalars(select(Template).where(Template.tenant_id==ctx["tenant"]).order_by(Template.created_at.desc())).all()
 @router.post("/templates",status_code=201)
 def template_create(x:TemplateIn,ctx=Depends(auth),s:Session=Depends(db)):
     validate_html(x.html_body);item=Template(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],slug=x.slug,name=x.name,locale=x.locale);version=TemplateVersion(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],template_id=item.id,version=1,subject=x.subject,html_body=x.html_body,text_body=x.text_body,variables_json=json.dumps(sorted(set(x.variables))),created_by=ctx["sub"]);s.add_all([item,version]);audit(s,ctx,"template.created");s.commit();return {"id":item.id,"version":1,"status":item.status}
@@ -126,6 +139,9 @@ def campaign_create(x:CampaignIn,ctx=Depends(auth),s:Session=Depends(db)):
     if not sender.verified or sender.stream!="MARKETING":raise HTTPException(409,"marketing_sender_required")
     if template.status!="PUBLISHED":raise HTTPException(409,"published_template_required")
     item=CampaignDefinition(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],name=x.name,sender_id=sender.id,template_id=template.id,segment_id=x.segment_id,timezone=x.timezone,frequency_cap=x.frequency_cap,tracking_json=json.dumps(x.tracking));s.add(item);audit(s,ctx,"campaign.created");s.commit();return {"id":item.id,"status":item.status}
+@router.get("/campaign-definitions")
+def campaign_definitions(ctx=Depends(auth),s:Session=Depends(db)):
+    return s.scalars(select(CampaignDefinition).where(CampaignDefinition.tenant_id==ctx["tenant"]).order_by(CampaignDefinition.created_at.desc())).all()
 @router.post("/campaign-definitions/{item_id}/test")
 def campaign_test(item_id:str,ctx=Depends(auth),s:Session=Depends(db)):
     item=tenant_get(s,CampaignDefinition,item_id,ctx["tenant"]);item.status="TESTING";item.test_sent_at=now();audit(s,ctx,"campaign.test_fixture_completed");s.commit();return {"status":item.status,"provider_submission":False,"internal_sink":True}
@@ -154,6 +170,12 @@ def inbound_route(x:InboundRouteIn,ctx=Depends(auth),s:Session=Depends(db)):
     if x.wildcard and recipient.split("@",1)[0]!="*":raise HTTPException(422,"wildcard_route_must_use_star")
     if x.destination_kind=="WEBHOOK":safe_webhook_url(x.destination_ref)
     item=InboundRoute(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],domain_claim_id=claim.id,recipient=recipient,wildcard=x.wildcard,destination_kind=x.destination_kind,destination_ref=x.destination_ref,max_bytes=x.max_bytes,enabled=True);s.add(item);audit(s,ctx,"inbound.route_created");s.commit();return {"id":item.id,"enabled":item.enabled,"catch_all":item.wildcard}
+@router.get("/inbound/routes")
+def inbound_routes(ctx=Depends(auth),s:Session=Depends(db)):
+    return s.scalars(select(InboundRoute).where(InboundRoute.tenant_id==ctx["tenant"]).order_by(InboundRoute.recipient)).all()
+@router.get("/inbound/messages")
+def inbound_messages(ctx=Depends(auth),s:Session=Depends(db)):
+    return s.scalars(select(InboundMessage).where(InboundMessage.tenant_id==ctx["tenant"]).order_by(InboundMessage.created_at.desc()).limit(200)).all()
 @router.post("/inbound/fixtures",status_code=202)
 def inbound_fixture(x:InboundFixture,ctx=Depends(auth),s:Session=Depends(db)):
     recipient=str(x.recipient).lower();route=s.scalar(select(InboundRoute).where(InboundRoute.tenant_id==ctx["tenant"],InboundRoute.recipient==recipient,InboundRoute.enabled==True))
@@ -166,6 +188,10 @@ def inbound_fixture(x:InboundFixture,ctx=Depends(auth),s:Session=Depends(db)):
 @router.post("/webhook-subscriptions",status_code=201)
 def webhook_create(x:WebhookIn,ctx=Depends(auth),s:Session=Depends(db)):
     url=safe_webhook_url(x.url);raw=secrets.token_urlsafe(32);item=WebhookSubscription(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],url=url,events_json=json.dumps(sorted(set(x.events))),secret_hash=sha(raw),encrypted_secret_ref="secret://webhooks/"+str(uuid.uuid4()));s.add(item);audit(s,ctx,"webhook.created");s.commit();return {"id":item.id,"secret":raw,"events":json.loads(item.events_json)}
+@router.get("/webhook-subscriptions")
+def webhook_subscriptions(ctx=Depends(auth),s:Session=Depends(db)):
+    rows=s.scalars(select(WebhookSubscription).where(WebhookSubscription.tenant_id==ctx["tenant"]).order_by(WebhookSubscription.created_at.desc())).all()
+    return [{"id":row.id,"url":row.url,"events":json.loads(row.events_json),"enabled":row.enabled,"created_at":row.created_at,"rotated_at":row.rotated_at} for row in rows]
 @router.post("/webhook-subscriptions/{item_id}/rotate")
 def webhook_rotate(item_id:str,ctx=Depends(auth),s:Session=Depends(db)):
     item=tenant_get(s,WebhookSubscription,item_id,ctx["tenant"]);raw=secrets.token_urlsafe(32);item.secret_hash=sha(raw);item.encrypted_secret_ref="secret://webhooks/"+str(uuid.uuid4());item.rotated_at=now();audit(s,ctx,"webhook.rotated");s.commit();return {"secret":raw,"rotated_at":item.rotated_at}
