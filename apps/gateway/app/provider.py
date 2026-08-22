@@ -12,7 +12,7 @@ from pathlib import PurePath
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from email_validator import EmailNotValidError, validate_email
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func, select
@@ -80,6 +80,8 @@ class TenantMailPolicy(Base):
     warmup_growth_percent: Mapped[int] = mapped_column(Integer, default=20)
     ip_pool: Mapped[str] = mapped_column(String, default="SHARED")
     tracking_mode: Mapped[str] = mapped_column(String, default="DISABLED")
+    spam_quarantine_score: Mapped[int] = mapped_column(Integer, default=5)
+    spam_reject_score: Mapped[int] = mapped_column(Integer, default=15)
 
 
 class ProviderMessage(Base):
@@ -165,6 +167,18 @@ class ProviderInbound(Base):
     html_body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     attachments_json: Mapped[str] = mapped_column(Text, default="[]")
     disposition: Mapped[str] = mapped_column(String, default="ACCEPT", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class TrackingToken(Base):
+    __tablename__ = "tracking_tokens"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String, unique=True, index=True)
+    tenant_id: Mapped[str] = mapped_column(String, index=True)
+    message_id: Mapped[str] = mapped_column(ForeignKey("provider_messages.id"), index=True)
+    kind: Mapped[str] = mapped_column(String)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    first_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -276,6 +290,14 @@ class PolicyIn(BaseModel):
     warmup_growth_percent: int = Field(default=20, ge=0, le=100)
     ip_pool: str = "SHARED"
     tracking_mode: str = "DISABLED"
+    spam_quarantine_score: int = Field(default=5, ge=0, le=1000)
+    spam_reject_score: int = Field(default=15, ge=1, le=1000)
+
+    @model_validator(mode="after")
+    def validate_spam_thresholds(self):
+        if self.spam_reject_score <= self.spam_quarantine_score:
+            raise ValueError("spam_reject_score_must_exceed_quarantine_score")
+        return self
 
 
 class InboundFixtureIn(BaseModel):
@@ -283,6 +305,7 @@ class InboundFixtureIn(BaseModel):
     envelope_to: EmailStr
     raw_message_b64: str = Field(min_length=4, max_length=35_000_000)
     destination_override: Optional[str] = None
+    provider_spam_score: int = Field(default=0, ge=0, le=1000)
 
 
 class SmtpCredentialIn(BaseModel):
@@ -828,11 +851,14 @@ def policy_update(payload: PolicyIn, ctx=Depends(auth), s: Session = Depends(db)
     item.warmup_growth_percent = payload.warmup_growth_percent
     item.ip_pool = payload.ip_pool
     item.tracking_mode = payload.tracking_mode
+    item.spam_quarantine_score = payload.spam_quarantine_score
+    item.spam_reject_score = payload.spam_reject_score
     audit_provider(s, ctx, "policy.updated", "accepted")
     s.commit()
     return {"sending_disabled": item.sending_disabled, "sandbox_mode": item.sandbox_mode,
         "reputation_state": item.reputation_state, "ip_pool": item.ip_pool,
-        "tracking_mode": item.tracking_mode, "warmup_daily_limit": item.warmup_daily_limit,
+        "tracking_mode": item.tracking_mode, "spam_quarantine_score": item.spam_quarantine_score,
+        "spam_reject_score": item.spam_reject_score, "warmup_daily_limit": item.warmup_daily_limit,
         "warmup_hourly_limit": item.warmup_hourly_limit}
 
 
@@ -999,6 +1025,10 @@ def inbound_receive(payload: InboundFixtureIn, ctx=Depends(auth), s: Session = D
         raise HTTPException(422, "invalid_mime_encoding") from exc
     tenant_policy = policy_for(s, ctx["tenant"])
     parsed = parse_inbound(raw, tenant_policy.max_message_bytes, tenant_policy.max_attachment_bytes)
+    if payload.provider_spam_score >= tenant_policy.spam_reject_score:
+        parsed["disposition"] = "REJECT"
+    elif payload.provider_spam_score >= tenant_policy.spam_quarantine_score:
+        parsed["disposition"] = "QUARANTINE"
     duplicate_message = None
     if parsed["message_id"]:
         duplicate_message = s.scalar(select(ProviderInbound).where(
@@ -1022,6 +1052,48 @@ def inbound_receive(payload: InboundFixtureIn, ctx=Depends(auth), s: Session = D
     s.commit()
     return {"inbound_id": item.id, "duplicate": False, "disposition": item.disposition,
         "route_id": route.id, "attachments": parsed["attachments"]}
+
+
+@router.post("/messages/{message_id}/tracking/{kind}", status_code=201)
+def create_tracking_token(message_id: str, kind: str, ctx=Depends(auth), s: Session = Depends(db)):
+    kind = kind.upper()
+    if kind not in {"OPEN", "CLICK"}:
+        raise HTTPException(422, "invalid_tracking_kind")
+    message = s.scalar(select(ProviderMessage).where(ProviderMessage.id == message_id,
+        ProviderMessage.tenant_id == ctx["tenant"]))
+    if not message:
+        raise HTTPException(404, "message_not_found")
+    tenant_policy = policy_for(s, ctx["tenant"])
+    if tenant_policy.tracking_mode == "DISABLED" or kind not in tenant_policy.tracking_mode:
+        raise HTTPException(403, "tracking_not_enabled")
+    raw = secrets.token_urlsafe(32)
+    item = TrackingToken(id=str(uuid.uuid4()), token_hash=hashlib.sha256(raw.encode()).hexdigest(),
+        tenant_id=ctx["tenant"], message_id=message.id, kind=kind,
+        expires_at=now()+timedelta(days=int(os.getenv("KLYROW_TRACKING_RETENTION_DAYS", "30"))))
+    s.add(item)
+    audit_provider(s, ctx, "tracking.token.created", "accepted", resource_id=item.id)
+    s.commit()
+    return {"token": raw, "kind": kind, "expires_at": item.expires_at.isoformat()}
+
+
+@status_router.get("/t/{kind}/{token}", status_code=204)
+def consume_tracking_token(kind: str, token: str, s: Session = Depends(db)):
+    kind = kind.upper()
+    if kind not in {"OPEN", "CLICK"} or len(token) < 32 or len(token) > 200:
+        raise HTTPException(404, "tracking_token_not_found")
+    item = s.scalar(select(TrackingToken).where(
+        TrackingToken.token_hash == hashlib.sha256(token.encode()).hexdigest(), TrackingToken.kind == kind))
+    expires_at = item.expires_at.replace(tzinfo=timezone.utc) if item and item.expires_at.tzinfo is None else (item.expires_at if item else None)
+    if not item or expires_at < now():
+        raise HTTPException(404, "tracking_token_not_found")
+    if item.first_seen_at is None:
+        item.first_seen_at = now()
+        event_id = str(uuid.uuid4())
+        s.add(ProviderEvent(id=event_id, tenant_id=item.tenant_id, message_id=item.message_id,
+            kind="message."+kind.lower()+"ed", payload_json=json.dumps({"event_id": event_id,
+            "event": "message."+kind.lower()+"ed", "message_id": item.message_id}, separators=(",", ":"), sort_keys=True)))
+        s.commit()
+    return Response(status_code=204, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
 
 @router.get("/operations/health")
