@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 import httpx, jwt
+from jwt import PyJWKClient
 from argon2 import PasswordHasher
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
@@ -37,6 +38,7 @@ REQUESTS=Counter("klyrow_http_requests_total","Requests",["path","status"])
 MAIL=Counter("klyrow_mail_total","Mail lifecycle",["event"])
 LATENCY=Histogram("klyrow_http_request_duration_seconds","Request latency",["path"])
 rate_buckets=defaultdict(deque)
+_jwks_clients={}
 
 class Base(DeclarativeBase): pass
 class Tenant(Base):
@@ -133,10 +135,27 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
                 if not tenant or not tenant.enabled: raise HTTPException(403,"account_suspended")
                 ctx={"sub":key.id,"tenant":key.tenant_id,"role":"tenant_admin","api_key":True}
             else:
-                ctx=jwt.decode(raw,SECRET,algorithms=["HS256"])
-                from .saas import SessionRecord
-                session=s.get(SessionRecord,ctx.get("sid")) if ctx.get("sid") else None
-                if ctx.get("sid") and (not session or session.revoked):raise HTTPException(401,"session_revoked")
+                header=jwt.get_unverified_header(raw)
+                if header.get("alg")=="HS256":
+                    if os.getenv("KLYROW_ENV","development").lower()=="production" or os.getenv("KLYROW_LOCAL_AUTH_ENABLED","true").lower()!="true":raise HTTPException(401,"canonical_oidc_required")
+                    ctx=jwt.decode(raw,SECRET,algorithms=["HS256"])
+                    from .saas import SessionRecord
+                    session=s.get(SessionRecord,ctx.get("sid")) if ctx.get("sid") else None
+                    if ctx.get("sid") and (not session or session.revoked):raise HTTPException(401,"session_revoked")
+                else:
+                    issuer="https://auth.codestra.co/realms/codestra"
+                    if os.getenv("KLYROW_OIDC_ISSUER",issuer)!=issuer:raise HTTPException(503,"canonical_oidc_misconfigured")
+                    client=_jwks_clients.setdefault(issuer,PyJWKClient(issuer+"/protocol/openid-connect/certs",cache_keys=True,lifespan=300))
+                    signing_key=client.get_signing_key_from_jwt(raw)
+                    audience=os.getenv("KLYROW_OIDC_AUDIENCE","klyrow-api")
+                    claims=jwt.decode(raw,signing_key.key,algorithms=["RS256","ES256"],audience=audience,issuer=issuer,options={"require":["exp","iat","sub","iss","aud"]})
+                    from .tenancy import OidcIdentity,TenantMember
+                    identity=s.scalar(select(OidcIdentity).where(OidcIdentity.issuer==issuer,OidcIdentity.subject==claims["sub"],OidcIdentity.enabled==True))
+                    if not identity:raise HTTPException(403,"oidc_identity_not_registered")
+                    tenant_id=x_klyrow_tenant_id or identity.default_tenant_id
+                    membership=s.scalar(select(TenantMember).where(TenantMember.tenant_id==tenant_id,TenantMember.user_id==identity.user_id,TenantMember.active==True)) if tenant_id else None
+                    if not membership:raise HTTPException(403,"tenant_membership_required")
+                    ctx={"sub":identity.user_id,"oidc_sub":claims["sub"],"tenant":tenant_id,"role":membership.role,"identity_type":identity.identity_type,"scopes":set(str(claims.get("scope","")).split())}
                 tenant=s.get(Tenant,ctx["tenant"])
                 if not tenant or not tenant.enabled:raise HTTPException(403,"account_suspended")
     except HTTPException: raise
@@ -427,6 +446,7 @@ def metrics(authorization:str=Header(default="")):
     from fastapi.responses import Response; return Response(generate_latest(),media_type="text/plain")
 @app.post("/v1/auth/login")
 def login(x:Login,request:Request,s:Session=Depends(db)):
+    if os.getenv("KLYROW_ENV","development").lower()=="production" or os.getenv("KLYROW_LOCAL_AUTH_ENABLED","true").lower()!="true":raise HTTPException(410,"use_canonical_oidc")
     auth_rate(request,"login")
     u=s.scalar(select(User).where(User.email==x.email.lower()))
     try: valid=u and u.enabled and ph.verify(u.password_hash,x.password)

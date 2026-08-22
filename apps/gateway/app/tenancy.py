@@ -40,6 +40,8 @@ class ScopedApiKey(Base):
     __tablename__="scoped_api_keys"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); name:Mapped[str]=mapped_column(String); prefix:Mapped[str]=mapped_column(String,index=True); verifier_hash:Mapped[str]=mapped_column(String,unique=True); scopes_json:Mapped[str]=mapped_column(Text); environment:Mapped[str]=mapped_column(String); ip_allowlist_json:Mapped[str]=mapped_column(Text,default="[]"); created_by:Mapped[str]=mapped_column(String); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); last_used_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); expires_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); revoked_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True)
 class SmtpCredential(Base):
     __tablename__="smtp_credentials"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); username:Mapped[str]=mapped_column(String,unique=True); verifier_hash:Mapped[str]=mapped_column(String); scopes_json:Mapped[str]=mapped_column(Text); created_by:Mapped[str]=mapped_column(String); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); expires_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); revoked_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); rotated_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True)
+class OidcIdentity(Base):
+    __tablename__="oidc_identities"; id:Mapped[str]=mapped_column(String,primary_key=True); issuer:Mapped[str]=mapped_column(String,index=True); subject:Mapped[str]=mapped_column(String,index=True); user_id:Mapped[str]=mapped_column(String,index=True); default_tenant_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); identity_type:Mapped[str]=mapped_column(String,default="KLYROW_ONLY"); enabled:Mapped[bool]=mapped_column(Boolean,default=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); __table_args__=(UniqueConstraint("issuer","subject",name="uq_oidc_issuer_subject"),)
 
 class OrgIn(BaseModel): name:str=Field(min_length=2,max_length=120); slug:str=Field(pattern=r"^[a-z0-9][a-z0-9-]{1,61}$")
 class InviteIn(BaseModel): email:EmailStr; role:str; expires_hours:int=Field(default=72,ge=1,le=720)
@@ -48,6 +50,7 @@ class RoleIn(BaseModel): role:str
 class ServiceIn(BaseModel): name:str=Field(min_length=2,max_length=100); scopes:list[str]=Field(min_length=1,max_length=30); expires_at:Optional[datetime]=None
 class KeyIn(BaseModel): name:str=Field(min_length=2,max_length=100); scopes:list[str]=Field(min_length=1,max_length=30); environment:str=Field(pattern="^(test|development|staging|production)$"); ip_allowlist:list[str]=Field(default_factory=list,max_length=50); expires_at:Optional[datetime]=None
 class SmtpIn(BaseModel): scopes:list[str]=Field(default=["smtp.send"],min_length=1,max_length=10); expires_at:Optional[datetime]=None
+class OidcIdentityIn(BaseModel):subject:str=Field(min_length=8,max_length=200);user_id:str;default_tenant_id:Optional[str]=None;identity_type:str=Field(pattern="^(KLYROW_ONLY|KLYROW_ODOO_PORTAL|INTERNAL_EMPLOYEE|SERVICE_ACCOUNT)$")
 
 def member(s,tenant,user):return s.scalar(select(TenantMember).where(TenantMember.tenant_id==tenant,TenantMember.user_id==user,TenantMember.active==True))
 def manage(ctx,s):
@@ -67,6 +70,18 @@ def validate_scopes(scopes):
 def organization(x:OrgIn,ctx=Depends(auth),s:Session=Depends(db)):
     if s.scalar(select(Organization).where(Organization.slug==x.slug)):raise HTTPException(409,"organization_slug_taken")
     tenant=Tenant(id=str(uuid.uuid4()),name=x.name,quota=1000);org=Organization(id=str(uuid.uuid4()),tenant_id=tenant.id,name=x.name,slug=x.slug);membership=TenantMember(id=str(uuid.uuid4()),tenant_id=tenant.id,user_id=ctx["sub"],role="OWNER");s.add_all([tenant,org,membership]);audit(s,{**ctx,"tenant":tenant.id},"organization.created");s.commit();return {"id":org.id,"tenant_id":tenant.id,"slug":org.slug}
+@router.get("/auth/oidc/config")
+def oidc_config():
+    issuer="https://auth.codestra.co/realms/codestra"
+    return {"issuer":issuer,"authorization_endpoint":issuer+"/protocol/openid-connect/auth","token_endpoint":issuer+"/protocol/openid-connect/token","client_id":"klyrow-portal","response_type":"code","code_challenge_method":"S256","scopes":["openid","profile","email"],"local_password_login":False}
+@router.post("/admin/oidc-identities",status_code=201)
+def oidc_identity(x:OidcIdentityIn,ctx=Depends(require("platform_admin")),s:Session=Depends(db)):
+    issuer="https://auth.codestra.co/realms/codestra";user=s.get(User,x.user_id)
+    if not user:raise HTTPException(404,"user_not_found")
+    if x.default_tenant_id and not s.get(Tenant,x.default_tenant_id):raise HTTPException(404,"tenant_not_found")
+    existing=s.scalar(select(OidcIdentity).where(OidcIdentity.issuer==issuer,OidcIdentity.subject==x.subject))
+    if existing:raise HTTPException(409,"oidc_identity_exists")
+    item=OidcIdentity(id=str(uuid.uuid4()),issuer=issuer,subject=x.subject,user_id=user.id,default_tenant_id=x.default_tenant_id,identity_type=x.identity_type);s.add(item);audit(s,ctx,"oidc_identity.created");s.commit();return {"id":item.id,"issuer":item.issuer,"subject":item.subject,"identity_type":item.identity_type}
 @router.get("/organizations")
 def organizations(ctx=Depends(auth),s:Session=Depends(db)):
     ids=select(TenantMember.tenant_id).where(TenantMember.user_id==ctx["sub"],TenantMember.active==True);return s.scalars(select(Organization).where(Organization.tenant_id.in_(ids))).all()
