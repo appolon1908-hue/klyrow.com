@@ -27,6 +27,9 @@ def test_schema_migration_is_a_required_gateway_dependency():
     canary = (ROOT / "migrations/2026082202_production_canary_claim_ledger.sql").read_text()
     assert "ALTER COLUMN updated_at SET DEFAULT now()" in canary
     assert "claimed_deliveries, updated_at" in canary
+    legacy = (ROOT / "migrations/0000_legacy_schema_compat.sql").read_text()
+    assert "RENAME COLUMN domain_id TO domain_claim_id" in legacy
+    assert "RENAME COLUMN secret_hash TO verifier_hash" in legacy
 
 
 def test_upgrade_migrates_legacy_environment_secrets_before_compose():
