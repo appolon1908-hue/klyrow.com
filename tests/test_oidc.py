@@ -1,4 +1,5 @@
 import os,time
+from pathlib import Path
 from types import SimpleNamespace
 
 import jwt
@@ -21,6 +22,14 @@ def token(private,**changes):
 
 def test_oidc_config_requires_pkce_and_disables_local_password():
     body=client.get("/v1/auth/oidc/config").json();assert body["issuer"]==issuer and body["code_challenge_method"]=="S256" and body["local_password_login"] is False
+
+def test_portal_uses_authorization_code_pkce_not_password_submission():
+    source=(Path(__file__).parents[1]/"apps/gateway/app/portal.js").read_text()
+    assert 'code_challenge_method:"S256"' in source
+    assert 'grant_type:"authorization_code"' in source
+    assert 'crypto.subtle.digest("SHA-256"' in source
+    assert 'query.get("state")!==sessionStorage.oidcState' in source
+    assert '/v1/auth/login' not in source
 
 def test_production_local_login_is_disabled():
     old=os.environ.get("KLYROW_ENV");os.environ["KLYROW_ENV"]="production"
