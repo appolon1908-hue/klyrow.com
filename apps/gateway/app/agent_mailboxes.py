@@ -21,13 +21,14 @@ def uid():return str(uuid.uuid4())
 
 class CampaignEmailDomain(Base):
     __tablename__="campaign_email_domains"
-    __table_args__=(UniqueConstraint("tenant_id","campaign_id",name="uq_campaign_email_domain"),)
+    __table_args__=(UniqueConstraint("tenant_id","campaign_id",name="uq_campaign_email_domain"),UniqueConstraint("tenant_id","primary_domain",name="uq_campaign_primary_domain_owner"))
     id:Mapped[str]=mapped_column(String,primary_key=True,default=uid)
     tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True)
     campaign_id:Mapped[str]=mapped_column(String,index=True);campaign_name:Mapped[str]=mapped_column(String)
     primary_domain:Mapped[str]=mapped_column(String);alias_domains:Mapped[str]=mapped_column(Text,default="[]")
     sender_domain_verified:Mapped[bool]=mapped_column(Boolean,default=False);inbound_domain_verified:Mapped[bool]=mapped_column(Boolean,default=False)
     sending_enabled:Mapped[bool]=mapped_column(Boolean,default=False);receiving_enabled:Mapped[bool]=mapped_column(Boolean,default=False)
+    human_mailbox_enabled:Mapped[bool]=mapped_column(Boolean,default=False);domain_classification:Mapped[str]=mapped_column(String,default="SYSTEM_OR_SERVICE")
     default_reply_to:Mapped[Optional[str]]=mapped_column(String,nullable=True);support_address:Mapped[Optional[str]]=mapped_column(String,nullable=True);billing_address:Mapped[Optional[str]]=mapped_column(String,nullable=True)
     status:Mapped[str]=mapped_column(String,default="pending");created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
     approved_by:Mapped[Optional[str]]=mapped_column(String,nullable=True);approved_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True)
@@ -36,7 +37,7 @@ class AgentMailbox(Base):
     __tablename__="agent_mailboxes"
     __table_args__=(UniqueConstraint("tenant_id","domain","local_part",name="uq_agent_mailbox_address"),UniqueConstraint("tenant_id","agent_id","campaign_id",name="uq_agent_mailbox_assignment"))
     mailbox_id:Mapped[str]=mapped_column(String,primary_key=True,default=uid);tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True)
-    agent_id:Mapped[str]=mapped_column(String,index=True);employee_id:Mapped[str]=mapped_column(String);keycloak_user_id:Mapped[Optional[str]]=mapped_column(String,nullable=True);odoo_user_id:Mapped[str]=mapped_column(String);vicidial_user_id:Mapped[Optional[str]]=mapped_column(String,nullable=True)
+    agent_id:Mapped[str]=mapped_column(String,index=True);employee_id:Mapped[Optional[str]]=mapped_column(String,nullable=True);keycloak_user_id:Mapped[Optional[str]]=mapped_column(String,nullable=True);odoo_user_id:Mapped[Optional[str]]=mapped_column(String,nullable=True);vicidial_user_id:Mapped[Optional[str]]=mapped_column(String,nullable=True)
     campaign_id:Mapped[str]=mapped_column(String,index=True);campaign_name:Mapped[str]=mapped_column(String);domain:Mapped[str]=mapped_column(String);local_part:Mapped[str]=mapped_column(String);primary_email:Mapped[str]=mapped_column(String,index=True);display_name:Mapped[str]=mapped_column(String)
     sending_enabled:Mapped[bool]=mapped_column(Boolean,default=False);receiving_enabled:Mapped[bool]=mapped_column(Boolean,default=False);mailbox_status:Mapped[str]=mapped_column(String,default="PROVISIONING")
     quota:Mapped[int]=mapped_column(Integer,default=500);rate_limit:Mapped[int]=mapped_column(Integer,default=30)
@@ -58,14 +59,14 @@ class OutboundSenderAuthorization(Base):
 
 def normalize_first_name(value:str)->str:
     folded=unicodedata.normalize("NFKD",value).encode("ascii","ignore").decode().lower()
-    local=re.sub(r"[^a-z0-9.-]","",folded).strip(".-")
+    local=re.sub(r"[^a-z0-9]","",folded)
     if len(local)<2:raise ValueError("first_name_local_part_too_short")
     return local
 
 class DomainIn(BaseModel):
-    campaign_id:str;campaign_name:str;primary_domain:str=Field(pattern=r"^[a-z0-9][a-z0-9.-]+$");alias_domains:list[str]=[];sender_domain_verified:bool=False;inbound_domain_verified:bool=False;sending_enabled:bool=False;receiving_enabled:bool=False;default_reply_to:Optional[str]=None;support_address:Optional[str]=None;billing_address:Optional[str]=None;status:str=Field(default="pending",pattern="^(pending|active|suspended)$")
+    campaign_id:str;campaign_name:str;primary_domain:str=Field(pattern=r"^[a-z0-9][a-z0-9.-]+$");alias_domains:list[str]=[];sender_domain_verified:bool=False;inbound_domain_verified:bool=False;sending_enabled:bool=False;receiving_enabled:bool=False;human_mailbox_enabled:bool=False;domain_classification:str=Field(default="SYSTEM_OR_SERVICE",pattern="^(HUMAN_CAMPAIGN|SYSTEM_OR_SERVICE|ALIAS_ONLY)$");default_reply_to:Optional[str]=None;support_address:Optional[str]=None;billing_address:Optional[str]=None;status:str=Field(default="pending",pattern="^(pending|active|suspended)$")
 class ProvisionIn(BaseModel):
-    event_id:str;agent_id:str;employee_id:str;odoo_user_id:str;vicidial_user_id:Optional[str]=None;keycloak_user_id:Optional[str]=None;campaign_id:str;campaign_name:str;first_name:str;last_name:str;display_name:str;supervisor_id:str;active:bool;correlation_id:str;quota:int=Field(default=500,ge=1,le=100000);rate_limit:int=Field(default=30,ge=1,le=1000)
+    event_id:str;agent_id:str;employee_id:Optional[str]=None;odoo_user_id:Optional[str]=None;vicidial_user_id:Optional[str]=None;keycloak_user_id:Optional[str]=None;campaign_id:str;campaign_name:str;first_name:str;last_name:str;display_name:str;supervisor_id:str;active:bool;correlation_id:str;approved_local_part:Optional[str]=Field(default=None,pattern=r"^[a-z0-9]{2,64}$");quota:int=Field(default=500,ge=1,le=100000);rate_limit:int=Field(default=30,ge=1,le=1000)
 class ValidationIn(BaseModel):outbound_validated:bool;inbound_validated:bool
 
 def mailbox_json(m):return {"mailbox_id":m.mailbox_id,"agent_id":m.agent_id,"campaign_id":m.campaign_id,"primary_email":m.primary_email,"display_name":m.display_name,"sending_enabled":m.sending_enabled,"receiving_enabled":m.receiving_enabled,"mailbox_status":m.mailbox_status,"quota":m.quota,"rate_limit":m.rate_limit,"failure_reason":m.provisioning_error}
@@ -74,6 +75,7 @@ def mailbox_json(m):return {"mailbox_id":m.mailbox_id,"agent_id":m.agent_id,"cam
 def domain_register(x:DomainIn,ctx=Depends(require("platform_admin")),s:Session=Depends(db)):
     existing=s.scalar(select(CampaignEmailDomain).where(CampaignEmailDomain.tenant_id==ctx["tenant"],CampaignEmailDomain.campaign_id==x.campaign_id))
     if existing:raise HTTPException(409,"campaign_domain_mapping_exists")
+    if x.human_mailbox_enabled and x.domain_classification!="HUMAN_CAMPAIGN":raise HTTPException(422,"human_mailbox_requires_human_campaign_domain")
     approved=x.status=="active" and x.sender_domain_verified and x.inbound_domain_verified and x.sending_enabled and x.receiving_enabled
     values=x.model_dump();values["alias_domains"]=json.dumps(values["alias_domains"],separators=(",",":"))
     row=CampaignEmailDomain(tenant_id=ctx["tenant"],**values,approved_by=ctx["sub"] if approved else None,approved_at=now() if approved else None);s.add(row);s.commit();return {"id":row.id,"status":row.status,"activation_ready":approved}
@@ -88,8 +90,17 @@ def provision(x:ProvisionIn,ctx=Depends(require("platform_admin","tenant_admin")
     mapping=s.scalar(select(CampaignEmailDomain).where(CampaignEmailDomain.tenant_id==ctx["tenant"],CampaignEmailDomain.campaign_id==x.campaign_id))
     if not mapping or mapping.status!="active":raise HTTPException(409,"BLOCKED_DOMAIN_MAPPING_REQUIRED")
     if not all([mapping.sender_domain_verified,mapping.inbound_domain_verified,mapping.sending_enabled,mapping.receiving_enabled]):raise HTTPException(409,"UNVERIFIED_CAMPAIGN_DOMAIN")
+    if not mapping.human_mailbox_enabled or mapping.domain_classification!="HUMAN_CAMPAIGN":raise HTTPException(409,"SYSTEM_DOMAIN_HUMAN_MAILBOX_DISABLED")
     try:local=normalize_first_name(x.first_name)
     except ValueError as exc:raise HTTPException(422,str(exc))
+    collision=False
+    occupied=set(s.scalars(select(AgentMailbox.local_part).where(AgentMailbox.tenant_id==ctx["tenant"],AgentMailbox.domain==mapping.primary_domain)).all())
+    if local in occupied:
+        collision=True;base=local+normalize_first_name(x.last_name);suggested=base;suffix=2
+        while suggested in occupied:suggested=f"{base}{suffix}";suffix+=1
+        if not x.approved_local_part:raise HTTPException(409,{"code":"EMAIL_ADDRESS_CONFLICT","original_request":f"{local}@{mapping.primary_domain}","suggested_address":f"{suggested}@{mapping.primary_domain}"})
+        if ctx.get("role")!="platform_admin" or x.approved_local_part!=suggested:raise HTTPException(403,"collision_resolution_requires_exact_admin_approval")
+        local=suggested
     mailbox=AgentMailbox(tenant_id=ctx["tenant"],agent_id=x.agent_id,employee_id=x.employee_id,keycloak_user_id=x.keycloak_user_id,odoo_user_id=x.odoo_user_id,vicidial_user_id=x.vicidial_user_id,campaign_id=x.campaign_id,campaign_name=x.campaign_name,domain=mapping.primary_domain,local_part=local,primary_email=f"{local}@{mapping.primary_domain}",display_name=x.display_name,quota=x.quota,rate_limit=x.rate_limit,provisioning_correlation_id=x.correlation_id,mailbox_status="VALIDATION_PENDING")
     s.add(mailbox)
     try:s.flush()
@@ -97,7 +108,8 @@ def provision(x:ProvisionIn,ctx=Depends(require("platform_admin","tenant_admin")
         s.rollback();raise HTTPException(409,"EMAIL_ADDRESS_CONFLICT")
     s.add(MailboxInboundRoute(tenant_id=ctx["tenant"],campaign_id=x.campaign_id,mailbox_id=mailbox.mailbox_id,recipient=mailbox.primary_email,enabled=False))
     s.add(OutboundSenderAuthorization(tenant_id=ctx["tenant"],campaign_id=x.campaign_id,mailbox_id=mailbox.mailbox_id,agent_id=x.agent_id,sender=mailbox.primary_email,enabled=False))
-    s.add(MailboxAudit(tenant_id=ctx["tenant"],mailbox_id=mailbox.mailbox_id,agent_id=x.agent_id,campaign_id=x.campaign_id,action="agent_mailbox.provision_requested",correlation_id=x.event_id,detail='{"catch_all":false,"credentials_exposed":false}'));s.commit()
+    detail={"catch_all":False,"credentials_exposed":False,"original_request":f"{normalize_first_name(x.first_name)}@{mapping.primary_domain}","final_address":mailbox.primary_email,"collision_resolved":collision,"odoo_linked":bool(x.odoo_user_id)}
+    s.add(MailboxAudit(tenant_id=ctx["tenant"],mailbox_id=mailbox.mailbox_id,agent_id=x.agent_id,campaign_id=x.campaign_id,action="agent_mailbox.provision_requested",correlation_id=x.event_id,detail=json.dumps(detail,separators=(",",":"),sort_keys=True)));s.commit()
     return {**mailbox_json(mailbox),"already_existed":False,"external_steps_required":["keycloak","klyrow_identity","postal_inbound_route","odoo_writeback","vicidial_link"]}
 
 @router.post("/agent-mailboxes/{mailbox_id}/validate")

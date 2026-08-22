@@ -4,14 +4,15 @@ CREATE TABLE IF NOT EXISTS campaign_email_domains (
  campaign_name VARCHAR NOT NULL, primary_domain VARCHAR NOT NULL, alias_domains TEXT NOT NULL DEFAULT '[]',
  sender_domain_verified BOOLEAN NOT NULL DEFAULT FALSE, inbound_domain_verified BOOLEAN NOT NULL DEFAULT FALSE,
  sending_enabled BOOLEAN NOT NULL DEFAULT FALSE, receiving_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+ human_mailbox_enabled BOOLEAN NOT NULL DEFAULT FALSE, domain_classification VARCHAR NOT NULL DEFAULT 'SYSTEM_OR_SERVICE',
  default_reply_to VARCHAR, support_address VARCHAR, billing_address VARCHAR, status VARCHAR NOT NULL DEFAULT 'pending',
  created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), approved_by VARCHAR, approved_at TIMESTAMPTZ,
- CONSTRAINT uq_campaign_email_domain UNIQUE (tenant_id,campaign_id)
+ CONSTRAINT uq_campaign_email_domain UNIQUE (tenant_id,campaign_id), CONSTRAINT uq_campaign_primary_domain_owner UNIQUE (tenant_id,primary_domain)
 );
 CREATE INDEX IF NOT EXISTS ix_campaign_email_domains_tenant_id ON campaign_email_domains(tenant_id);
 CREATE TABLE IF NOT EXISTS agent_mailboxes (
- mailbox_id VARCHAR PRIMARY KEY, tenant_id VARCHAR NOT NULL REFERENCES tenants(id), agent_id VARCHAR NOT NULL, employee_id VARCHAR NOT NULL,
- keycloak_user_id VARCHAR, odoo_user_id VARCHAR NOT NULL, vicidial_user_id VARCHAR, campaign_id VARCHAR NOT NULL, campaign_name VARCHAR NOT NULL,
+ mailbox_id VARCHAR PRIMARY KEY, tenant_id VARCHAR NOT NULL REFERENCES tenants(id), agent_id VARCHAR NOT NULL, employee_id VARCHAR,
+ keycloak_user_id VARCHAR, odoo_user_id VARCHAR, vicidial_user_id VARCHAR, campaign_id VARCHAR NOT NULL, campaign_name VARCHAR NOT NULL,
  domain VARCHAR NOT NULL, local_part VARCHAR NOT NULL, primary_email VARCHAR NOT NULL, display_name VARCHAR NOT NULL,
  sending_enabled BOOLEAN NOT NULL DEFAULT FALSE, receiving_enabled BOOLEAN NOT NULL DEFAULT FALSE, mailbox_status VARCHAR NOT NULL DEFAULT 'PROVISIONING',
  quota INTEGER NOT NULL DEFAULT 500, rate_limit INTEGER NOT NULL DEFAULT 30, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), activated_at TIMESTAMPTZ,
