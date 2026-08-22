@@ -619,3 +619,5 @@ from .agent_mailboxes import router as agent_mailbox_router
 app.include_router(agent_mailbox_router)
 from .billing import router as billing_router
 app.include_router(billing_router)
+from .tenancy import router as tenancy_router
+app.include_router(tenancy_router)
