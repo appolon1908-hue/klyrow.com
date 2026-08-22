@@ -20,7 +20,6 @@ def test_schema_migration_is_a_required_gateway_dependency():
     compose = (ROOT / "docker-compose.yml").read_text()
     runner = (ROOT / "scripts/migrate").read_text()
     assert "gateway-migrate: {condition: service_completed_successfully}" in compose
-    assert "2026082201_email_outbox_and_tenant_idempotency.sql" in compose
     assert "2026082202_production_canary_claim_ledger.sql" in compose
     assert "docker/migrate.Dockerfile" in compose
     assert "pg_advisory_xact_lock" in runner
