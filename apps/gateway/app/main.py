@@ -75,6 +75,8 @@ class Idempotency(Base):
     __tablename__="idempotency_keys"; id:Mapped[str]=mapped_column(String,primary_key=True,default=lambda:str(uuid.uuid4())); key:Mapped[str]=mapped_column(String); tenant_id:Mapped[str]=mapped_column(String,index=True); request_hash:Mapped[str]=mapped_column(String); resource_id:Mapped[str]=mapped_column(String); response_json:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); __table_args__=(UniqueConstraint("tenant_id","key",name="uq_idempotency_tenant_key"),)
 class EmailOutbox(Base):
     __tablename__="email_outbox"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); message_id:Mapped[str]=mapped_column(String,unique=True,index=True); payload:Mapped[str]=mapped_column(Text); state:Mapped[str]=mapped_column(String,default="pending",index=True); attempts:Mapped[int]=mapped_column(Integer,default=0); provider_message_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True); next_attempt_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+class ProductionCanaryGate(Base):
+    __tablename__="production_canary_gate"; gate_key:Mapped[str]=mapped_column(String,primary_key=True); reserved_deliveries:Mapped[int]=mapped_column(Integer,default=0); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class WebhookEndpoint(Base):
     __tablename__="webhook_endpoints"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); url:Mapped[str]=mapped_column(String); enabled:Mapped[bool]=mapped_column(Boolean,default=True); secret_hash:Mapped[str]=mapped_column(String)
 
@@ -146,6 +148,24 @@ def require(*roles):
         if ctx["role"] not in roles: raise HTTPException(403,"insufficient_role")
         return ctx
     return inner
+
+def production_gate_open()->bool:
+    return not SAFE_MODE and os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()=="true" and (os.getenv("KLYROW_CANARY_ALLOWED_DOMAIN","").lower(),os.getenv("KLYROW_CANARY_ALLOWED_SENDER","").lower(),os.getenv("KLYROW_CANARY_ALLOWED_RECIPIENT","").lower(),os.getenv("KLYROW_CANARY_MAX_DELIVERIES","0"))==("klyrow.com","support@klyrow.com","appolon1908@gmail.com","1")
+
+def enforce_production_canary(x,s):
+    if SAFE_MODE:return
+    domain=os.getenv("KLYROW_CANARY_ALLOWED_DOMAIN","").lower()
+    sender=os.getenv("KLYROW_CANARY_ALLOWED_SENDER","").lower()
+    recipient=os.getenv("KLYROW_CANARY_ALLOWED_RECIPIENT","").lower()
+    maximum=int(os.getenv("KLYROW_CANARY_MAX_DELIVERIES","0"))
+    if (domain,sender,recipient,maximum)!=("klyrow.com","support@klyrow.com","appolon1908@gmail.com",1):raise HTTPException(503,"production_canary_configuration_invalid")
+    if x.stream!="transactional" or x.campaign_id:raise HTTPException(403,"canary_transactional_only")
+    if x.sender.lower()!=sender or x.sender.lower().rsplit("@",1)[1]!=domain:raise HTTPException(403,"canary_sender_denied")
+    if str(x.to).lower()!=recipient:raise HTTPException(403,"canary_recipient_denied")
+    gate=s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key=="klyrow-single-domain").with_for_update())
+    if not gate:raise HTTPException(503,"production_canary_ledger_missing")
+    if gate.reserved_deliveries>=maximum:raise HTTPException(409,"production_canary_limit_reached")
+    gate.reserved_deliveries+=1;gate.updated_at=datetime.now(timezone.utc)
 
 class Login(BaseModel): email:EmailStr; password:str; otp:Optional[str]=None
 class ResetRequest(BaseModel): email:EmailStr
@@ -342,7 +362,9 @@ async def headers(request, call_next):
     REQUESTS.labels(request.url.path,str(response.status_code)).inc();LATENCY.labels(request.url.path).observe(time.monotonic()-started); return response
 
 @app.get("/v1/health")
-def health(s:Session=Depends(db)): s.execute(select(1)); return {"status":"ok","safe_mode":SAFE_MODE,"production_gate_approved":os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()=="true"}
+def health(s:Session=Depends(db)):
+    s.execute(select(1));active=len(s.scalars(select(EmailOutbox).where(EmailOutbox.state.in_(("pending","sending","retry")))).all())
+    return {"status":"ok","safe_mode":SAFE_MODE,"production_gate_approved":os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()=="true","production_gate_open":production_gate_open(),"database":"healthy","outbox":"healthy","outbox_active":active}
 @app.get("/healthz")
 def healthz(s:Session=Depends(db)):s.execute(select(1));return {"status":"ok"}
 @app.get("/readyz")
@@ -431,6 +453,7 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
     if prior:
         if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
         return json.loads(prior.response_json)
+    enforce_production_canary(x,s)
     if s.scalar(select(Suppression).where(Suppression.tenant_id==ctx["tenant"],Suppression.email==x.to.lower())): raise HTTPException(422,"recipient_suppressed")
     from .saas import Consent,Preference,Profile,UsageLedger
     profile=s.scalar(select(Profile).where(Profile.tenant_id==ctx["tenant"],Profile.email==x.to.lower()))
@@ -453,6 +476,7 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
 
 @app.post("/v1/email/bulk",status_code=202)
 async def bulk(x:BulkMailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
+    if not SAFE_MODE:raise HTTPException(403,"bulk_delivery_disabled_during_canary")
     if not idempotency_key: raise HTTPException(400,"idempotency_key_required")
     results=[]
     for index,item in enumerate(x.messages): results.append(await send(item,ctx,s,f"{idempotency_key}:{index}"))
@@ -500,6 +524,7 @@ def contact_upsert(x:ContactIn,ctx=Depends(require("platform_admin","tenant_admi
 def campaigns(ctx=Depends(auth),s:Session=Depends(db)): return s.scalars(select(Campaign).where(Campaign.tenant_id==ctx["tenant"])).all()
 @app.post("/v1/campaigns",status_code=201)
 async def campaign_create(x:CampaignIn,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
+    if not SAFE_MODE:raise HTTPException(403,"campaign_delivery_disabled_during_canary")
     if not idempotency_key: raise HTTPException(400,"idempotency_key_required")
     request_hash=sha(x.model_dump_json())
     prior=s.scalar(select(Idempotency).where(Idempotency.key==idempotency_key,Idempotency.tenant_id==ctx["tenant"]));

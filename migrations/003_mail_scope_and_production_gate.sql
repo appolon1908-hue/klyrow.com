@@ -6,7 +6,9 @@ BEGIN
    WHERE conrelid = 'domains'::regclass
      AND conname = 'uq_domain_tenant_name'
  ) AND NOT EXISTS (
-   SELECT 1 FROM pg_class WHERE relname = 'uq_domain_tenant_name'
+   SELECT 1 FROM pg_class
+   WHERE relname = 'uq_domain_tenant_name'
+     AND relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = 'domains'::regclass)
  ) THEN
    ALTER TABLE domains
      ADD CONSTRAINT uq_domain_tenant_name UNIQUE (tenant_id,domain);

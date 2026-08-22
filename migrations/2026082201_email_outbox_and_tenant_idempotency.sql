@@ -24,7 +24,9 @@ BEGIN
     WHERE conrelid = 'idempotency_keys'::regclass
       AND conname = 'uq_idempotency_tenant_key'
   ) AND NOT EXISTS (
-    SELECT 1 FROM pg_class WHERE relname = 'uq_idempotency_tenant_key'
+    SELECT 1 FROM pg_class
+    WHERE relname = 'uq_idempotency_tenant_key'
+      AND relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = 'idempotency_keys'::regclass)
   ) THEN
     ALTER TABLE idempotency_keys
       ADD CONSTRAINT uq_idempotency_tenant_key UNIQUE (tenant_id, key);
@@ -49,5 +51,15 @@ ALTER TABLE email_outbox ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz;
 CREATE INDEX IF NOT EXISTS email_outbox_claim
   ON email_outbox(state, next_attempt_at, created_at)
   WHERE state IN ('pending', 'retry');
+
+CREATE TABLE IF NOT EXISTS production_canary_gate (
+  gate_key text PRIMARY KEY,
+  reserved_deliveries integer NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT production_canary_gate_nonnegative CHECK (reserved_deliveries >= 0)
+);
+INSERT INTO production_canary_gate(gate_key, reserved_deliveries)
+VALUES ('klyrow-single-domain', 0)
+ON CONFLICT (gate_key) DO NOTHING;
 
 COMMIT;
