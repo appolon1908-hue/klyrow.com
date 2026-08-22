@@ -544,7 +544,10 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
         pref=s.scalar(select(Preference).where(Preference.tenant_id==ctx["tenant"],Preference.profile_id==profile.id,Preference.topic==x.topic))
         latest=s.scalar(select(Consent).where(Consent.tenant_id==ctx["tenant"],Consent.profile_id==profile.id,Consent.topic==x.topic).order_by(Consent.occurred_at.desc()))
         if not pref or not pref.subscribed or not latest or latest.status!="granted":raise HTTPException(422,"marketing_consent_required")
-    sender=x.sender.lower();domain=sender.rsplit("@",1)[1];allowed=s.scalar(select(Domain).where(Domain.tenant_id==ctx["tenant"],Domain.domain==domain,Domain.verified==True))
+    sender=x.sender.lower();domain=sender.rsplit("@",1)[1]
+    from .delivery_controls import enforce_delivery_controls
+    enforce_delivery_controls(s,ctx["tenant"],sender,x.stream)
+    allowed=s.scalar(select(Domain).where(Domain.tenant_id==ctx["tenant"],Domain.domain==domain,Domain.verified==True))
     if not allowed: raise HTTPException(422,"sender_domain_not_verified")
     if ctx.get("role")!="codestra-email-agent":
         exact=s.scalar(select(AllowedSender).where(AllowedSender.tenant_id==ctx["tenant"],AllowedSender.address==sender,AllowedSender.enabled==True))
@@ -661,3 +664,5 @@ from .operations import router as operations_router
 app.include_router(operations_router)
 from .reseller import router as reseller_router
 app.include_router(reseller_router)
+from .delivery_controls import router as delivery_controls_router
+app.include_router(delivery_controls_router)
