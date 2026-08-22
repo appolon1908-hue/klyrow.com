@@ -17,10 +17,18 @@ WHERE id IS NULL;
 ALTER TABLE idempotency_keys ALTER COLUMN id SET NOT NULL;
 ALTER TABLE idempotency_keys DROP CONSTRAINT IF EXISTS idempotency_keys_pkey;
 ALTER TABLE idempotency_keys ADD CONSTRAINT idempotency_keys_pkey PRIMARY KEY (id);
-DO $$ BEGIN
-  ALTER TABLE idempotency_keys
-    ADD CONSTRAINT uq_idempotency_tenant_key UNIQUE (tenant_id, key);
-EXCEPTION WHEN duplicate_object THEN NULL;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conrelid = 'idempotency_keys'::regclass
+      AND conname = 'uq_idempotency_tenant_key'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM pg_class WHERE relname = 'uq_idempotency_tenant_key'
+  ) THEN
+    ALTER TABLE idempotency_keys
+      ADD CONSTRAINT uq_idempotency_tenant_key UNIQUE (tenant_id, key);
+  END IF;
 END $$;
 
 CREATE TABLE IF NOT EXISTS email_outbox (
