@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from apps.gateway.app.main import AllowedSender, Base, DB, Domain, InboundRouteConfig, Tenant, app, auth, engine
 from apps.gateway.app.provider import DkimKey, ProviderDomain, ProviderEvent, ProviderInbound, ProviderMessage, ProviderUsageEvent, SandboxCapture, SenderIdentity, SmtpCredential, dispatch_provider_outbox, now, recover_expired_leases
+from apps.gateway.app.smtp_relay import GovernedRelay
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -283,6 +284,75 @@ def test_restricted_operations_retry_and_reconciliation():
     identity["role"] = "tenant_admin"
     assert client.post("/v1/internal/email/operations/reconcile").status_code == 403
     identity["role"] = "platform_admin"
+
+
+def test_spam_policy_accept_quarantine_and_reject():
+    base = {"sending_disabled": True, "sandbox_mode": True, "daily_limit": 100,
+        "hourly_limit": 100, "max_message_bytes": 100000, "max_attachment_bytes": 10000,
+        "allowed_test_recipients": [], "reputation_state": "GOOD",
+        "spam_quarantine_score": 5, "spam_reject_score": 10}
+    assert client.put("/v1/internal/email/policy", json=base).status_code == 200
+    accepted = inbound_payload("postal-event-spam-accept", "safe.txt")
+    accepted["provider_spam_score"] = 4
+    quarantined = inbound_payload("postal-event-spam-quarantine", "safe.txt")
+    quarantined["provider_spam_score"] = 5
+    rejected = inbound_payload("postal-event-spam-reject", "safe.txt")
+    rejected["provider_spam_score"] = 10
+    assert client.post("/v1/internal/email/inbound/receive", json=accepted).json()["disposition"] == "ACCEPT"
+    assert client.post("/v1/internal/email/inbound/receive", json=quarantined).json()["disposition"] == "QUARANTINE"
+    assert client.post("/v1/internal/email/inbound/receive", json=rejected).json()["disposition"] == "REJECT"
+
+
+def test_tracking_tokens_are_opaque_tenant_scoped_expiring_and_idempotent():
+    policy = {"sending_disabled": True, "sandbox_mode": True, "daily_limit": 100,
+        "hourly_limit": 100, "max_message_bytes": 100000, "max_attachment_bytes": 10000,
+        "allowed_test_recipients": [], "reputation_state": "GOOD", "tracking_mode": "OPEN_CLICK"}
+    assert client.put("/v1/internal/email/policy", json=policy).status_code == 200
+    with DB() as session:
+        message = session.query(ProviderMessage).filter_by(tenant_id="tenant-a").first()
+        message_id = message.id
+    issued = client.post(f"/v1/internal/email/messages/{message_id}/tracking/OPEN")
+    assert issued.status_code == 201
+    token = issued.json()["token"]
+    assert message_id not in token and "tenant-a" not in token and len(token) >= 32
+    assert client.get(f"/t/OPEN/{token}").status_code == 204
+    assert client.get(f"/t/OPEN/{token}").status_code == 204
+    with DB() as session:
+        assert session.query(ProviderEvent).filter_by(message_id=message_id, kind="message.opened").count() == 1
+    identity["tenant"] = "tenant-b"
+    assert client.post(f"/v1/internal/email/messages/{message_id}/tracking/OPEN").status_code == 404
+    identity["tenant"] = "tenant-a"
+    assert client.get("/t/OPEN/not-a-valid-token").status_code == 404
+
+
+def test_smtp_rechecks_domain_stream_quota_and_suppression_at_submission():
+    from apps.gateway.app.main import Suppression
+    with DB() as session:
+        domain = ProviderDomain(id="smtp-policy-domain", tenant_id="tenant-a", domain="smtp-policy.example",
+            status="VERIFIED", ownership_token="smtp-policy-token")
+        sender = SenderIdentity(id="smtp-policy-sender", tenant_id="tenant-a", domain_id=domain.id,
+            email="sender@smtp-policy.example", stream="TRANSACTIONAL", status="ACTIVE")
+        credential = SmtpCredential(id="smtp-policy-credential", tenant_id="tenant-a", username="smtp-policy-user",
+            secret_hash="unused", allowed_senders_json='["sender@smtp-policy.example"]',
+            allowed_streams_json='["TRANSACTIONAL"]', status="ACTIVE")
+        session.add_all([domain, sender, credential, Suppression(id="smtp-policy-suppression", tenant_id="tenant-a",
+            email="blocked@example.net", reason="test")])
+        session.commit()
+    relay = GovernedRelay()
+    smtp_session = type("SmtpSession", (), {"auth_data": "smtp-policy-credential"})()
+    envelope = type("Envelope", (), {"mail_from": None, "rcpt_tos": [], "original_content":
+        b"From: sender@smtp-policy.example\r\nTo: capture@klyrow-sink.test\r\nSubject: test\r\n\r\nbody"})()
+    assert asyncio.run(relay.handle_MAIL(None, smtp_session, envelope, "sender@smtp-policy.example", [])) == "250 2.1.0 sender accepted"
+    assert asyncio.run(relay.handle_RCPT(None, smtp_session, envelope, "blocked@example.net", [])) == "550 5.7.1 recipient suppressed"
+    with DB() as session:
+        session.get(ProviderDomain, "smtp-policy-domain").status = "SUSPENDED"
+        session.commit()
+    assert asyncio.run(relay.handle_MAIL(None, smtp_session, envelope, "sender@smtp-policy.example", [])) == "550 5.7.1 sender not authorized"
+    with DB() as session:
+        session.get(ProviderDomain, "smtp-policy-domain").status = "VERIFIED"
+        session.get(SmtpCredential, "smtp-policy-credential").allowed_streams_json = '["BULK"]'
+        session.commit()
+    assert asyncio.run(relay.handle_DATA(None, smtp_session, envelope)) == "550 5.7.1 stream not authorized"
 
 
 def test_private_metrics_cover_provider_integrations_deliverability_and_billing(tmp_path,monkeypatch):
