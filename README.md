@@ -12,7 +12,7 @@ scripts/deploy
 scripts/health
 ```
 
-The generator creates `.env` with mode 0600 and prints the one-time admin password. Store it in an approved password manager. Production submission remains disabled while `KLYROW_SAFE_MODE=true`. Do not change that setting until Postal is bootstrapped, DNS/PTR is complete, abuse handling is staffed, and the Postal server API key is stored in `.env`.
+Run the generator with `sudo`. It creates a root-owned `.env` and root-owned runtime secret files with mode 0600 without printing their values. Transfer the initial administrator credential through the approved secret-management path. Production submission remains disabled while `KLYROW_SAFE_MODE=true`. Do not change that setting until Postal is bootstrapped, DNS/PTR is complete, abuse handling is staffed, and the Postal server API key is installed through its configured `*_FILE` path.
 
 Delivery remains forced safe unless the independent `KLYROW_PRODUCTION_GATE_APPROVED=true` control is also set after every launch gate is verified.
 
