@@ -1,5 +1,5 @@
 import os
-os.environ.update(KLYROW_DATABASE_URL="sqlite:///./saas-test.db",KLYROW_SESSION_SECRET="test-secret",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple",KLYROW_AI_ENABLED="false",KLYROW_RATE_PER_MINUTE="1000")
+os.environ.update(KLYROW_DATABASE_URL="sqlite:///./saas-test.db",KLYROW_SESSION_SECRET="test-session-secret-at-least-32-bytes",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple",KLYROW_AI_ENABLED="false",KLYROW_RATE_PER_MINUTE="1000",KLYROW_AUTH_RATE_PER_MINUTE="1000")
 from fastapi.testclient import TestClient
 from apps.gateway.app.main import Base,DB,Domain,Tenant,User,app,engine,ph,rate_buckets
 from apps.gateway.app.saas import ExperimentAssignment,JourneyRun,MfaConfig,Profile,totp

@@ -1,11 +1,11 @@
-import base64,hashlib,hmac,json,os,time,uuid
+import base64,hashlib,hmac,json,os,subprocess,sys,time,uuid
 from pathlib import Path
 from unittest.mock import AsyncMock,patch
 from cryptography.hazmat.primitives import hashes,serialization
 from cryptography.hazmat.primitives.asymmetric import padding,rsa
 SERVICE_TOKEN_FILE="/tmp/klyrow-beyvra-test-token"
 Path(SERVICE_TOKEN_FILE).write_text("bounded-beyvra-test-token",encoding="utf-8")
-os.environ.update(KLYROW_DATABASE_URL="sqlite:///./test.db",KLYROW_SESSION_SECRET="test-secret",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple",BEYVRA_EMAIL_SERVICE_TOKEN_FILE=SERVICE_TOKEN_FILE,BEYVRA_EMAIL_TENANT_ID="a")
+os.environ.update(KLYROW_DATABASE_URL="sqlite:///./test.db",KLYROW_SESSION_SECRET="test-session-secret-at-least-32-bytes",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple",BEYVRA_EMAIL_SERVICE_TOKEN_FILE=SERVICE_TOKEN_FILE,BEYVRA_EMAIL_TENANT_ID="a",KLYROW_AUTH_RATE_PER_MINUTE="1000")
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from apps.gateway.app.main import Audit,Base,DB,Domain,Event,Message,Suppression,Tenant,User,app,engine,ph
@@ -24,10 +24,26 @@ def test_tenant_isolation():
     assert [d["domain"] for d in client.get("/v1/domains",headers=hdr("a")).json()]==["a.example.com"]
 def test_api_key_revoke():
     h=hdr("a"); made=client.post("/v1/api-keys",headers=h,json={"name":"ci"}).json(); kh={"Authorization":"Bearer "+made["key"]}; assert client.get("/v1/domains",headers=kh).status_code==200; assert client.delete("/v1/api-keys/"+made["id"],headers=h).status_code==204; assert client.get("/v1/domains",headers=kh).status_code==401
+def test_logout_revokes_active_session():
+    token=login("a");headers={"Authorization":"Bearer "+token};assert client.post("/v1/auth/logout",headers=headers).status_code==204;assert client.get("/v1/me",headers=headers).status_code==401
 def test_safe_send_and_suppression():
     h={**hdr("a"),"Idempotency-Key":"send-1"}; x={"to":"ok@example.net","sender":"sender@a.example.com","subject":"test","html":"<p>test</p>"}; r=client.post("/v1/email/send",headers=h,json=x); assert r.status_code==202 and r.json()["safe_mode"]; assert client.post("/v1/email/send",headers=h,json=x).json()["id"]==r.json()["id"]
     with DB() as s:s.add(Suppression(id="s",tenant_id="a",email="blocked@example.net",reason="unsubscribe"));s.commit()
     x["to"]="blocked@example.net"; assert client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"send-2"},json=x).status_code==422
+
+def test_idempotency_key_is_tenant_scoped():
+    body={"to":"same@example.net","subject":"same","html":"<p>same</p>"}
+    for tenant in ("a","b"):
+        payload={**body,"sender":f"sender@{tenant}.example.com"}
+        assert client.post("/v1/email/send",headers={**hdr(tenant),"Idempotency-Key":"shared-key"},json=payload).status_code==202
+
+def test_production_startup_fails_without_session_secret():
+    env={**os.environ,"KLYROW_ENV":"production"};env.pop("KLYROW_SESSION_SECRET",None);env.pop("KLYROW_SESSION_SECRET_FILE",None)
+    result=subprocess.run([sys.executable,"-c","import apps.gateway.app.main"],env=env,capture_output=True,text=True)
+    assert result.returncode!=0 and "production requires KLYROW_SESSION_SECRET_FILE" in result.stderr
+
+def test_webhook_ssrf_targets_are_rejected():
+    assert client.post("/v1/webhooks",headers=hdr("a"),json={"url":"https://127.0.0.1/hook"}).status_code==422
 
 def test_beyvra_service_scope_sender_policy_and_idempotency():
     base={"Authorization":"Bearer bounded-beyvra-test-token","X-Service-Identity":"codestra-server-a:beyvra-email-production","X-Service-Scopes":"email.send email.status","Idempotency-Key":"beyvra-1"}

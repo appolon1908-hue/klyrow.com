@@ -1,4 +1,4 @@
-import asyncio, base64, hashlib, hmac, json, os, secrets, time, uuid
+import asyncio, base64, hashlib, hmac, ipaddress, json, os, secrets, socket, time, uuid
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,7 +17,16 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, Uni
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 DATABASE_URL=os.getenv("KLYROW_DATABASE_URL", "sqlite:///./klyrow.db")
-SECRET=os.getenv("KLYROW_SESSION_SECRET", "dev-only-change-me")
+def required_session_secret():
+    path=os.getenv("KLYROW_SESSION_SECRET_FILE","")
+    if path:
+        try:value=Path(path).read_text(encoding="utf-8").strip()
+        except OSError as exc:raise RuntimeError("KLYROW session secret file unavailable") from exc
+    else:value=os.getenv("KLYROW_SESSION_SECRET","")
+    if os.getenv("KLYROW_ENV")=="production" and not path:raise RuntimeError("production requires KLYROW_SESSION_SECRET_FILE")
+    return value
+SECRET=required_session_secret()
+if len(SECRET) < 32: raise RuntimeError("KLYROW_SESSION_SECRET must contain at least 32 characters")
 SAFE_MODE=os.getenv("KLYROW_SAFE_MODE", "true").lower()=="true" or os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()!="true"
 engine=create_engine(DATABASE_URL, pool_pre_ping=True)
 DB=sessionmaker(engine, expire_on_commit=False)
@@ -55,7 +64,9 @@ class Contact(Base):
 class Campaign(Base):
     __tablename__="campaigns"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); name:Mapped[str]=mapped_column(String); status:Mapped[str]=mapped_column(String,default="draft"); subject:Mapped[Optional[str]]=mapped_column(String,nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class Idempotency(Base):
-    __tablename__="idempotency_keys"; key:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); request_hash:Mapped[str]=mapped_column(String); resource_id:Mapped[str]=mapped_column(String); response_json:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+    __tablename__="idempotency_keys"; id:Mapped[str]=mapped_column(String,primary_key=True,default=lambda:str(uuid.uuid4())); key:Mapped[str]=mapped_column(String); tenant_id:Mapped[str]=mapped_column(String,index=True); request_hash:Mapped[str]=mapped_column(String); resource_id:Mapped[str]=mapped_column(String); response_json:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); __table_args__=(UniqueConstraint("tenant_id","key",name="uq_idempotency_tenant_key"),)
+class EmailOutbox(Base):
+    __tablename__="email_outbox"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); message_id:Mapped[str]=mapped_column(String,unique=True,index=True); payload:Mapped[str]=mapped_column(Text); state:Mapped[str]=mapped_column(String,default="pending",index=True); attempts:Mapped[int]=mapped_column(Integer,default=0); provider_message_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class WebhookEndpoint(Base):
     __tablename__="webhook_endpoints"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); url:Mapped[str]=mapped_column(String); enabled:Mapped[bool]=mapped_column(Boolean,default=True); secret_hash:Mapped[str]=mapped_column(String)
 
@@ -66,6 +77,20 @@ def token(user,s):
     from .saas import SessionRecord
     sid=str(uuid.uuid4());s.add(SessionRecord(id=sid,user_id=user.id,tenant_id=user.tenant_id));s.commit();return jwt.encode({"sub":user.id,"tenant":user.tenant_id,"role":user.role,"sid":sid,"exp":datetime.now(timezone.utc)+timedelta(hours=8)},SECRET,algorithm="HS256")
 def audit(s, ctx, action): s.add(Audit(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],actor=ctx["sub"],action=action))
+def safe_webhook_url(value:str)->str:
+    from urllib.parse import urlsplit
+    parsed=urlsplit(value)
+    if parsed.scheme!="https" or not parsed.hostname or parsed.username or parsed.password:raise HTTPException(422,"unsafe_webhook_url")
+    try: addresses={item[4][0] for item in socket.getaddrinfo(parsed.hostname,parsed.port or 443,type=socket.SOCK_STREAM)}
+    except OSError:raise HTTPException(422,"webhook_dns_unavailable")
+    if not addresses or any(ipaddress.ip_address(address).is_private or ipaddress.ip_address(address).is_loopback or ipaddress.ip_address(address).is_link_local or ipaddress.ip_address(address).is_reserved or ipaddress.ip_address(address).is_unspecified for address in addresses):raise HTTPException(422,"unsafe_webhook_destination")
+    return value
+def auth_rate(request:Request,action:str):
+    identity=request.client.host if request.client else "unknown";now=time.time();bucket=rate_buckets[("auth",action,identity)]
+    while bucket and bucket[0]<now-60:bucket.popleft()
+    limit=int(os.getenv("KLYROW_AUTH_RATE_PER_MINUTE","10"))
+    if len(bucket)>=limit:raise HTTPException(429,"rate_limit_exceeded")
+    bucket.append(now)
 def auth(authorization:str=Header(default=""), x_klyrow_tenant_id:Optional[str]=Header(default=None), s:Session=Depends(db)):
     if not authorization.startswith("Bearer "): raise HTTPException(401,"authentication_required")
     raw=authorization[7:]
@@ -259,9 +284,38 @@ async def postal_retry_loop():
         except Exception as exc:
             print(json.dumps({"level":"warning","system":"klyrow","event":"postal_retry_worker_error","error":type(exc).__name__}))
 
+async def email_outbox_loop():
+    while True:
+        await asyncio.sleep(2)
+        if SAFE_MODE:continue
+        snapshot=None
+        try:
+            with DB() as s:
+                item=s.scalar(select(EmailOutbox).where(EmailOutbox.state.in_(("pending","retry")),EmailOutbox.attempts<5).order_by(EmailOutbox.created_at).with_for_update(skip_locked=True))
+                if not item:continue
+                item.state="sending";item.attempts+=1;item.updated_at=datetime.now(timezone.utc);snapshot=(item.id,item.message_id,item.payload);s.commit()
+            key_file=os.getenv("KLYROW_POSTAL_API_KEY_FILE","")
+            key=Path(key_file).read_text(encoding="utf-8").strip() if key_file else ""
+            if not key:raise RuntimeError("postal credential unavailable")
+            headers={"X-Server-API-Key":key,"Idempotency-Key":"klyrow:"+snapshot[1]}
+            async with httpx.AsyncClient(timeout=10,trust_env=False,follow_redirects=False) as client:
+                response=await client.post(os.environ["KLYROW_POSTAL_API_URL"]+"/api/v1/send/message",headers=headers,json=json.loads(snapshot[2]));response.raise_for_status();provider_id=str(response.json().get("data",{}).get("message_id") or snapshot[1])
+            with DB() as s:
+                item=s.get(EmailOutbox,snapshot[0]);message=s.get(Message,snapshot[1])
+                if item:item.state="delivered";item.provider_message_id=provider_id;item.last_error=None;item.updated_at=datetime.now(timezone.utc)
+                if message:message.status="accepted"
+                s.commit()
+        except Exception as exc:
+            with DB() as s:
+                if snapshot is not None:
+                    item=s.get(EmailOutbox,snapshot[0])
+                    if item:item.state="failed" if item.attempts>=5 else "retry";item.last_error=type(exc).__name__;item.updated_at=datetime.now(timezone.utc);s.commit()
+            print(json.dumps({"level":"warning","system":"klyrow","event":"email_outbox_delivery_failed","error":type(exc).__name__}))
+
 @app.on_event("startup")
 async def start_postal_retry_worker():
     asyncio.create_task(postal_retry_loop())
+    asyncio.create_task(email_outbox_loop())
 
 @app.middleware("http")
 async def headers(request, call_next):
@@ -274,9 +328,16 @@ async def headers(request, call_next):
 @app.get("/v1/health")
 def health(s:Session=Depends(db)): s.execute(select(1)); return {"status":"ok","safe_mode":SAFE_MODE,"production_gate_approved":os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()=="true"}
 @app.get("/metrics")
-def metrics(): from fastapi.responses import Response; return Response(generate_latest(),media_type="text/plain")
+def metrics(authorization:str=Header(default="")):
+    token_file=os.getenv("KLYROW_METRICS_TOKEN_FILE","")
+    try:expected=Path(token_file).read_text(encoding="utf-8").strip()
+    except OSError:raise HTTPException(404,"not_found")
+    supplied=authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
+    if not expected or not hmac.compare_digest(supplied,expected):raise HTTPException(404,"not_found")
+    from fastapi.responses import Response; return Response(generate_latest(),media_type="text/plain")
 @app.post("/v1/auth/login")
-def login(x:Login,s:Session=Depends(db)):
+def login(x:Login,request:Request,s:Session=Depends(db)):
+    auth_rate(request,"login")
     u=s.scalar(select(User).where(User.email==x.email.lower()))
     try: valid=u and u.enabled and ph.verify(u.password_hash,x.password)
     except Exception: valid=False
@@ -284,19 +345,27 @@ def login(x:Login,s:Session=Depends(db)):
     from .saas import MfaConfig,verify_totp
     m=s.get(MfaConfig,u.id)
     if m and m.enabled and (not x.otp or not verify_totp(m.secret,x.otp)):raise HTTPException(401,"mfa_required")
-    return {"access_token":token(u,s),"token_type":"bearer","role":u.role,"tenant_id":u.tenant_id}
+    audit(s,{"tenant":u.tenant_id,"sub":u.id},"session.login");s.commit();return {"access_token":token(u,s),"token_type":"bearer","role":u.role,"tenant_id":u.tenant_id}
 @app.post("/v1/auth/logout",status_code=204)
-def logout(ctx=Depends(auth)): return None
+def logout(ctx=Depends(auth),s:Session=Depends(db)):
+    from .saas import SessionRecord
+    if ctx.get("sid"):
+        session=s.get(SessionRecord,ctx["sid"])
+        if session:session.revoked=True;audit(s,ctx,"session.logout");s.commit()
 @app.post("/v1/auth/forgot-password",status_code=202)
-def forgot(x:ResetRequest,s:Session=Depends(db)):
+def forgot(x:ResetRequest,request:Request,s:Session=Depends(db)):
+    auth_rate(request,"forgot-password")
     u=s.scalar(select(User).where(User.email==x.email.lower()))
-    if u: raw=secrets.token_urlsafe(32); u.reset_hash=sha(raw); u.reset_expires=datetime.now(timezone.utc)+timedelta(minutes=30); s.commit()
+    if u: raw=secrets.token_urlsafe(32); u.reset_hash=sha(raw); u.reset_expires=datetime.now(timezone.utc)+timedelta(minutes=30);audit(s,{"tenant":u.tenant_id,"sub":u.id},"password.reset.requested");s.commit()
     return {"detail":"If the account exists, reset instructions will be delivered."}
 @app.post("/v1/auth/reset-password")
 def reset(x:Reset,s:Session=Depends(db)):
     u=s.scalar(select(User).where(User.reset_hash==sha(x.token)))
     if not u or not u.reset_expires or u.reset_expires.replace(tzinfo=timezone.utc)<datetime.now(timezone.utc): raise HTTPException(400,"invalid_or_expired_token")
-    u.password_hash=ph.hash(x.password); u.reset_hash=None; u.reset_expires=None; s.commit(); return {"status":"reset"}
+    u.password_hash=ph.hash(x.password); u.reset_hash=None; u.reset_expires=None
+    from .saas import SessionRecord
+    for session in s.scalars(select(SessionRecord).where(SessionRecord.user_id==u.id,SessionRecord.revoked==False)).all():session.revoked=True
+    audit(s,{"tenant":u.tenant_id,"sub":u.id},"password.reset.sessions_revoked");s.commit(); return {"status":"reset"}
 @app.get("/v1/me")
 def me(ctx=Depends(auth)): return ctx
 @app.post("/v1/api-keys")
@@ -352,10 +421,9 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
     since=datetime.now(timezone.utc)-timedelta(days=1); count=len(s.scalars(select(Message).where(Message.tenant_id==ctx["tenant"],Message.created_at>=since)).all()); tenant=s.get(Tenant,ctx["tenant"])
     if count>=tenant.quota: raise HTTPException(429,"daily_quota_exceeded")
     mid=str(uuid.uuid4()); status="accepted_test" if SAFE_MODE else "queued"
-    if not SAFE_MODE:
-        headers={"X-Server-API-Key":os.environ["KLYROW_POSTAL_API_KEY"]}; payload={"to":[x.to],"from":x.sender,"subject":x.subject,"html_body":x.html,"plain_body":x.text}
-        async with httpx.AsyncClient(timeout=10) as c: r=await c.post(os.environ["KLYROW_POSTAL_API_URL"]+"/api/v1/send/message",headers=headers,json=payload); r.raise_for_status()
-    result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=x.to.lower(),sender=x.sender.lower(),subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload=json.dumps({"stream":x.stream}))); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageLedger(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind="message."+x.stream,quantity=1,reference=mid)); s.commit(); MAIL.labels("queued").inc(); await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{"stream":x.stream}}); return result
+    result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=x.to.lower(),sender=x.sender.lower(),subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload=json.dumps({"stream":x.stream}))); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageLedger(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind="message."+x.stream,quantity=1,reference=mid))
+    if not SAFE_MODE:s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,payload=json.dumps({"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text},separators=(",",":"),sort_keys=True)))
+    s.commit(); MAIL.labels("queued").inc(); await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{"stream":x.stream}}); return result
 
 @app.post("/v1/email/bulk",status_code=202)
 async def bulk(x:BulkMailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
@@ -426,7 +494,7 @@ def audits(ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depen
 def usage(ctx=Depends(auth),s:Session=Depends(db)): return {"sent_24h":len(s.scalars(select(Message).where(Message.tenant_id==ctx["tenant"],Message.created_at>=datetime.now(timezone.utc)-timedelta(days=1))).all()),"quota":s.get(Tenant,ctx["tenant"]).quota}
 @app.post("/v1/webhooks")
 def webhook_add(x:WebhookIn,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db)):
-    raw=secrets.token_urlsafe(32); item=WebhookEndpoint(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],url=x.url,secret_hash=sha(raw)); s.add(item); audit(s,ctx,"webhook.created"); s.commit(); return {"id":item.id,"url":item.url,"secret":raw}
+    url=safe_webhook_url(x.url);raw=secrets.token_urlsafe(32); item=WebhookEndpoint(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],url=url,secret_hash=sha(raw)); s.add(item); audit(s,ctx,"webhook.created"); s.commit(); return {"id":item.id,"url":item.url,"secret":raw}
 @app.get("/v1/admin/tenants")
 def admin_tenants(ctx=Depends(require("platform_admin")),s:Session=Depends(db)): return s.scalars(select(Tenant)).all()
 @app.post("/v1/admin/tenants",status_code=201)

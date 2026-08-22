@@ -2,9 +2,14 @@ name: klyrow
 services:
   gateway:
     build: ./apps/gateway
-    env_file: .env
+    env_file: '${KLYROW_ENV_FILE:-.env}'
     environment:
       KLYROW_EMAIL_EVENT_URL: http://10.40.0.1:18080/internal/provider-events/klyrow
+      KLYROW_ENV: production
+      KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
+      KLYROW_POSTAL_API_KEY_FILE: /run/secrets/klyrow_postal_api_key
+      KLYROW_METRICS_TOKEN_FILE: /run/secrets/klyrow_metrics_token
+    secrets: [klyrow_session_secret, klyrow_postal_api_key, klyrow_metrics_token]
     volumes:
       - ./secrets/postal/webhook-signing-public.pem:/run/klyrow/postal-webhook-signing-public.pem:ro
     depends_on:
@@ -210,3 +215,10 @@ volumes:
   postal_assets: {}
   prometheus_data: {}
   grafana_data: {}
+secrets:
+  klyrow_session_secret:
+    file: '${KLYROW_SESSION_SECRET_FILE:?set the root-owned session secret path}'
+  klyrow_postal_api_key:
+    file: '${KLYROW_POSTAL_API_KEY_FILE:?set the root-owned Postal API key path}'
+  klyrow_metrics_token:
+    file: '${KLYROW_METRICS_TOKEN_FILE:?set the root-owned metrics token path}'
