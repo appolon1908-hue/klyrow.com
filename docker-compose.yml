@@ -61,7 +61,12 @@ services:
     image: postgres:17.6-bookworm
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD:?required}
-    command: [psql, -v, ON_ERROR_STOP=1, -h, postgres, -U, klyrow, -d, klyrow, -f, /migrations/2026082201_email_outbox_and_tenant_idempotency.sql]
+    command:
+      - sh
+      - -ec
+      - |
+        psql -v ON_ERROR_STOP=1 -h postgres -U klyrow -d klyrow -f /migrations/2026082201_email_outbox_and_tenant_idempotency.sql
+        psql -v ON_ERROR_STOP=1 -h postgres -U klyrow -d klyrow -f /migrations/2026082202_production_canary_claim_ledger.sql
     volumes:
       - ./migrations:/migrations:ro
     networks: [backend]
