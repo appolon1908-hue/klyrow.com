@@ -1,5 +1,15 @@
 BEGIN;
 
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  id text PRIMARY KEY,
+  key text NOT NULL,
+  tenant_id text NOT NULL,
+  request_hash text NOT NULL,
+  resource_id text NOT NULL,
+  response_json text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT uq_idempotency_tenant_key UNIQUE (tenant_id, key)
+);
 ALTER TABLE idempotency_keys ADD COLUMN IF NOT EXISTS id text;
 UPDATE idempotency_keys
 SET id = md5(tenant_id || ':' || key || ':' || created_at::text)

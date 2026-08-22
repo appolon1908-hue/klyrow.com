@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from prometheus_client import Counter, Histogram, generate_latest
 from pydantic import BaseModel, EmailStr, Field, model_validator
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, or_, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 DATABASE_URL=os.getenv("KLYROW_DATABASE_URL", "sqlite:///./klyrow.db")
@@ -291,7 +291,8 @@ async def email_outbox_loop():
         snapshot=None
         try:
             with DB() as s:
-                item=s.scalar(select(EmailOutbox).where(EmailOutbox.state.in_(("pending","retry")),EmailOutbox.attempts<5).order_by(EmailOutbox.created_at).with_for_update(skip_locked=True))
+                stale=datetime.now(timezone.utc)-timedelta(minutes=5)
+                item=s.scalar(select(EmailOutbox).where(or_(EmailOutbox.state.in_(("pending","retry")),(EmailOutbox.state=="sending") & (EmailOutbox.updated_at<stale)),EmailOutbox.attempts<5).order_by(EmailOutbox.created_at).with_for_update(skip_locked=True))
                 if not item:continue
                 item.state="sending";item.attempts+=1;item.updated_at=datetime.now(timezone.utc);snapshot=(item.id,item.message_id,item.payload);s.commit()
             key_file=os.getenv("KLYROW_POSTAL_API_KEY_FILE","")

@@ -6,10 +6,14 @@ admin_email="${KLYROW_ADMIN_EMAIL:-admin@klyrow.com}"
 admin_password="${KLYROW_ADMIN_PASSWORD:-$(openssl rand -base64 24 | tr -d '\n')}"
 cp .env.example .env
 secret() { openssl rand -hex "$1"; }
+install -d -m 0700 secrets/runtime
+secret 32 >secrets/runtime/session-secret
+: >secrets/runtime/postal-api-key
+secret 32 >secrets/runtime/metrics-token
+chmod 0600 secrets/runtime/session-secret secrets/runtime/postal-api-key secrets/runtime/metrics-token
 postgres_password="$(secret 24)"
 sed -i \
   -e "s|KLYROW_DATABASE_URL=postgresql+psycopg://klyrow:CHANGE_ME@postgres:5432/klyrow|KLYROW_DATABASE_URL=postgresql+psycopg://klyrow:$postgres_password@postgres:5432/klyrow|" \
-  -e "s|KLYROW_SESSION_SECRET=CHANGE_ME_64_HEX|KLYROW_SESSION_SECRET=$(secret 32)|" \
   -e "s|KLYROW_ADMIN_EMAIL=admin@klyrow.com|KLYROW_ADMIN_EMAIL=$admin_email|" \
   -e "s|KLYROW_ADMIN_PASSWORD=CHANGE_ME_20_CHARS|KLYROW_ADMIN_PASSWORD=$admin_password|" \
   -e "s|KLYROW_MIDDLEWARE_API_KEY=CHANGE_ME_64_HEX|KLYROW_MIDDLEWARE_API_KEY=$(secret 32)|" \
@@ -22,5 +26,5 @@ sed -i \
   -e "s|POSTAL_SECRET_KEY=CHANGE_ME_128_HEX|POSTAL_SECRET_KEY=$(secret 64)|" \
   -e "s|GRAFANA_ADMIN_PASSWORD=CHANGE_ME|GRAFANA_ADMIN_PASSWORD=$(secret 24)|" .env
 chmod 600 .env
-echo "Generated .env (0600). Initial admin password: $admin_password"
-echo "Store it in the approved password manager; it will not be shown again."
+echo "Generated .env and root-private runtime secret files."
+echo "Store the initial admin credential through the approved password manager before deployment."

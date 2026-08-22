@@ -2,6 +2,8 @@ global:
   scrape_interval: 15s
 scrape_configs:
   - job_name: klyrow
+    authorization:
+      credentials_file: /run/secrets/klyrow_metrics_token
     static_configs: [{targets: ["gateway:8000"]}]
   - job_name: host
     static_configs: [{targets: ["node-exporter:9100"]}]

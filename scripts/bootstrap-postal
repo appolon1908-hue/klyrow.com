@@ -6,7 +6,9 @@ docker compose exec -T postal-db mariadb -uroot -p"$dbpass" -e "GRANT ALL PRIVIL
 keys="$(docker compose exec -T -e ADMIN_EMAIL="$KLYROW_ADMIN_EMAIL" postal-web sh -lc 'cd /opt/postal/app && bundle exec rails runner '\''u=User.find_by!(email_address: ENV.fetch("ADMIN_EMAIL")); o=Organization.find_or_create_by!(name:"Klyrow") {|x| x.owner=u}; OrganizationUser.find_or_create_by!(organization:o,user:u) {|x| x.admin=true; x.all_servers=true}; s=o.servers.find_or_create_by!(name:"Klyrow Production") {|x| x.mode="Development"; x.send_limit=10000}; d=s.domains.find_or_create_by!(name:"klyrow.com") {|x| x.owner=s; x.verification_method="DNS"}; api=s.credentials.find_or_create_by!(name:"Klyrow Gateway",type:"API"); smtp=s.credentials.find_or_create_by!(name:"Mautic",type:"SMTP"); puts "#{api.key} #{smtp.key}"'\''' | tail -1)"
 api_key="${keys%% *}"; smtp_key="${keys#* }"
 [[ ${#api_key} -ge 20 && ${#smtp_key} -ge 20 ]] || { echo "Postal credential bootstrap failed" >&2; exit 1; }
-sed -i -e "s|^KLYROW_POSTAL_API_KEY=.*|KLYROW_POSTAL_API_KEY=$api_key|" -e "s|^KLYROW_POSTAL_SERVER_KEY=.*|KLYROW_POSTAL_SERVER_KEY=$smtp_key|" .env
+printf '%s' "$api_key" >"${KLYROW_POSTAL_API_KEY_FILE:-secrets/runtime/postal-api-key}"
+chmod 0600 "${KLYROW_POSTAL_API_KEY_FILE:-secrets/runtime/postal-api-key}"
+sed -i -e "s|^KLYROW_POSTAL_SERVER_KEY=.*|KLYROW_POSTAL_SERVER_KEY=$smtp_key|" .env
 unset keys api_key smtp_key dbpass POSTAL_DB_PASSWORD KLYROW_ADMIN_PASSWORD
 chmod 600 .env
 echo "Postal organization, development-mode server, API and SMTP credentials are ready."
