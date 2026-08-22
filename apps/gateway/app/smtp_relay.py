@@ -5,16 +5,16 @@ import json
 import os
 import ssl
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
 
 from aiosmtpd.smtp import AuthResult, LoginPassword, SMTP
 from argon2.exceptions import VerifyMismatchError
-from sqlalchemy import select
+from sqlalchemy import func, select
 
-from .main import DB
-from .provider import ProviderAudit, ProviderMessage, SenderIdentity, SmtpCredential, TenantMailPolicy, smtp_hasher
+from .main import DB, Suppression, Tenant
+from .provider import ProviderAudit, ProviderDomain, ProviderMessage, SenderIdentity, SmtpCredential, TenantMailPolicy, smtp_hasher
 
 
 def utcnow():
@@ -51,7 +51,13 @@ class GovernedRelay:
             allowed = set(json.loads(credential.allowed_senders_json)) if credential else set()
             identity = db.scalar(select(SenderIdentity).where(SenderIdentity.tenant_id == credential.tenant_id,
                 SenderIdentity.email == address.lower(), SenderIdentity.status == "ACTIVE")) if credential else None
-            if address.lower() not in allowed or not identity:
+            domain = db.scalar(select(ProviderDomain).where(ProviderDomain.id == identity.domain_id,
+                ProviderDomain.tenant_id == credential.tenant_id)) if identity and credential else None
+            tenant = db.get(Tenant, credential.tenant_id) if credential else None
+            tenant_policy = db.get(TenantMailPolicy, credential.tenant_id) if credential else None
+            if (address.lower() not in allowed or not identity or not domain or
+                    domain.status in {"SUSPENDED", "REMOVED"} or not tenant or not tenant.enabled or
+                    (tenant_policy and tenant_policy.reputation_state == "SUSPENDED")):
                 return "550 5.7.1 sender not authorized"
         envelope.mail_from = address.lower()
         return "250 2.1.0 sender accepted"
@@ -63,6 +69,10 @@ class GovernedRelay:
             tenant_policy = db.get(TenantMailPolicy, credential.tenant_id) if credential else None
             allowed = set(json.loads(tenant_policy.allowed_test_recipients_json or "[]")) if tenant_policy else set()
             sandbox = not tenant_policy or tenant_policy.sandbox_mode
+            suppressed = db.scalar(select(Suppression).where(Suppression.tenant_id == credential.tenant_id,
+                Suppression.email == address.lower())) if credential else None
+        if suppressed:
+            return "550 5.7.1 recipient suppressed"
         if sandbox and address.lower() not in allowed and not address.lower().endswith("@" + sink_domain):
             return "550 5.7.1 sandbox recipient not authorized"
         envelope.rcpt_tos.append(address.lower())
@@ -78,8 +88,20 @@ class GovernedRelay:
             if not credential or credential.status != "ACTIVE":
                 return "550 5.7.1 credential revoked"
             tenant_policy = db.get(TenantMailPolicy, credential.tenant_id)
+            allowed_streams = set(json.loads(credential.allowed_streams_json))
+            if "TRANSACTIONAL" not in allowed_streams:
+                return "550 5.7.1 stream not authorized"
             if tenant_policy and len(raw) > tenant_policy.max_message_bytes:
                 return "552 5.3.4 message too large"
+            if tenant_policy:
+                hour_ago = utcnow()-timedelta(hours=1)
+                day_ago = utcnow()-timedelta(days=1)
+                hourly = db.scalar(select(func.count(ProviderMessage.id)).where(
+                    ProviderMessage.tenant_id == credential.tenant_id, ProviderMessage.created_at >= hour_ago)) or 0
+                daily = db.scalar(select(func.count(ProviderMessage.id)).where(
+                    ProviderMessage.tenant_id == credential.tenant_id, ProviderMessage.created_at >= day_ago)) or 0
+                if hourly >= tenant_policy.hourly_limit or daily >= tenant_policy.daily_limit:
+                    return "452 4.7.0 tenant quota exceeded"
             for recipient in envelope.rcpt_tos:
                 digest = hashlib.sha256((credential.id + message_id + recipient).encode()).hexdigest()
                 prior = db.scalar(select(ProviderMessage).where(ProviderMessage.tenant_id == credential.tenant_id,

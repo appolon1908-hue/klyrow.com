@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from apps.gateway.app.main import AllowedSender, Base, DB, Domain, InboundRouteConfig, Tenant, app, auth, engine
 from apps.gateway.app.provider import DkimKey, ProviderDomain, ProviderEvent, ProviderInbound, ProviderMessage, ProviderUsageEvent, SandboxCapture, SenderIdentity, SmtpCredential, dispatch_provider_outbox, now, recover_expired_leases
+from apps.gateway.app.smtp_relay import GovernedRelay
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -322,3 +323,33 @@ def test_tracking_tokens_are_opaque_tenant_scoped_expiring_and_idempotent():
     assert client.post(f"/v1/internal/email/messages/{message_id}/tracking/OPEN").status_code == 404
     identity["tenant"] = "tenant-a"
     assert client.get("/t/OPEN/not-a-valid-token").status_code == 404
+
+
+def test_smtp_rechecks_domain_stream_quota_and_suppression_at_submission():
+    from apps.gateway.app.main import Suppression
+    with DB() as session:
+        domain = ProviderDomain(id="smtp-policy-domain", tenant_id="tenant-a", domain="smtp-policy.example",
+            status="VERIFIED", ownership_token="smtp-policy-token")
+        sender = SenderIdentity(id="smtp-policy-sender", tenant_id="tenant-a", domain_id=domain.id,
+            email="sender@smtp-policy.example", stream="TRANSACTIONAL", status="ACTIVE")
+        credential = SmtpCredential(id="smtp-policy-credential", tenant_id="tenant-a", username="smtp-policy-user",
+            secret_hash="unused", allowed_senders_json='["sender@smtp-policy.example"]',
+            allowed_streams_json='["TRANSACTIONAL"]', status="ACTIVE")
+        session.add_all([domain, sender, credential, Suppression(id="smtp-policy-suppression", tenant_id="tenant-a",
+            email="blocked@example.net", reason="test")])
+        session.commit()
+    relay = GovernedRelay()
+    smtp_session = type("SmtpSession", (), {"auth_data": "smtp-policy-credential"})()
+    envelope = type("Envelope", (), {"mail_from": None, "rcpt_tos": [], "original_content":
+        b"From: sender@smtp-policy.example\r\nTo: capture@klyrow-sink.test\r\nSubject: test\r\n\r\nbody"})()
+    assert asyncio.run(relay.handle_MAIL(None, smtp_session, envelope, "sender@smtp-policy.example", [])) == "250 2.1.0 sender accepted"
+    assert asyncio.run(relay.handle_RCPT(None, smtp_session, envelope, "blocked@example.net", [])) == "550 5.7.1 recipient suppressed"
+    with DB() as session:
+        session.get(ProviderDomain, "smtp-policy-domain").status = "SUSPENDED"
+        session.commit()
+    assert asyncio.run(relay.handle_MAIL(None, smtp_session, envelope, "sender@smtp-policy.example", [])) == "550 5.7.1 sender not authorized"
+    with DB() as session:
+        session.get(ProviderDomain, "smtp-policy-domain").status = "VERIFIED"
+        session.get(SmtpCredential, "smtp-policy-credential").allowed_streams_json = '["BULK"]'
+        session.commit()
+    assert asyncio.run(relay.handle_DATA(None, smtp_session, envelope)) == "550 5.7.1 stream not authorized"
