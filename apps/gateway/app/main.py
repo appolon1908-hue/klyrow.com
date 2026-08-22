@@ -621,3 +621,5 @@ from .billing import router as billing_router
 app.include_router(billing_router)
 from .tenancy import router as tenancy_router
 app.include_router(tenancy_router)
+from .messaging import router as messaging_router
+app.include_router(messaging_router)
