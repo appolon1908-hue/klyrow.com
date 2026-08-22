@@ -349,6 +349,8 @@ async def beyvra_send(x:MailIn,ctx=Depends(beyvra_service_auth),s:Session=Depend
 
 async def _send(x:MailIn,ctx,s,idempotency_key):
     if not idempotency_key: raise HTTPException(400,"idempotency_key_required")
+    from .agent_mailboxes import authorize_agent_sender
+    authorize_agent_sender(s,ctx,x.sender,x.campaign_id)
     request_hash=sha(x.model_dump_json())
     prior=s.scalar(select(Idempotency).where(Idempotency.key==idempotency_key,Idempotency.tenant_id==ctx["tenant"]))
     if prior:
@@ -463,3 +465,5 @@ def portal_js():return FileResponse(Path(__file__).with_name("portal.js"),media_
 
 from .saas import router as saas_router
 app.include_router(saas_router)
+from .agent_mailboxes import router as agent_mailbox_router
+app.include_router(agent_mailbox_router)
