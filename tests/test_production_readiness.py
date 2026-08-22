@@ -102,6 +102,9 @@ def test_prometheus_uses_the_private_metrics_credential():
     prometheus = (ROOT / "config/prometheus.yml").read_text()
     assert "secrets: [klyrow_metrics_token]" in compose
     assert "credentials_file: /run/secrets/klyrow_metrics_token" in prometheus
+    alerts=(ROOT/"config/alerts.yml").read_text()
+    for name in ("KlyrowEmailQueueStalled","KlyrowN8nDeliveryStalled","KlyrowOdooDeliveryStalled","KlyrowCustomerWebhookFailures","KlyrowHighBounceRate","KlyrowHighComplaintRate","KlyrowDomainDnsInvalid","KlyrowBillingReconciliationFailure","KlyrowHostCpuPressure","KlyrowHostMemoryPressure"):
+        assert "alert: "+name in alerts
 
 
 def test_container_scan_fails_only_for_configured_high_and_critical_findings():

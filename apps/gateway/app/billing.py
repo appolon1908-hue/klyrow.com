@@ -18,6 +18,12 @@ from .main import Base, Tenant, audit, auth, db, require, sha
 router=APIRouter(prefix="/v1",tags=["Klyrow billing"])
 now=lambda:datetime.now(timezone.utc)
 money=lambda value:Decimal(value).quantize(Decimal("0.01"),rounding=ROUND_HALF_UP)
+def expected_invoice_status(current:str,total,paid,refunded)->str:
+    if current in {"VOID","CREDITED"}:return current
+    net=money(paid)-money(refunded)
+    if net>=money(total):return "PAID"
+    if net>0:return "PARTIALLY_PAID"
+    return "OPEN" if current in {"PAID","PARTIALLY_PAID"} else current
 
 class BillingProduct(Base):
     __tablename__="klyrow_products"; id:Mapped[str]=mapped_column(String,primary_key=True); code:Mapped[str]=mapped_column(String,unique=True); name:Mapped[str]=mapped_column(String); active:Mapped[bool]=mapped_column(Boolean,default=True)
@@ -223,8 +229,8 @@ def reconcile(ctx=Depends(auth),s:Session=Depends(db)):
     for inv in s.scalars(select(Invoice).where(Invoice.tenant_id==ctx["tenant"])).all():
         paid=money(s.scalar(select(func.sum(Payment.amount)).where(Payment.invoice_id==inv.id,Payment.status=="CONFIRMED")) or 0)
         refunded=money(s.scalar(select(func.sum(Refund.amount)).where(Refund.tenant_id==ctx["tenant"],Refund.status=="CONFIRMED",Refund.payment_id.in_(select(Payment.id).where(Payment.invoice_id==inv.id)))) or 0)
-        expected="PAID" if paid-refunded>=money(inv.total) else ("PARTIALLY_PAID" if paid-refunded>0 else inv.status)
-        if inv.status!=expected and inv.status not in {"VOID","CREDITED"}:issues.append({"invoice_id":inv.id,"actual":inv.status,"expected":expected})
+        expected=expected_invoice_status(inv.status,inv.total,paid,refunded)
+        if inv.status!=expected:issues.append({"invoice_id":inv.id,"actual":inv.status,"expected":expected})
     return {"status":"PASS" if not issues else "DRIFT","issues":issues,"auto_corrected":False}
 
 @router.get("/billing/portal")

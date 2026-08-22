@@ -112,3 +112,13 @@ def test_checkout_proration_credit_note_and_dunning_are_auditable():
     dunning=client.post("/v1/admin/billing/dunning",headers=root,json={"grace_days":7,"suspend_days":21})
     assert dunning.status_code==200 and any(item["invoice_id"]==invoice.json()["id"] and item["subscription_status"]=="GRACE_PERIOD" for item in dunning.json()["items"])
     assert dunning.json()["login_disabled"] is False
+
+
+def test_reconciliation_detects_paid_invoice_without_confirmed_payment():
+    tenant=login("a@example.com")
+    created=client.post("/v1/billing/invoices",headers=tenant,json={"due_at":(datetime.now(timezone.utc)+timedelta(days=14)).isoformat()})
+    with DB() as session:
+        invoice=session.get(Invoice,created.json()["id"]);invoice.status="PAID";session.commit()
+    reconciliation=client.get("/v1/billing/reconciliation",headers=tenant)
+    assert reconciliation.status_code==200 and reconciliation.json()["status"]=="DRIFT"
+    assert any(item["invoice_id"]==created.json()["id"] and item["expected"]=="OPEN" for item in reconciliation.json()["issues"])
