@@ -20,6 +20,7 @@ def test_schema_migration_is_a_required_gateway_dependency():
     compose = (ROOT / "docker-compose.yml").read_text()
     assert "gateway-migrate: {condition: service_completed_successfully}" in compose
     assert "2026082201_email_outbox_and_tenant_idempotency.sql" in compose
+    assert "2026082202_production_canary_claim_ledger.sql" in compose
     assert "ON_ERROR_STOP=1" in compose
 
 
@@ -70,6 +71,13 @@ def test_single_domain_canary_is_durable_and_fail_closed():
     assert 'except (TypeError,ValueError):maximum=-1' in source
     assert "KLYROW_CANARY_MAX_DELIVERIES" in compose
     assert 'KLYROW_BULK_DELIVERY_ENABLED: "false"' in compose
+
+
+def test_canary_ledger_has_a_forward_migration_for_existing_installations():
+    migration = (ROOT / "migrations/2026082202_production_canary_claim_ledger.sql").read_text()
+    assert "CREATE TABLE IF NOT EXISTS production_canary_gate" in migration
+    assert "claimed_deliveries integer NOT NULL DEFAULT 0" in migration
+    assert "ON CONFLICT (gate_key) DO NOTHING" in migration
 
 
 def test_health_counts_outbox_and_reflects_durable_canary_capacity():
