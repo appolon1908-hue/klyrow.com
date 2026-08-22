@@ -55,9 +55,21 @@ CREATE INDEX IF NOT EXISTS email_outbox_claim
 CREATE TABLE IF NOT EXISTS production_canary_gate (
   gate_key text PRIMARY KEY,
   reserved_deliveries integer NOT NULL DEFAULT 0,
+  delivered_deliveries integer NOT NULL DEFAULT 0,
   updated_at timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT production_canary_gate_nonnegative CHECK (reserved_deliveries >= 0)
+  CONSTRAINT production_canary_gate_nonnegative CHECK (reserved_deliveries >= 0),
+  CONSTRAINT production_canary_gate_delivered_nonnegative CHECK (delivered_deliveries >= 0),
+  CONSTRAINT production_canary_gate_delivery_bounds CHECK (delivered_deliveries <= reserved_deliveries)
 );
+ALTER TABLE production_canary_gate ADD COLUMN IF NOT EXISTS delivered_deliveries integer NOT NULL DEFAULT 0;
+DO $$ BEGIN
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='production_canary_gate_delivered_nonnegative' AND conrelid='production_canary_gate'::regclass) THEN
+  ALTER TABLE production_canary_gate ADD CONSTRAINT production_canary_gate_delivered_nonnegative CHECK (delivered_deliveries >= 0);
+ END IF;
+ IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='production_canary_gate_delivery_bounds' AND conrelid='production_canary_gate'::regclass) THEN
+  ALTER TABLE production_canary_gate ADD CONSTRAINT production_canary_gate_delivery_bounds CHECK (delivered_deliveries <= reserved_deliveries);
+ END IF;
+END $$;
 INSERT INTO production_canary_gate(gate_key, reserved_deliveries)
 VALUES ('klyrow-single-domain', 0)
 ON CONFLICT (gate_key) DO NOTHING;

@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from prometheus_client import Counter, Histogram, generate_latest
 from pydantic import BaseModel, EmailStr, Field, model_validator
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, or_, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 DATABASE_URL=os.getenv("KLYROW_DATABASE_URL", "sqlite:///./klyrow.db")
@@ -76,7 +76,7 @@ class Idempotency(Base):
 class EmailOutbox(Base):
     __tablename__="email_outbox"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); message_id:Mapped[str]=mapped_column(String,unique=True,index=True); payload:Mapped[str]=mapped_column(Text); state:Mapped[str]=mapped_column(String,default="pending",index=True); attempts:Mapped[int]=mapped_column(Integer,default=0); provider_message_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True); next_attempt_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class ProductionCanaryGate(Base):
-    __tablename__="production_canary_gate"; gate_key:Mapped[str]=mapped_column(String,primary_key=True); reserved_deliveries:Mapped[int]=mapped_column(Integer,default=0); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+    __tablename__="production_canary_gate"; gate_key:Mapped[str]=mapped_column(String,primary_key=True); reserved_deliveries:Mapped[int]=mapped_column(Integer,default=0); delivered_deliveries:Mapped[int]=mapped_column(Integer,default=0); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class WebhookEndpoint(Base):
     __tablename__="webhook_endpoints"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); url:Mapped[str]=mapped_column(String); enabled:Mapped[bool]=mapped_column(Boolean,default=True); secret_hash:Mapped[str]=mapped_column(String)
 
@@ -149,15 +149,22 @@ def require(*roles):
         return ctx
     return inner
 
-def production_gate_open()->bool:
-    return not SAFE_MODE and os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()=="true" and (os.getenv("KLYROW_CANARY_ALLOWED_DOMAIN","").lower(),os.getenv("KLYROW_CANARY_ALLOWED_SENDER","").lower(),os.getenv("KLYROW_CANARY_ALLOWED_RECIPIENT","").lower(),os.getenv("KLYROW_CANARY_MAX_DELIVERIES","0"))==("klyrow.com","support@klyrow.com","appolon1908@gmail.com","1")
+def canary_configuration()->tuple[str,str,str,int]:
+    return (os.getenv("KLYROW_CANARY_ALLOWED_DOMAIN","").lower(),os.getenv("KLYROW_CANARY_ALLOWED_SENDER","").lower(),os.getenv("KLYROW_CANARY_ALLOWED_RECIPIENT","").lower(),int(os.getenv("KLYROW_CANARY_MAX_DELIVERIES","0")))
+
+def production_gate_open(s:Session)->bool:
+    if SAFE_MODE or os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()!="true" or canary_configuration()!=("klyrow.com","support@klyrow.com","appolon1908@gmail.com",1):return False
+    gate=s.get(ProductionCanaryGate,"klyrow-single-domain")
+    return bool(gate and gate.reserved_deliveries<1 and gate.delivered_deliveries<=gate.reserved_deliveries)
+
+def canary_payload_allowed(payload:dict)->bool:
+    domain,sender,recipient,maximum=canary_configuration()
+    recipients=payload.get("to")
+    return (domain,sender,recipient,maximum)==("klyrow.com","support@klyrow.com","appolon1908@gmail.com",1) and payload.get("from","").lower()==sender and sender.endswith("@"+domain) and recipients==[recipient]
 
 def enforce_production_canary(x,s):
     if SAFE_MODE:return
-    domain=os.getenv("KLYROW_CANARY_ALLOWED_DOMAIN","").lower()
-    sender=os.getenv("KLYROW_CANARY_ALLOWED_SENDER","").lower()
-    recipient=os.getenv("KLYROW_CANARY_ALLOWED_RECIPIENT","").lower()
-    maximum=int(os.getenv("KLYROW_CANARY_MAX_DELIVERIES","0"))
+    domain,sender,recipient,maximum=canary_configuration()
     if (domain,sender,recipient,maximum)!=("klyrow.com","support@klyrow.com","appolon1908@gmail.com",1):raise HTTPException(503,"production_canary_configuration_invalid")
     if x.stream!="transactional" or x.campaign_id:raise HTTPException(403,"canary_transactional_only")
     if x.sender.lower()!=sender or x.sender.lower().rsplit("@",1)[1]!=domain:raise HTTPException(403,"canary_sender_denied")
@@ -323,6 +330,13 @@ async def email_outbox_loop():
                 current=datetime.now(timezone.utc)
                 item=s.scalar(select(EmailOutbox).where(or_(EmailOutbox.state=="pending",(EmailOutbox.state=="retry") & (or_(EmailOutbox.next_attempt_at.is_(None),EmailOutbox.next_attempt_at<=current)),(EmailOutbox.state=="sending") & (EmailOutbox.updated_at<stale)),EmailOutbox.attempts<5).order_by(EmailOutbox.created_at).with_for_update(skip_locked=True))
                 if not item:continue
+                payload=json.loads(item.payload)
+                gate=s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key=="klyrow-single-domain").with_for_update())
+                if not canary_payload_allowed(payload) or not gate or gate.delivered_deliveries>=gate.reserved_deliveries or gate.delivered_deliveries>=1:
+                    item.state="quarantined";item.last_error="production_canary_policy_denied";item.updated_at=current
+                    message=s.get(Message,item.message_id)
+                    if message:message.status="quarantined"
+                    s.commit();continue
                 item.state="sending";item.attempts+=1;item.next_attempt_at=None;item.updated_at=current;snapshot=(item.id,item.message_id,item.payload);s.commit()
             key_file=os.getenv("KLYROW_POSTAL_API_KEY_FILE","")
             key=Path(key_file).read_text(encoding="utf-8").strip() if key_file else ""
@@ -334,6 +348,9 @@ async def email_outbox_loop():
                 item=s.get(EmailOutbox,snapshot[0]);message=s.get(Message,snapshot[1])
                 if item:item.state="delivered";item.provider_message_id=provider_id;item.last_error=None;item.updated_at=datetime.now(timezone.utc)
                 if message:message.status="accepted"
+                gate=s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key=="klyrow-single-domain").with_for_update())
+                if not gate or gate.delivered_deliveries>=gate.reserved_deliveries:raise RuntimeError("production canary ledger mismatch")
+                gate.delivered_deliveries+=1;gate.updated_at=datetime.now(timezone.utc)
                 s.commit()
         except Exception as exc:
             with DB() as s:
@@ -363,8 +380,8 @@ async def headers(request, call_next):
 
 @app.get("/v1/health")
 def health(s:Session=Depends(db)):
-    s.execute(select(1));active=len(s.scalars(select(EmailOutbox).where(EmailOutbox.state.in_(("pending","sending","retry")))).all())
-    return {"status":"ok","safe_mode":SAFE_MODE,"production_gate_approved":os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()=="true","production_gate_open":production_gate_open(),"database":"healthy","outbox":"healthy","outbox_active":active}
+    s.execute(select(1));active=s.scalar(select(func.count()).select_from(EmailOutbox).where(EmailOutbox.state.in_(("pending","sending","retry"))))
+    return {"status":"ok","safe_mode":SAFE_MODE,"production_gate_approved":os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()=="true","production_gate_open":production_gate_open(s),"database":"healthy","outbox":"healthy","outbox_active":active}
 @app.get("/healthz")
 def healthz(s:Session=Depends(db)):s.execute(select(1));return {"status":"ok"}
 @app.get("/readyz")

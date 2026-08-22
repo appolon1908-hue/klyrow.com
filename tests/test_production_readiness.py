@@ -55,14 +55,25 @@ def test_single_domain_canary_is_durable_and_fail_closed():
     source = (ROOT / "apps/gateway/app/main.py").read_text()
     migration = (ROOT / "migrations/2026082201_email_outbox_and_tenant_idempotency.sql").read_text()
     compose = (ROOT / "docker-compose.yml").read_text()
-    assert '"klyrow.com","support@klyrow.com","appolon1908@gmail.com","1"' in source
+    assert '("klyrow.com","support@klyrow.com","appolon1908@gmail.com",1)' in source
     assert 'with_for_update()' in source
     assert 'production_canary_limit_reached' in source
     assert 'bulk_delivery_disabled_during_canary' in source
     assert 'campaign_delivery_disabled_during_canary' in source
     assert 'production_canary_gate' in migration
+    assert 'canary_payload_allowed(payload)' in source
+    assert 'item.state="quarantined"' in source
+    assert 'gate.delivered_deliveries+=1' in source
+    assert 'delivered_deliveries integer NOT NULL DEFAULT 0' in migration
     assert "KLYROW_CANARY_MAX_DELIVERIES" in compose
     assert 'KLYROW_BULK_DELIVERY_ENABLED: "false"' in compose
+
+
+def test_health_counts_outbox_and_reflects_durable_canary_capacity():
+    source = (ROOT / "apps/gateway/app/main.py").read_text()
+    assert "select(func.count()).select_from(EmailOutbox)" in source
+    assert "gate.reserved_deliveries<1" in source
+    assert "production_gate_open(s)" in source
 
 
 def test_prometheus_uses_the_private_metrics_credential():
