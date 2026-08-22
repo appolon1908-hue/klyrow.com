@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+"""Emit an idempotent PostgreSQL schema snapshot from authoritative metadata."""
+import re
+import sys
+
+from sqlalchemy import create_mock_engine
+
+from apps.gateway.app.main import Base
+
+
+statements = []
+
+
+def collect(sql, *args, **kwargs):
+    rendered = str(sql.compile(dialect=engine.dialect)).strip()
+    rendered = re.sub(r"^CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", rendered)
+    rendered = re.sub(r"^CREATE (UNIQUE )?INDEX ", lambda m: f"CREATE {m.group(1) or ''}INDEX IF NOT EXISTS ", rendered)
+    statements.append(rendered + ";")
+
+
+engine = create_mock_engine("postgresql://", collect)
+Base.metadata.create_all(engine)
+sys.stdout.write("BEGIN;\n\n" + "\n\n".join(statements) + "\n\nCOMMIT;\n")

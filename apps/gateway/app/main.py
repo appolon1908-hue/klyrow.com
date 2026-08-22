@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from prometheus_client import Counter, Histogram, generate_latest
 from pydantic import BaseModel, EmailStr, Field, model_validator
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 DATABASE_URL=os.getenv("KLYROW_DATABASE_URL", "sqlite:///./klyrow.db")
@@ -335,7 +335,14 @@ async def postal_native_hook(request:Request,x_postal_signature_256:str=Header(d
 
 @app.on_event("startup")
 def startup():
-    Base.metadata.create_all(engine)
+    if os.getenv("KLYROW_ENV","development").lower()=="production":
+        required=os.getenv("KLYROW_REQUIRED_SCHEMA_VERSION","")
+        if not required:raise RuntimeError("production requires KLYROW_REQUIRED_SCHEMA_VERSION")
+        with engine.connect() as connection:
+            present=connection.execute(text("SELECT count(*) FROM klyrow_schema_migrations WHERE version=:version"),{"version":required}).scalar_one()
+        if present!=1:raise RuntimeError("required database migration is not applied")
+    else:
+        Base.metadata.create_all(engine)
     with DB() as s:
         if not s.scalar(select(User).limit(1)):
             email=os.getenv("KLYROW_ADMIN_EMAIL"); password=os.getenv("KLYROW_ADMIN_PASSWORD")

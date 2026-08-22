@@ -13,6 +13,7 @@ services:
       KLYROW_CANARY_ALLOWED_SENDER: ${KLYROW_CANARY_ALLOWED_SENDER:-}
       KLYROW_CANARY_ALLOWED_RECIPIENT: ${KLYROW_CANARY_ALLOWED_RECIPIENT:-}
       KLYROW_CANARY_MAX_DELIVERIES: ${KLYROW_CANARY_MAX_DELIVERIES:-0}
+      KLYROW_REQUIRED_SCHEMA_VERSION: 2026082202_production_canary_claim_ledger.sql
       KLYROW_BULK_DELIVERY_ENABLED: "false"
       KLYROW_CAMPAIGN_DELIVERY_ENABLED: "false"
       LIVE_SMS_DELIVERY: "false"
@@ -58,17 +59,11 @@ services:
       timeout: 5s
       retries: 10
   gateway-migrate:
-    image: postgres:17.6-bookworm
+    build:
+      context: .
+      dockerfile: docker/migrate.Dockerfile
     environment:
-      PGPASSWORD: ${POSTGRES_PASSWORD:?required}
-    command:
-      - sh
-      - -ec
-      - |
-        psql -v ON_ERROR_STOP=1 -h postgres -U klyrow -d klyrow -f /migrations/2026082201_email_outbox_and_tenant_idempotency.sql
-        psql -v ON_ERROR_STOP=1 -h postgres -U klyrow -d klyrow -f /migrations/2026082202_production_canary_claim_ledger.sql
-    volumes:
-      - ./migrations:/migrations:ro
+      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
     networks: [backend]
     depends_on:
       postgres: {condition: service_healthy}
