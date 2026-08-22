@@ -33,7 +33,7 @@ def test_logout_revokes_active_session():
     token=login("a");headers={"Authorization":"Bearer "+token};assert client.post("/v1/auth/logout",headers=headers).status_code==204;assert client.get("/v1/me",headers=headers).status_code==401
 def test_safe_send_and_suppression():
     h={**hdr("a"),"Idempotency-Key":"send-1"}; x={"to":"ok@example.net","sender":"sender@a.example.com","subject":"test","html":"<p>test</p>"}; r=client.post("/v1/email/send",headers=h,json=x); assert r.status_code==202 and r.json()["safe_mode"]; assert client.post("/v1/email/send",headers=h,json=x).json()["id"]==r.json()["id"]
-    with DB() as s:s.add(Suppression(id="s",tenant_id="a",email="blocked@example.net",reason="unsubscribe"));s.commit()
+    with DB() as s:s.add(Suppression(id="s",tenant_id="a",email="blocked@example.net",reason="hard_bounce"));s.commit()
     x["to"]="blocked@example.net"; assert client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"send-2"},json=x).status_code==422
 def test_unapproved_local_part_is_denied():
     x={"to":"ok@example.net","sender":"admin@a.example.com","subject":"test","html":"<p>test</p>"}

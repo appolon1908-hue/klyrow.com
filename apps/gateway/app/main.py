@@ -536,7 +536,8 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
         if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
         return json.loads(prior.response_json)
     enforce_production_canary(x,s)
-    if s.scalar(select(Suppression).where(Suppression.tenant_id==ctx["tenant"],Suppression.email==x.to.lower())): raise HTTPException(422,"recipient_suppressed")
+    from .preferences import enforce_suppression
+    enforce_suppression(s,ctx["tenant"],x.to.lower(),x.stream,x.campaign_id)
     from .saas import Consent,Preference,Profile,UsageLedger
     profile=s.scalar(select(Profile).where(Profile.tenant_id==ctx["tenant"],Profile.email==x.to.lower()))
     if x.stream=="marketing":
@@ -666,3 +667,5 @@ from .reseller import router as reseller_router
 app.include_router(reseller_router)
 from .delivery_controls import router as delivery_controls_router
 app.include_router(delivery_controls_router)
+from .preferences import router as preferences_router
+app.include_router(preferences_router)
