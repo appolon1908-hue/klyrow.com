@@ -1,7 +1,7 @@
 import os
 os.environ.update(KLYROW_DATABASE_URL="sqlite:///./saas-test.db",KLYROW_SESSION_SECRET="test-session-secret-at-least-32-bytes",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple",KLYROW_AI_ENABLED="false",KLYROW_RATE_PER_MINUTE="1000",KLYROW_AUTH_RATE_PER_MINUTE="1000")
 from fastapi.testclient import TestClient
-from apps.gateway.app.main import Base,DB,Domain,Tenant,User,app,engine,ph,rate_buckets
+from apps.gateway.app.main import AllowedSender,Base,DB,Domain,Tenant,User,app,engine,ph,rate_buckets
 from apps.gateway.app.saas import ExperimentAssignment,JourneyRun,MfaConfig,Profile,totp
 
 client=TestClient(app)
@@ -9,7 +9,7 @@ def setup_module():
     Base.metadata.drop_all(engine);Base.metadata.create_all(engine)
     with DB() as s:
         for n,role in (("a","tenant_admin"),("b","tenant_admin"),("root","platform_admin")):
-            s.add(Tenant(id=n,name=n,quota=100));s.add(User(id=n,tenant_id=n,email=f"{n}@example.com",password_hash=ph.hash("long-enough-password"),role=role));s.add(Domain(id=n,tenant_id=n,domain=f"{n}.example.com",token=n,verified=True))
+            s.add(Tenant(id=n,name=n,quota=100));s.add(User(id=n,tenant_id=n,email=f"{n}@example.com",password_hash=ph.hash("long-enough-password"),role=role));s.add(Domain(id=n,tenant_id=n,domain=f"{n}.example.com",token=n,verified=True));s.add(AllowedSender(id=n,tenant_id=n,address=f"sender@{n}.example.com",role="support"))
         s.commit()
 def login(n,otp=None):
     body={"email":f"{n}@example.com","password":"long-enough-password"}

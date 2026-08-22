@@ -9,6 +9,12 @@ services:
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
       KLYROW_POSTAL_API_KEY_FILE: /run/secrets/klyrow_postal_api_key
       KLYROW_METRICS_TOKEN_FILE: /run/secrets/klyrow_metrics_token
+      LIVE_SMS_DELIVERY: "false"
+      LIVE_EMAIL_DELIVERY: "false"
+      EXTERNAL_SMS_DELIVERY: "false"
+      EXTERNAL_EMAIL_DELIVERY: "false"
+      PRODUCTION_PROVIDER_ROUTING: "false"
+      MARKETING_DELIVERY: "false"
     secrets: [klyrow_session_secret, klyrow_postal_api_key, klyrow_metrics_token]
     volumes:
       - ./secrets/postal/webhook-signing-public.pem:/run/klyrow/postal-webhook-signing-public.pem:ro
@@ -35,7 +41,9 @@ services:
       POSTGRES_DB: klyrow
       POSTGRES_USER: klyrow
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
-    volumes: [postgres_data:/var/lib/postgresql/data]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/migrations:ro
     networks: [backend]
     restart: unless-stopped
     healthcheck:

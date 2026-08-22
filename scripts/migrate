@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/lib.sh"; require_env
+
+docker compose up -d postgres
+docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U klyrow -d klyrow <<'SQL'
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version VARCHAR PRIMARY KEY,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+SQL
+
+for migration in migrations/*.sql; do
+  version="$(basename "$migration")"
+  applied="$(docker compose exec -T postgres psql -U klyrow -d klyrow -At \
+    -v version="$version" \
+    -c "SELECT 1 FROM schema_migrations WHERE version = :'version'")"
+  if [[ "$applied" == "1" ]]; then
+    echo "Migration already applied: $version"
+    continue
+  fi
+
+  echo "Applying migration: $version"
+  docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U klyrow -d klyrow \
+    -f "/migrations/$version"
+  docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U klyrow -d klyrow \
+    -v version="$version" \
+    -c "INSERT INTO schema_migrations(version) VALUES (:'version') ON CONFLICT DO NOTHING"
+done

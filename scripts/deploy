@@ -5,5 +5,7 @@ scripts/migrate-runtime-secrets
 docker compose config --quiet
 scripts/render-postal-config
 docker compose pull
-docker compose up -d --build
+docker compose build gateway
+scripts/migrate
+docker compose up -d --remove-orphans
 scripts/health
