@@ -24,6 +24,9 @@ def test_schema_migration_is_a_required_gateway_dependency():
     assert "docker/migrate.Dockerfile" in compose
     assert "pg_advisory_xact_lock" in runner
     assert "applied migration checksum mismatch" in runner
+    canary = (ROOT / "migrations/2026082202_production_canary_claim_ledger.sql").read_text()
+    assert "ALTER COLUMN updated_at SET DEFAULT now()" in canary
+    assert "claimed_deliveries, updated_at" in canary
 
 
 def test_upgrade_migrates_legacy_environment_secrets_before_compose():
