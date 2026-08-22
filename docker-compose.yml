@@ -93,7 +93,7 @@ services:
     image: postgres:17.6-bookworm
     environment:
       PGPASSWORD: ${POSTGRES_PASSWORD:?required}
-    command: [sh, -ec, "psql -v ON_ERROR_STOP=1 -h postgres -U klyrow -d klyrow -f /migrations/2026082201_email_outbox_and_tenant_idempotency.sql && psql -v ON_ERROR_STOP=1 -h postgres -U klyrow -d klyrow -f /migrations/2026082202_production_canary_claim_ledger.sql && psql -v ON_ERROR_STOP=1 -h postgres -U klyrow -d klyrow -f /migrations/004_provider_engine.sql && psql -v ON_ERROR_STOP=1 -h postgres -U klyrow -d klyrow -f /migrations/005_provider_outbox_recovery.sql"]
+    command: [sh, -ec, "psql -v ON_ERROR_STOP=1 -h postgres -U klyrow -d klyrow -f /migrations/2026082201_email_outbox_and_tenant_idempotency.sql && psql -v ON_ERROR_STOP=1 -h postgres -U klyrow -d klyrow -f /migrations/2026082202_production_canary_claim_ledger.sql && psql -v ON_ERROR_STOP=1 -h postgres -U klyrow -d klyrow -f /migrations/004_provider_engine.sql && psql -v ON_ERROR_STOP=1 -h postgres -U klyrow -d klyrow -f /migrations/005_provider_outbox_recovery.sql && psql -v ON_ERROR_STOP=1 -h postgres -U klyrow -d klyrow -f /migrations/006_tracking_and_spam.sql"]
     volumes:
       - ./migrations:/migrations:ro
     networks: [backend]
