@@ -95,6 +95,16 @@ def replay_webhook(item_id:str,x:RecoverIn,ctx=Depends(require("platform_admin")
     item=s.get(WebhookAttempt,item_id)
     if not item:raise HTTPException(404,"webhook_attempt_not_found")
     item.state="PENDING";item.next_attempt_at=now();item.last_error=None;audit(s,{**ctx,"tenant":item.tenant_id},"webhook.replay_requested:"+x.reason);s.commit();return {"state":item.state,"attempts":item.attempts}
+@router.post("/admin/operations/integrations/{item_id}/fail")
+def fail_integration(item_id:str,x:RecoverIn,ctx=Depends(require("platform_admin")),s:Session=Depends(db)):
+    item=s.get(IntegrationOutbox,item_id)
+    if not item or item.state=="COMPLETED":raise HTTPException(404,"pending_integration_not_found")
+    item.attempts+=1;item.last_error=x.reason;item.state="DEAD_LETTER" if item.attempts>=8 else "RETRY";item.next_attempt_at=now()+timedelta(seconds=min(900,2**item.attempts));item.updated_at=now();audit(s,{**ctx,"tenant":item.tenant_id},"integration.delivery_failed:"+item.target);s.commit();return {"state":item.state,"attempts":item.attempts,"target":item.target}
+@router.post("/admin/operations/integrations/{item_id}/recover")
+def recover_integration(item_id:str,x:RecoverIn,ctx=Depends(require("platform_admin")),s:Session=Depends(db)):
+    item=s.get(IntegrationOutbox,item_id)
+    if not item or item.state not in {"RETRY","DEAD_LETTER"}:raise HTTPException(404,"recoverable_integration_not_found")
+    item.state="PENDING";item.next_attempt_at=now();item.last_error=None;item.updated_at=now();audit(s,{**ctx,"tenant":item.tenant_id},"integration.delivery_recovered:"+item.target+":"+x.reason);s.commit();return {"state":item.state,"attempts":item.attempts,"target":item.target}
 @router.post("/admin/reconciliation",status_code=201)
 def reconcile(ctx=Depends(require("platform_admin")),s:Session=Depends(db)):
     details=[]
