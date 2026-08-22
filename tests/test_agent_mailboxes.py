@@ -46,6 +46,7 @@ def test_provision_replay_conflict_activation_and_sender_isolation():
     with DB() as s:s.add(Domain(id="domain-a",tenant_id="tenant-a",domain="codestra.co",token="verified",verified=True));s.commit()
     agent=hdr("agent-a@example.com");payload={"to":"synthetic@example.net","sender":"mariajose@codestra.co","subject":"Synthetic","html":"<p>non-delivery</p>","campaign_id":"campaign-a"}
     assert client.post("/v1/email/send",headers={**agent,"Idempotency-Key":"agent-send-1"},json=payload).status_code==202
+    assert client.post("/v1/email/send",headers={**agent,"Idempotency-Key":"agent-send-no-campaign"},json={key:value for key,value in payload.items() if key!="campaign_id"}).status_code==403
     assert client.post("/v1/email/send",headers={**agent,"Idempotency-Key":"agent-send-2"},json={**payload,"sender":"support@codestra.co"}).status_code==403
     assert client.post(f"/v1/agent-mailboxes/{first.json()['mailbox_id']}/suspend",headers=admin).json()["mailbox_status"]=="SUSPENDED"
     assert client.post("/v1/email/send",headers={**agent,"Idempotency-Key":"agent-send-3"},json=payload).status_code==403

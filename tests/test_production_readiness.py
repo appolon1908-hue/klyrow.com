@@ -55,13 +55,16 @@ def test_single_domain_canary_is_durable_and_fail_closed():
     source = (ROOT / "apps/gateway/app/main.py").read_text()
     migration = (ROOT / "migrations/2026082201_email_outbox_and_tenant_idempotency.sql").read_text()
     compose = (ROOT / "docker-compose.yml").read_text()
-    assert '("klyrow.com","support@klyrow.com","appolon1908@gmail.com",1)' in source
+    assert "canary_configuration_valid()" in source
+    assert 'KLYROW_CANARY_ALLOWED_CAMPAIGN' in source
     assert 'with_for_update()' in source
     assert 'production_canary_limit_reached' in source
     assert 'bulk_delivery_disabled_during_canary' in source
     assert 'campaign_delivery_disabled_during_canary' in source
     assert 'production_canary_gate' in migration
     assert 'canary_payload_allowed(payload)' in source
+    assert 'payload.get("campaign_id")==allowed_campaign' in source
+    assert '"campaign_id":x.campaign_id' in source
     assert 'item.state="quarantined"' in source
     assert 'gate.claimed_deliveries+=1' in source
     assert 'claimed_deliveries integer NOT NULL DEFAULT 0' in migration
@@ -72,10 +75,16 @@ def test_single_domain_canary_is_durable_and_fail_closed():
     assert 'KLYROW_BULK_DELIVERY_ENABLED: "false"' in compose
 
 
+def test_resolver_requires_write_permission_for_mutating_routes():
+    source = (ROOT / "apps/gateway/app/main.py").read_text()
+    assert 'request.method not in {"GET","HEAD","OPTIONS"}' in source
+    assert 'permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send"' in source
+
+
 def test_health_counts_outbox_and_reflects_durable_canary_capacity():
     source = (ROOT / "apps/gateway/app/main.py").read_text()
     assert "select(func.count()).select_from(EmailOutbox)" in source
-    assert "gate.reserved_deliveries<1" in source
+    assert "gate.reserved_deliveries<maximum" in source
     assert "production_gate_open(s)" in source
 
 
