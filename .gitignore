@@ -8,6 +8,7 @@ backups/
 !.env.example
 __pycache__/
 .pytest_cache/
+.venv/
 *.pyc
 backups/
 secrets/

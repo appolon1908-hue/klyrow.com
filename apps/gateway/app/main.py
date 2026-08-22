@@ -17,7 +17,11 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, Uni
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 DATABASE_URL=os.getenv("KLYROW_DATABASE_URL", "sqlite:///./klyrow.db")
-SECRET=os.getenv("KLYROW_SESSION_SECRET", "dev-only-change-me")
+SECRET=os.getenv("KLYROW_SESSION_SECRET", "")
+if os.getenv("KLYROW_ENV","development").lower()=="production" and (len(SECRET)<32 or SECRET.startswith("CHANGE_ME")):
+    raise RuntimeError("KLYROW_SESSION_SECRET must be a non-placeholder secret of at least 32 characters")
+if not SECRET:
+    SECRET=secrets.token_urlsafe(32)
 SAFE_MODE=os.getenv("KLYROW_SAFE_MODE", "true").lower()=="true" or os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()!="true"
 engine=create_engine(DATABASE_URL, pool_pre_ping=True)
 DB=sessionmaker(engine, expire_on_commit=False)
@@ -37,6 +41,13 @@ class ApiKey(Base):
     __tablename__="api_keys"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); name:Mapped[str]=mapped_column(String); key_hash:Mapped[str]=mapped_column(String,unique=True); revoked:Mapped[bool]=mapped_column(Boolean,default=False)
 class Domain(Base):
     __tablename__="domains"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); domain:Mapped[str]=mapped_column(String); token:Mapped[str]=mapped_column(String); verified:Mapped[bool]=mapped_column(Boolean,default=False)
+    __table_args__=(UniqueConstraint("tenant_id","domain",name="uq_domain_tenant_name"),)
+class AllowedSender(Base):
+    __tablename__="allowed_senders"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); address:Mapped[str]=mapped_column(String,index=True); role:Mapped[str]=mapped_column(String); enabled:Mapped[bool]=mapped_column(Boolean,default=True)
+    __table_args__=(UniqueConstraint("tenant_id","address",name="uq_allowed_sender_tenant_address"),)
+class InboundRouteConfig(Base):
+    __tablename__="inbound_route_configs"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); address:Mapped[str]=mapped_column(String,index=True); destination_kind:Mapped[str]=mapped_column(String); destination_ref:Mapped[Optional[str]]=mapped_column(String,nullable=True); verified:Mapped[bool]=mapped_column(Boolean,default=False); enabled:Mapped[bool]=mapped_column(Boolean,default=False)
+    __table_args__=(UniqueConstraint("tenant_id","address",name="uq_inbound_route_tenant_address"),)
 class Message(Base):
     __tablename__="messages"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); recipient:Mapped[str]=mapped_column(String); sender:Mapped[str]=mapped_column(String); subject:Mapped[str]=mapped_column(String); status:Mapped[str]=mapped_column(String); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class Event(Base):
@@ -55,7 +66,7 @@ class Contact(Base):
 class Campaign(Base):
     __tablename__="campaigns"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); name:Mapped[str]=mapped_column(String); status:Mapped[str]=mapped_column(String,default="draft"); subject:Mapped[Optional[str]]=mapped_column(String,nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class Idempotency(Base):
-    __tablename__="idempotency_keys"; key:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); request_hash:Mapped[str]=mapped_column(String); resource_id:Mapped[str]=mapped_column(String); response_json:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+    __tablename__="idempotency_keys"; __table_args__=(UniqueConstraint("tenant_id","key",name="uq_idempotency_tenant_key"),); id:Mapped[str]=mapped_column(String,primary_key=True,default=lambda:str(uuid.uuid4())); key:Mapped[str]=mapped_column(String); tenant_id:Mapped[str]=mapped_column(String,index=True); request_hash:Mapped[str]=mapped_column(String); resource_id:Mapped[str]=mapped_column(String); response_json:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class WebhookEndpoint(Base):
     __tablename__="webhook_endpoints"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); url:Mapped[str]=mapped_column(String); enabled:Mapped[bool]=mapped_column(Boolean,default=True); secret_hash:Mapped[str]=mapped_column(String)
 
@@ -273,6 +284,10 @@ async def headers(request, call_next):
 
 @app.get("/v1/health")
 def health(s:Session=Depends(db)): s.execute(select(1)); return {"status":"ok","safe_mode":SAFE_MODE,"production_gate_approved":os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()=="true"}
+@app.get("/healthz")
+def healthz(s:Session=Depends(db)):s.execute(select(1));return {"status":"ok"}
+@app.get("/readyz")
+def readyz(s:Session=Depends(db)):s.execute(select(1));return {"status":"ready","safe_mode":SAFE_MODE}
 @app.get("/metrics")
 def metrics(): from fastapi.responses import Response; return Response(generate_latest(),media_type="text/plain")
 @app.post("/v1/auth/login")
@@ -286,7 +301,11 @@ def login(x:Login,s:Session=Depends(db)):
     if m and m.enabled and (not x.otp or not verify_totp(m.secret,x.otp)):raise HTTPException(401,"mfa_required")
     return {"access_token":token(u,s),"token_type":"bearer","role":u.role,"tenant_id":u.tenant_id}
 @app.post("/v1/auth/logout",status_code=204)
-def logout(ctx=Depends(auth)): return None
+def logout(ctx=Depends(auth),s:Session=Depends(db)):
+    from .saas import SessionRecord
+    session=s.get(SessionRecord,ctx.get("sid")) if ctx.get("sid") else None
+    if session:session.revoked=True;s.commit()
+    return None
 @app.post("/v1/auth/forgot-password",status_code=202)
 def forgot(x:ResetRequest,s:Session=Depends(db)):
     u=s.scalar(select(User).where(User.email==x.email.lower()))
@@ -296,7 +315,10 @@ def forgot(x:ResetRequest,s:Session=Depends(db)):
 def reset(x:Reset,s:Session=Depends(db)):
     u=s.scalar(select(User).where(User.reset_hash==sha(x.token)))
     if not u or not u.reset_expires or u.reset_expires.replace(tzinfo=timezone.utc)<datetime.now(timezone.utc): raise HTTPException(400,"invalid_or_expired_token")
-    u.password_hash=ph.hash(x.password); u.reset_hash=None; u.reset_expires=None; s.commit(); return {"status":"reset"}
+    from .saas import SessionRecord
+    u.password_hash=ph.hash(x.password); u.reset_hash=None; u.reset_expires=None
+    for active in s.scalars(select(SessionRecord).where(SessionRecord.user_id==u.id,SessionRecord.revoked==False)).all():active.revoked=True
+    s.commit(); return {"status":"reset"}
 @app.get("/v1/me")
 def me(ctx=Depends(auth)): return ctx
 @app.post("/v1/api-keys")
@@ -334,6 +356,8 @@ async def beyvra_send(x:MailIn,ctx=Depends(beyvra_service_auth),s:Session=Depend
 
 async def _send(x:MailIn,ctx,s,idempotency_key):
     if not idempotency_key: raise HTTPException(400,"idempotency_key_required")
+    from .agent_mailboxes import authorize_agent_sender
+    authorize_agent_sender(s,ctx,x.sender,x.campaign_id)
     request_hash=sha(x.model_dump_json())
     prior=s.scalar(select(Idempotency).where(Idempotency.key==idempotency_key,Idempotency.tenant_id==ctx["tenant"]))
     if prior:
@@ -347,8 +371,11 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
         pref=s.scalar(select(Preference).where(Preference.tenant_id==ctx["tenant"],Preference.profile_id==profile.id,Preference.topic==x.topic))
         latest=s.scalar(select(Consent).where(Consent.tenant_id==ctx["tenant"],Consent.profile_id==profile.id,Consent.topic==x.topic).order_by(Consent.occurred_at.desc()))
         if not pref or not pref.subscribed or not latest or latest.status!="granted":raise HTTPException(422,"marketing_consent_required")
-    domain=x.sender.rsplit("@",1)[1]; allowed=s.scalar(select(Domain).where(Domain.tenant_id==ctx["tenant"],Domain.domain==domain,Domain.verified==True))
+    sender=x.sender.lower();domain=sender.rsplit("@",1)[1];allowed=s.scalar(select(Domain).where(Domain.tenant_id==ctx["tenant"],Domain.domain==domain,Domain.verified==True))
     if not allowed: raise HTTPException(422,"sender_domain_not_verified")
+    if ctx.get("role")!="codestra-email-agent":
+        exact=s.scalar(select(AllowedSender).where(AllowedSender.tenant_id==ctx["tenant"],AllowedSender.address==sender,AllowedSender.enabled==True))
+        if not exact:raise HTTPException(403,"sender_address_not_allowed")
     since=datetime.now(timezone.utc)-timedelta(days=1); count=len(s.scalars(select(Message).where(Message.tenant_id==ctx["tenant"],Message.created_at>=since)).all()); tenant=s.get(Tenant,ctx["tenant"])
     if count>=tenant.quota: raise HTTPException(429,"daily_quota_exceeded")
     mid=str(uuid.uuid4()); status="accepted_test" if SAFE_MODE else "queued"
@@ -448,3 +475,5 @@ def portal_js():return FileResponse(Path(__file__).with_name("portal.js"),media_
 
 from .saas import router as saas_router
 app.include_router(saas_router)
+from .agent_mailboxes import router as agent_mailbox_router
+app.include_router(agent_mailbox_router)

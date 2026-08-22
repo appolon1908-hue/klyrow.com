@@ -5,6 +5,12 @@ services:
     env_file: .env
     environment:
       KLYROW_EMAIL_EVENT_URL: http://10.40.0.1:18080/internal/provider-events/klyrow
+      LIVE_SMS_DELIVERY: "false"
+      LIVE_EMAIL_DELIVERY: "false"
+      EXTERNAL_SMS_DELIVERY: "false"
+      EXTERNAL_EMAIL_DELIVERY: "false"
+      PRODUCTION_PROVIDER_ROUTING: "false"
+      MARKETING_DELIVERY: "false"
     volumes:
       - ./secrets/postal/webhook-signing-public.pem:/run/klyrow/postal-webhook-signing-public.pem:ro
     depends_on:
@@ -29,7 +35,9 @@ services:
       POSTGRES_DB: klyrow
       POSTGRES_USER: klyrow
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
-    volumes: [postgres_data:/var/lib/postgresql/data]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/migrations:ro
     networks: [backend]
     restart: unless-stopped
     healthcheck:
