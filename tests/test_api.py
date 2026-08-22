@@ -20,6 +20,11 @@ client=TestClient(app)
 def login(n): return client.post("/v1/auth/login",json={"email":f"{n}@example.com","password":"long-enough-password"}).json()["access_token"]
 def hdr(n): return {"Authorization":"Bearer "+login(n)}
 def test_unauthorized(): assert client.get("/v1/domains").status_code==401
+def test_logout_revokes_active_session():
+    access=login("a");h={"Authorization":"Bearer "+access}
+    assert client.get("/v1/me",headers=h).status_code==200
+    assert client.post("/v1/auth/logout",headers=h).status_code==204
+    assert client.get("/v1/me",headers=h).status_code==401
 def test_tenant_isolation():
     assert [d["domain"] for d in client.get("/v1/domains",headers=hdr("a")).json()]==["a.example.com"]
 def test_api_key_revoke():
@@ -28,6 +33,14 @@ def test_safe_send_and_suppression():
     h={**hdr("a"),"Idempotency-Key":"send-1"}; x={"to":"ok@example.net","sender":"sender@a.example.com","subject":"test","html":"<p>test</p>"}; r=client.post("/v1/email/send",headers=h,json=x); assert r.status_code==202 and r.json()["safe_mode"]; assert client.post("/v1/email/send",headers=h,json=x).json()["id"]==r.json()["id"]
     with DB() as s:s.add(Suppression(id="s",tenant_id="a",email="blocked@example.net",reason="unsubscribe"));s.commit()
     x["to"]="blocked@example.net"; assert client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"send-2"},json=x).status_code==422
+
+def test_idempotency_key_is_tenant_scoped_and_changed_payload_conflicts():
+    payload_a={"to":"a@example.net","sender":"sender@a.example.com","subject":"same","html":"<p>a</p>"}
+    payload_b={"to":"b@example.net","sender":"sender@b.example.com","subject":"same","html":"<p>b</p>"}
+    assert client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"shared-key"},json=payload_a).status_code==202
+    assert client.post("/v1/email/send",headers={**hdr("b"),"Idempotency-Key":"shared-key"},json=payload_b).status_code==202
+    changed={**payload_a,"subject":"changed"};r=client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"shared-key"},json=changed)
+    assert r.status_code==409 and r.json()["detail"]=="idempotency_key_payload_mismatch"
 
 def test_beyvra_service_scope_sender_policy_and_idempotency():
     base={"Authorization":"Bearer bounded-beyvra-test-token","X-Service-Identity":"codestra-server-a:beyvra-email-production","X-Service-Scopes":"email.send email.status","Idempotency-Key":"beyvra-1"}

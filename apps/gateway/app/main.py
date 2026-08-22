@@ -17,7 +17,11 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, Uni
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 DATABASE_URL=os.getenv("KLYROW_DATABASE_URL", "sqlite:///./klyrow.db")
-SECRET=os.getenv("KLYROW_SESSION_SECRET", "dev-only-change-me")
+SECRET=os.getenv("KLYROW_SESSION_SECRET", "")
+if os.getenv("KLYROW_ENV","development").lower()=="production" and (len(SECRET)<32 or SECRET.startswith("CHANGE_ME")):
+    raise RuntimeError("KLYROW_SESSION_SECRET must be a non-placeholder secret of at least 32 characters")
+if not SECRET:
+    SECRET=secrets.token_urlsafe(32)
 SAFE_MODE=os.getenv("KLYROW_SAFE_MODE", "true").lower()=="true" or os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()!="true"
 engine=create_engine(DATABASE_URL, pool_pre_ping=True)
 DB=sessionmaker(engine, expire_on_commit=False)
@@ -55,7 +59,7 @@ class Contact(Base):
 class Campaign(Base):
     __tablename__="campaigns"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); name:Mapped[str]=mapped_column(String); status:Mapped[str]=mapped_column(String,default="draft"); subject:Mapped[Optional[str]]=mapped_column(String,nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class Idempotency(Base):
-    __tablename__="idempotency_keys"; key:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); request_hash:Mapped[str]=mapped_column(String); resource_id:Mapped[str]=mapped_column(String); response_json:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+    __tablename__="idempotency_keys"; __table_args__=(UniqueConstraint("tenant_id","key",name="uq_idempotency_tenant_key"),); id:Mapped[str]=mapped_column(String,primary_key=True,default=lambda:str(uuid.uuid4())); key:Mapped[str]=mapped_column(String); tenant_id:Mapped[str]=mapped_column(String,index=True); request_hash:Mapped[str]=mapped_column(String); resource_id:Mapped[str]=mapped_column(String); response_json:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class WebhookEndpoint(Base):
     __tablename__="webhook_endpoints"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); url:Mapped[str]=mapped_column(String); enabled:Mapped[bool]=mapped_column(Boolean,default=True); secret_hash:Mapped[str]=mapped_column(String)
 
@@ -273,6 +277,10 @@ async def headers(request, call_next):
 
 @app.get("/v1/health")
 def health(s:Session=Depends(db)): s.execute(select(1)); return {"status":"ok","safe_mode":SAFE_MODE,"production_gate_approved":os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()=="true"}
+@app.get("/healthz")
+def healthz(s:Session=Depends(db)):s.execute(select(1));return {"status":"ok"}
+@app.get("/readyz")
+def readyz(s:Session=Depends(db)):s.execute(select(1));return {"status":"ready","safe_mode":SAFE_MODE}
 @app.get("/metrics")
 def metrics(): from fastapi.responses import Response; return Response(generate_latest(),media_type="text/plain")
 @app.post("/v1/auth/login")
@@ -286,7 +294,11 @@ def login(x:Login,s:Session=Depends(db)):
     if m and m.enabled and (not x.otp or not verify_totp(m.secret,x.otp)):raise HTTPException(401,"mfa_required")
     return {"access_token":token(u,s),"token_type":"bearer","role":u.role,"tenant_id":u.tenant_id}
 @app.post("/v1/auth/logout",status_code=204)
-def logout(ctx=Depends(auth)): return None
+def logout(ctx=Depends(auth),s:Session=Depends(db)):
+    from .saas import SessionRecord
+    session=s.get(SessionRecord,ctx.get("sid")) if ctx.get("sid") else None
+    if session:session.revoked=True;s.commit()
+    return None
 @app.post("/v1/auth/forgot-password",status_code=202)
 def forgot(x:ResetRequest,s:Session=Depends(db)):
     u=s.scalar(select(User).where(User.email==x.email.lower()))
@@ -296,7 +308,10 @@ def forgot(x:ResetRequest,s:Session=Depends(db)):
 def reset(x:Reset,s:Session=Depends(db)):
     u=s.scalar(select(User).where(User.reset_hash==sha(x.token)))
     if not u or not u.reset_expires or u.reset_expires.replace(tzinfo=timezone.utc)<datetime.now(timezone.utc): raise HTTPException(400,"invalid_or_expired_token")
-    u.password_hash=ph.hash(x.password); u.reset_hash=None; u.reset_expires=None; s.commit(); return {"status":"reset"}
+    from .saas import SessionRecord
+    u.password_hash=ph.hash(x.password); u.reset_hash=None; u.reset_expires=None
+    for active in s.scalars(select(SessionRecord).where(SessionRecord.user_id==u.id,SessionRecord.revoked==False)).all():active.revoked=True
+    s.commit(); return {"status":"reset"}
 @app.get("/v1/me")
 def me(ctx=Depends(auth)): return ctx
 @app.post("/v1/api-keys")
