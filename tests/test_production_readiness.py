@@ -23,11 +23,32 @@ def test_schema_migration_is_a_required_gateway_dependency():
     assert "ON_ERROR_STOP=1" in compose
 
 
+def test_upgrade_migrates_legacy_environment_secrets_before_compose():
+    update = (ROOT / "scripts/update").read_text()
+    deploy = (ROOT / "scripts/deploy").read_text()
+    migration = (ROOT / "scripts/migrate-runtime-secrets").read_text()
+    assert "scripts/migrate-runtime-secrets" in update
+    assert "scripts/migrate-runtime-secrets" in deploy
+    assert 'os.geteuid() != 0' in migration
+    assert 'os.chmod(target, 0o600)' in migration
+    assert 'removed = set(specs)' in migration
+
+
 def test_outbox_recovers_abandoned_sending_leases():
     source = (ROOT / "apps/gateway/app/main.py").read_text()
     assert 'EmailOutbox.state=="sending"' in source
     assert "EmailOutbox.updated_at<stale" in source
     assert '"Idempotency-Key":"klyrow:"+snapshot[1]' in source
+
+
+def test_outbox_retries_back_off_and_terminal_failure_updates_message():
+    source = (ROOT / "apps/gateway/app/main.py").read_text()
+    migration = (ROOT / "migrations/2026082201_email_outbox_and_tenant_idempotency.sql").read_text()
+    assert "EmailOutbox.next_attempt_at<=current" in source
+    assert "min(300,2**max(item.attempts,1))" in source
+    assert 'message.status="failed"' in source
+    assert 'kind="klyrow.email.failed"' in source
+    assert "next_attempt_at timestamptz" in migration
 
 
 def test_prometheus_uses_the_private_metrics_credential():

@@ -32,12 +32,14 @@ CREATE TABLE IF NOT EXISTS email_outbox (
   attempts integer NOT NULL DEFAULT 0,
   provider_message_id text,
   last_error text,
+  next_attempt_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT email_outbox_attempts_bounded CHECK (attempts BETWEEN 0 AND 5)
 );
+ALTER TABLE email_outbox ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz;
 CREATE INDEX IF NOT EXISTS email_outbox_claim
-  ON email_outbox(state, created_at)
+  ON email_outbox(state, next_attempt_at, created_at)
   WHERE state IN ('pending', 'retry');
 
 COMMIT;

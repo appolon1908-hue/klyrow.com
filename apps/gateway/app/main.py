@@ -66,7 +66,7 @@ class Campaign(Base):
 class Idempotency(Base):
     __tablename__="idempotency_keys"; id:Mapped[str]=mapped_column(String,primary_key=True,default=lambda:str(uuid.uuid4())); key:Mapped[str]=mapped_column(String); tenant_id:Mapped[str]=mapped_column(String,index=True); request_hash:Mapped[str]=mapped_column(String); resource_id:Mapped[str]=mapped_column(String); response_json:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); __table_args__=(UniqueConstraint("tenant_id","key",name="uq_idempotency_tenant_key"),)
 class EmailOutbox(Base):
-    __tablename__="email_outbox"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); message_id:Mapped[str]=mapped_column(String,unique=True,index=True); payload:Mapped[str]=mapped_column(Text); state:Mapped[str]=mapped_column(String,default="pending",index=True); attempts:Mapped[int]=mapped_column(Integer,default=0); provider_message_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+    __tablename__="email_outbox"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); message_id:Mapped[str]=mapped_column(String,unique=True,index=True); payload:Mapped[str]=mapped_column(Text); state:Mapped[str]=mapped_column(String,default="pending",index=True); attempts:Mapped[int]=mapped_column(Integer,default=0); provider_message_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True); next_attempt_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class WebhookEndpoint(Base):
     __tablename__="webhook_endpoints"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); url:Mapped[str]=mapped_column(String); enabled:Mapped[bool]=mapped_column(Boolean,default=True); secret_hash:Mapped[str]=mapped_column(String)
 
@@ -292,9 +292,10 @@ async def email_outbox_loop():
         try:
             with DB() as s:
                 stale=datetime.now(timezone.utc)-timedelta(minutes=5)
-                item=s.scalar(select(EmailOutbox).where(or_(EmailOutbox.state.in_(("pending","retry")),(EmailOutbox.state=="sending") & (EmailOutbox.updated_at<stale)),EmailOutbox.attempts<5).order_by(EmailOutbox.created_at).with_for_update(skip_locked=True))
+                current=datetime.now(timezone.utc)
+                item=s.scalar(select(EmailOutbox).where(or_(EmailOutbox.state=="pending",(EmailOutbox.state=="retry") & (or_(EmailOutbox.next_attempt_at.is_(None),EmailOutbox.next_attempt_at<=current)),(EmailOutbox.state=="sending") & (EmailOutbox.updated_at<stale)),EmailOutbox.attempts<5).order_by(EmailOutbox.created_at).with_for_update(skip_locked=True))
                 if not item:continue
-                item.state="sending";item.attempts+=1;item.updated_at=datetime.now(timezone.utc);snapshot=(item.id,item.message_id,item.payload);s.commit()
+                item.state="sending";item.attempts+=1;item.next_attempt_at=None;item.updated_at=current;snapshot=(item.id,item.message_id,item.payload);s.commit()
             key_file=os.getenv("KLYROW_POSTAL_API_KEY_FILE","")
             key=Path(key_file).read_text(encoding="utf-8").strip() if key_file else ""
             if not key:raise RuntimeError("postal credential unavailable")
@@ -310,7 +311,13 @@ async def email_outbox_loop():
             with DB() as s:
                 if snapshot is not None:
                     item=s.get(EmailOutbox,snapshot[0])
-                    if item:item.state="failed" if item.attempts>=5 else "retry";item.last_error=type(exc).__name__;item.updated_at=datetime.now(timezone.utc);s.commit()
+                    if item:
+                        failed=item.attempts>=5;item.state="failed" if failed else "retry";item.last_error=type(exc).__name__;item.updated_at=datetime.now(timezone.utc);item.next_attempt_at=None if failed else item.updated_at+timedelta(seconds=min(300,2**max(item.attempts,1)))
+                        if failed:
+                            message=s.get(Message,item.message_id)
+                            if message:message.status="failed"
+                            s.add(Event(id=str(uuid.uuid4()),tenant_id=item.tenant_id,message_id=item.message_id,kind="klyrow.email.failed",payload=json.dumps({"reason":"provider_retry_exhausted"})))
+                        s.commit()
             print(json.dumps({"level":"warning","system":"klyrow","event":"email_outbox_delivery_failed","error":type(exc).__name__}))
 
 @app.on_event("startup")
