@@ -1,5 +1,5 @@
 import os
-os.environ.update(KLYROW_DATABASE_URL="sqlite:///./test-agent-mailboxes.db",KLYROW_SESSION_SECRET="test-secret",KLYROW_SAFE_MODE="true",KLYROW_ENV="test")
+os.environ.update(KLYROW_DATABASE_URL="sqlite:///./test-agent-mailboxes.db",KLYROW_SESSION_SECRET="test-session-secret-at-least-32-bytes",KLYROW_SAFE_MODE="true",KLYROW_ENV="test")
 from fastapi.testclient import TestClient
 from apps.gateway.app.main import Base,DB,Domain,Tenant,User,app,engine,ph
 from apps.gateway.app.agent_mailboxes import AgentMailbox,normalize_first_name
