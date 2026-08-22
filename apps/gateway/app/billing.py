@@ -18,6 +18,12 @@ from .main import Base, Tenant, audit, auth, db, require, sha
 router=APIRouter(prefix="/v1",tags=["Klyrow billing"])
 now=lambda:datetime.now(timezone.utc)
 money=lambda value:Decimal(value).quantize(Decimal("0.01"),rounding=ROUND_HALF_UP)
+def expected_invoice_status(current:str,total,paid,refunded)->str:
+    if current in {"VOID","CREDITED"}:return current
+    net=money(paid)-money(refunded)
+    if net>=money(total):return "PAID"
+    if net>0:return "PARTIALLY_PAID"
+    return "OPEN" if current in {"PAID","PARTIALLY_PAID"} else current
 
 class BillingProduct(Base):
     __tablename__="klyrow_products"; id:Mapped[str]=mapped_column(String,primary_key=True); code:Mapped[str]=mapped_column(String,unique=True); name:Mapped[str]=mapped_column(String); active:Mapped[bool]=mapped_column(Boolean,default=True)
@@ -30,7 +36,7 @@ class BillingSubscription(Base):
 class UsageEvent(Base):
     __tablename__="klyrow_usage_events"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); subscription_id:Mapped[str]=mapped_column(String,index=True); message_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); event_key:Mapped[str]=mapped_column(String); unit:Mapped[str]=mapped_column(String); quantity:Mapped[int]=mapped_column(Integer); price_id:Mapped[str]=mapped_column(String); occurred_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); __table_args__=(UniqueConstraint("tenant_id","event_key",name="uq_klyrow_usage_event"),)
 class Invoice(Base):
-    __tablename__="klyrow_invoices"; id:Mapped[str]=mapped_column(String,primary_key=True); number:Mapped[str]=mapped_column(String,unique=True); tenant_id:Mapped[str]=mapped_column(String,index=True); subscription_id:Mapped[str]=mapped_column(String); currency:Mapped[str]=mapped_column(String); subtotal:Mapped[Decimal]=mapped_column(Numeric(18,2)); tax:Mapped[Decimal]=mapped_column(Numeric(18,2),default=0); discount:Mapped[Decimal]=mapped_column(Numeric(18,2),default=0); credits:Mapped[Decimal]=mapped_column(Numeric(18,2),default=0); total:Mapped[Decimal]=mapped_column(Numeric(18,2)); status:Mapped[str]=mapped_column(String,default="DRAFT"); due_at:Mapped[datetime]=mapped_column(DateTime(timezone=True)); evidence_json:Mapped[str]=mapped_column(Text,default="{}"); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+    __tablename__="klyrow_invoices"; id:Mapped[str]=mapped_column(String,primary_key=True); number:Mapped[str]=mapped_column(String,unique=True); tenant_id:Mapped[str]=mapped_column(String,index=True); subscription_id:Mapped[str]=mapped_column(String); request_key:Mapped[Optional[str]]=mapped_column(String,nullable=True); currency:Mapped[str]=mapped_column(String); subtotal:Mapped[Decimal]=mapped_column(Numeric(18,2)); tax:Mapped[Decimal]=mapped_column(Numeric(18,2),default=0); discount:Mapped[Decimal]=mapped_column(Numeric(18,2),default=0); credits:Mapped[Decimal]=mapped_column(Numeric(18,2),default=0); total:Mapped[Decimal]=mapped_column(Numeric(18,2)); status:Mapped[str]=mapped_column(String,default="DRAFT"); due_at:Mapped[datetime]=mapped_column(DateTime(timezone=True)); evidence_json:Mapped[str]=mapped_column(Text,default="{}"); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); __table_args__=(UniqueConstraint("tenant_id","request_key",name="uq_klyrow_invoice_request_key"),)
 class InvoiceLine(Base):
     __tablename__="klyrow_invoice_lines"; id:Mapped[str]=mapped_column(String,primary_key=True); invoice_id:Mapped[str]=mapped_column(String,index=True); kind:Mapped[str]=mapped_column(String); description:Mapped[str]=mapped_column(String); quantity:Mapped[int]=mapped_column(Integer); unit_amount:Mapped[Decimal]=mapped_column(Numeric(18,8)); amount:Mapped[Decimal]=mapped_column(Numeric(18,2)); reference:Mapped[Optional[str]]=mapped_column(String,nullable=True); __table_args__=(UniqueConstraint("invoice_id","kind","reference",name="uq_klyrow_invoice_line_reference"),)
 class PaymentMethodReference(Base):
@@ -125,16 +131,18 @@ def wallet_tx(x:WalletIn,ctx=Depends(auth),s:Session=Depends(db)):
     wallet.balance=money(wallet.balance)+signed;wallet.version+=1;tx=WalletTransaction(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind=x.kind,amount=signed,currency=x.currency,reference=x.reference);s.add_all([wallet,tx]);audit(s,ctx,"billing.wallet."+x.kind.lower());s.commit();return {"id":tx.id,"balance":str(wallet.balance),"version":wallet.version,"duplicate":False}
 
 @router.post("/billing/invoices",status_code=201)
-def invoice_create(x:InvoiceIn,ctx=Depends(auth),s:Session=Depends(db)):
+def invoice_create(x:InvoiceIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None,alias="Idempotency-Key",min_length=8,max_length=200)):
     sub=s.scalar(select(BillingSubscription).where(BillingSubscription.tenant_id==ctx["tenant"]));
     if not sub:raise HTTPException(404,"subscription_not_found")
+    existing=s.scalar(select(Invoice).where(Invoice.tenant_id==ctx["tenant"],Invoice.request_key==idempotency_key)) if idempotency_key else None
+    if existing:return {"id":existing.id,"number":existing.number,"status":existing.status,"total":str(existing.total),"currency":existing.currency,"duplicate":True}
     price=s.get(BillingPrice,sub.price_id);quantity=s.scalar(select(func.sum(UsageEvent.quantity)).where(UsageEvent.subscription_id==sub.id,UsageEvent.occurred_at>=sub.period_start,UsageEvent.occurred_at<sub.period_end)) or 0
     over=max(0,quantity-price.included_units);base=money(price.base_amount);overage=money(Decimal(over)*Decimal(price.overage_amount));subtotal=base+overage
     rule=s.scalar(select(TaxRule).where(TaxRule.jurisdiction==x.jurisdiction,TaxRule.active==True)) if x.jurisdiction else None;tax=money(subtotal*Decimal(rule.rate)) if rule and rule.mode!="NO_TAX" else Decimal("0.00")
-    inv=Invoice(id=str(uuid.uuid4()),number="KLY-"+now().strftime("%Y%m%d")+"-"+secrets.token_hex(4).upper(),tenant_id=ctx["tenant"],subscription_id=sub.id,currency=price.currency,subtotal=subtotal,tax=tax,total=subtotal+tax,due_at=x.due_at,evidence_json=json.dumps({"price_id":price.id,"price_version":price.version,"usage_quantity":quantity,"tax_rule_id":rule.id if rule else None},sort_keys=True))
+    inv=Invoice(id=str(uuid.uuid4()),number="KLY-"+now().strftime("%Y%m%d")+"-"+secrets.token_hex(4).upper(),tenant_id=ctx["tenant"],subscription_id=sub.id,request_key=idempotency_key,currency=price.currency,subtotal=subtotal,tax=tax,total=subtotal+tax,due_at=x.due_at,evidence_json=json.dumps({"price_id":price.id,"price_version":price.version,"usage_quantity":quantity,"tax_rule_id":rule.id if rule else None},sort_keys=True))
     lines=[InvoiceLine(id=str(uuid.uuid4()),invoice_id=inv.id,kind="BASE",description="Subscription",quantity=1,unit_amount=price.base_amount,amount=base,reference=price.id)]
     if over:lines.append(InvoiceLine(id=str(uuid.uuid4()),invoice_id=inv.id,kind="OVERAGE",description="Email overage",quantity=over,unit_amount=price.overage_amount,amount=overage,reference=sub.period_end.isoformat()))
-    s.add(inv);s.add_all(lines);audit(s,ctx,"billing.invoice.created");s.commit();return {"id":inv.id,"number":inv.number,"status":inv.status,"total":str(inv.total),"currency":inv.currency}
+    s.add(inv);s.add_all(lines);audit(s,ctx,"billing.invoice.created");s.commit();return {"id":inv.id,"number":inv.number,"status":inv.status,"total":str(inv.total),"currency":inv.currency,"duplicate":False}
 
 @router.post("/billing/payment-methods",status_code=201)
 def payment_method(x:PaymentMethodIn,ctx=Depends(auth),s:Session=Depends(db)):
@@ -221,8 +229,8 @@ def reconcile(ctx=Depends(auth),s:Session=Depends(db)):
     for inv in s.scalars(select(Invoice).where(Invoice.tenant_id==ctx["tenant"])).all():
         paid=money(s.scalar(select(func.sum(Payment.amount)).where(Payment.invoice_id==inv.id,Payment.status=="CONFIRMED")) or 0)
         refunded=money(s.scalar(select(func.sum(Refund.amount)).where(Refund.tenant_id==ctx["tenant"],Refund.status=="CONFIRMED",Refund.payment_id.in_(select(Payment.id).where(Payment.invoice_id==inv.id)))) or 0)
-        expected="PAID" if paid-refunded>=money(inv.total) else ("PARTIALLY_PAID" if paid-refunded>0 else inv.status)
-        if inv.status!=expected and inv.status not in {"VOID","CREDITED"}:issues.append({"invoice_id":inv.id,"actual":inv.status,"expected":expected})
+        expected=expected_invoice_status(inv.status,inv.total,paid,refunded)
+        if inv.status!=expected:issues.append({"invoice_id":inv.id,"actual":inv.status,"expected":expected})
     return {"status":"PASS" if not issues else "DRIFT","issues":issues,"auto_corrected":False}
 
 @router.get("/billing/portal")

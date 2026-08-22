@@ -40,6 +40,12 @@ LATENCY=Histogram("klyrow_http_request_duration_seconds","Request latency",["pat
 PROVIDER_QUEUE=Gauge("klyrow_provider_queue_messages","Provider messages by status",["status"])
 PROVIDER_EVENTS=Gauge("klyrow_provider_events","Provider events by state",["state"])
 PROVIDER_USAGE=Gauge("klyrow_provider_usage_events","Provider usage events by state",["state"])
+OUTBOX_OLDEST=Gauge("klyrow_email_outbox_oldest_seconds","Age of oldest active email outbox item")
+INTEGRATION_QUEUE=Gauge("klyrow_integration_outbox_items","Integration outbox items",["target","state"])
+WEBHOOK_QUEUE=Gauge("klyrow_webhook_attempts","Customer webhook attempts",["state"])
+DELIVERY_RATE=Gauge("klyrow_delivery_ratio","Delivery outcome ratio",["outcome"])
+DNS_INVALID=Gauge("klyrow_domain_dns_invalid","Domains not currently verified for sending")
+BILLING_DRIFT=Gauge("klyrow_billing_reconciliation_drift","Invoices whose ledger state disagrees with confirmed payments")
 rate_buckets=defaultdict(deque)
 _jwks_clients={}
 
@@ -487,12 +493,38 @@ def metrics(authorization:str=Header(default="")):
     supplied=authorization.removeprefix("Bearer ") if authorization.startswith("Bearer ") else ""
     if not expected or not hmac.compare_digest(supplied,expected):raise HTTPException(404,"not_found")
     from .provider import ProviderEvent, ProviderMessage, ProviderUsageEvent
+    from .billing import Invoice,Payment,Refund,expected_invoice_status,money
+    from .messaging import DomainClaim,WebhookAttempt
+    from .operations import IntegrationOutbox
     with DB() as s:
         for status in ("QUEUED","PROCESSING","DEFERRED","FAILED","DEAD_LETTER"):
             PROVIDER_QUEUE.labels(status).set(s.scalar(select(func.count()).select_from(ProviderMessage).where(ProviderMessage.status==status)) or 0)
         for state in ("PENDING","RETRY","DELIVERED","DEAD_LETTER"):
             PROVIDER_EVENTS.labels(state).set(s.scalar(select(func.count()).select_from(ProviderEvent).where(ProviderEvent.state==state)) or 0)
             PROVIDER_USAGE.labels(state).set(s.scalar(select(func.count()).select_from(ProviderUsageEvent).where(ProviderUsageEvent.state==state)) or 0)
+        active=s.scalars(select(EmailOutbox).where(EmailOutbox.state.in_(("pending","sending","retry")))).all()
+        ages=[]
+        for item in active:
+            created=item.created_at if item.created_at.tzinfo else item.created_at.replace(tzinfo=timezone.utc)
+            ages.append(max(0,(datetime.now(timezone.utc)-created).total_seconds()))
+        OUTBOX_OLDEST.set(max(ages,default=0))
+        for target in ("N8N","ODOO"):
+            for state in ("PENDING","RETRY","COMPLETED","DEAD_LETTER"):
+                INTEGRATION_QUEUE.labels(target,state).set(s.scalar(select(func.count()).select_from(IntegrationOutbox).where(IntegrationOutbox.target==target,IntegrationOutbox.state==state)) or 0)
+        for state in ("PENDING","RETRY","DELIVERED","DEAD_LETTER"):
+            WEBHOOK_QUEUE.labels(state).set(s.scalar(select(func.count()).select_from(WebhookAttempt).where(WebhookAttempt.state==state)) or 0)
+        total=s.scalar(select(func.count()).select_from(Message)) or 0
+        for outcome,kinds in {"delivered":("email.delivered","klyrow.email.delivered"),"bounced":("email.bounced","klyrow.email.bounced"),"complained":("email.complained","klyrow.email.complained")}.items():
+            count=s.scalar(select(func.count()).select_from(Event).where(Event.kind.in_(kinds))) or 0
+            DELIVERY_RATE.labels(outcome).set(count/total if total else 0)
+        DNS_INVALID.set(s.scalar(select(func.count()).select_from(DomainClaim).where(DomainClaim.state.notin_(("VERIFIED","SENDING_ENABLED")))) or 0)
+        drift=0
+        for invoice in s.scalars(select(Invoice)).all():
+            paid=money(s.scalar(select(func.sum(Payment.amount)).where(Payment.invoice_id==invoice.id,Payment.status=="CONFIRMED")) or 0)
+            refunded=money(s.scalar(select(func.sum(Refund.amount)).where(Refund.payment_id.in_(select(Payment.id).where(Payment.invoice_id==invoice.id)),Refund.status=="CONFIRMED")) or 0)
+            expected=expected_invoice_status(invoice.status,invoice.total,paid,refunded)
+            drift+=int(invoice.status!=expected)
+        BILLING_DRIFT.set(drift)
     from fastapi.responses import Response; return Response(generate_latest(),media_type="text/plain")
 @app.post("/v1/auth/login")
 def login(x:Login,request:Request,s:Session=Depends(db)):
@@ -551,7 +583,8 @@ def domain_verify(did:str,ctx=Depends(require("platform_admin","tenant_admin")),
         import dns.resolver; values=[str(r).strip('"') for r in dns.resolver.resolve("_klyrow-verification."+d.domain,"TXT")]; d.verified=("klyrow="+d.token) in values
     except Exception: d.verified=False
     s.commit(); return {"verified":d.verified}
-@app.post("/v1/email/send",status_code=202)
+@app.post("/v1/messages",status_code=202)
+@app.post("/v1/email/send",status_code=202,include_in_schema=False)
 async def send(x:MailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
     return await _send(x,ctx,s,idempotency_key)
 

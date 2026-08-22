@@ -1,15 +1,18 @@
 from fastapi.testclient import TestClient
 
-from apps.gateway.app.main import Base,DB,Message,Tenant,User,app,engine,ph
+from apps.gateway.app.main import Base,DB,Message,Tenant,User,app,engine,ph,rate_buckets
 from apps.gateway.app.messaging import DeliveryJob,WebhookAttempt,WebhookSubscription
+from apps.gateway.app.operations import IntegrationOutbox
 
 client=TestClient(app)
+tokens={}
 def setup_module():
-    Base.metadata.drop_all(engine);Base.metadata.create_all(engine)
+    rate_buckets.clear();tokens.clear();Base.metadata.drop_all(engine);Base.metadata.create_all(engine)
     with DB() as s:
         s.add_all([Tenant(id="a",name="A",quota=100),Tenant(id="b",name="B",quota=100),Tenant(id="root",name="Root",quota=100),User(id="a",tenant_id="a",email="a@example.com",password_hash=ph.hash("long-enough-password"),role="tenant_admin"),User(id="b",tenant_id="b",email="b@example.com",password_hash=ph.hash("long-enough-password"),role="tenant_admin"),User(id="root",tenant_id="root",email="root@example.com",password_hash=ph.hash("long-enough-password"),role="platform_admin")]);s.commit()
 def h(user):
-    r=client.post("/v1/auth/login",json={"email":f"{user}@example.com","password":"long-enough-password"});assert r.status_code==200;return {"Authorization":"Bearer "+r.json()["access_token"]}
+    if user in tokens:return tokens[user]
+    r=client.post("/v1/auth/login",json={"email":f"{user}@example.com","password":"long-enough-password"});assert r.status_code==200;tokens[user]={"Authorization":"Bearer "+r.json()["access_token"]};return tokens[user]
 
 def test_support_odoo_and_n8n_use_durable_outbox_not_direct_database():
     support=client.post("/v1/support/tickets",headers=h("a"),json={"category":"deliverability","subject":"DNS review","description":"Please review DNS status"});assert support.status_code==201 and support.json()["odoo_sync"]=="QUEUED"
@@ -36,3 +39,15 @@ def test_audited_dead_letter_and_webhook_recovery_are_admin_only():
 def test_reconciliation_detects_missing_outbox_without_silent_repair():
     with DB() as s:s.add(Message(id="orphan-queued",tenant_id="a",recipient="r@example.com",sender="s@example.com",subject="x",status="queued"));s.commit()
     report=client.post("/v1/admin/reconciliation",headers=h("root"));assert report.status_code==201 and report.json()["state"]=="DRIFT" and report.json()["drift_count"]>=1 and report.json()["auto_corrected"] is False
+
+def test_n8n_and_odoo_outages_preserve_events_for_audited_recovery():
+    n8n=client.post("/v1/automation/events",headers=h("a"),json={"event_type":"MailDeliveryStatusV1","aggregate_id":"outage-message","payload":{"status":"delivered"},"idempotency_key":"n8n-outage-event-0001"}).json()
+    odoo=client.post("/v1/billing/odoo-sync",headers=h("a"),json={"event_type":"InvoiceCreatedV1","aggregate_id":"outage-invoice","payload":{"status":"open"},"idempotency_key":"odoo-outage-event-0001"}).json()
+    for item_id,target in ((n8n["id"],"N8N"),(odoo["id"],"ODOO")):
+        assert client.post(f"/v1/admin/operations/integrations/{item_id}/fail",headers=h("a"),json={"reason":"downstream unavailable"}).status_code==403
+        failed=client.post(f"/v1/admin/operations/integrations/{item_id}/fail",headers=h("root"),json={"reason":"downstream unavailable"})
+        assert failed.status_code==200 and failed.json()["state"]=="RETRY" and failed.json()["target"]==target
+        with DB() as s:
+            row=s.get(IntegrationOutbox,item_id);assert row.payload_json and row.idempotency_key and row.last_error=="downstream unavailable"
+        recovered=client.post(f"/v1/admin/operations/integrations/{item_id}/recover",headers=h("root"),json={"reason":"downstream restored"})
+        assert recovered.status_code==200 and recovered.json()["state"]=="PENDING"

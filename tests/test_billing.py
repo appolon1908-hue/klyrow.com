@@ -1,15 +1,16 @@
 from datetime import datetime, timedelta, timezone
 
-from apps.gateway.app.main import Base, DB, Tenant, User, app, engine, ph
-from apps.gateway.app.billing import BillingPrice, Invoice, Payment
+from apps.gateway.app.main import Base, DB, Tenant, User, app, engine, ph, rate_buckets
+from apps.gateway.app.billing import BillingPrice, Invoice, InvoiceLine, Payment
 from fastapi.testclient import TestClient
 
 
 client=TestClient(app)
+tokens={}
 
 
 def setup_module():
-    Base.metadata.drop_all(engine);Base.metadata.create_all(engine)
+    rate_buckets.clear();tokens.clear();Base.metadata.drop_all(engine);Base.metadata.create_all(engine)
     with DB() as session:
         for tenant_id,role in (("a","tenant_admin"),("b","tenant_admin"),("root","platform_admin")):
             session.add(Tenant(id=tenant_id,name=tenant_id,quota=10000))
@@ -18,9 +19,11 @@ def setup_module():
 
 
 def login(email="root@example.com"):
+    if email in tokens:return tokens[email]
     response=client.post("/v1/auth/login",json={"email":email,"password":"long-enough-password"})
     assert response.status_code==200,response.text
-    return {"Authorization":"Bearer "+response.json()["access_token"]}
+    tokens[email]={"Authorization":"Bearer "+response.json()["access_token"]}
+    return tokens[email]
 
 
 def test_versioned_catalog_subscription_usage_invoice_and_sandbox_payment():
@@ -55,6 +58,20 @@ def test_wallet_is_immutable_idempotent_and_cannot_overspend():
     denied=client.post("/v1/billing/wallet/transactions",headers=tenant,json={"kind":"DEBIT","amount":"20.00","currency":"USD","reference":"wallet-debit-0002"})
     assert first.status_code==201 and duplicate.json()["duplicate"] is True
     assert debit.json()["balance"]=="12.50" and denied.status_code==409
+
+
+def test_billing_worker_retry_cannot_duplicate_invoice_or_lines():
+    tenant=login("a@example.com")
+    payload={"due_at":(datetime.now(timezone.utc)+timedelta(days=14)).isoformat()}
+    headers={**tenant,"Idempotency-Key":"invoice-worker-period-0001"}
+    first=client.post("/v1/billing/invoices",headers=headers,json=payload)
+    replay=client.post("/v1/billing/invoices",headers=headers,json=payload)
+    assert first.status_code==201 and first.json()["duplicate"] is False
+    assert replay.status_code==201 and replay.json()["duplicate"] is True and replay.json()["id"]==first.json()["id"]
+    with DB() as session:
+        assert session.query(Invoice).filter_by(request_key="invoice-worker-period-0001").count()==1
+        line_count=session.query(InvoiceLine).filter_by(invoice_id=first.json()["id"]).count()
+        assert 1<=line_count<=2
 
 
 def test_manual_payment_requires_reconciliation_confirmation_and_no_raw_cards():
@@ -95,3 +112,13 @@ def test_checkout_proration_credit_note_and_dunning_are_auditable():
     dunning=client.post("/v1/admin/billing/dunning",headers=root,json={"grace_days":7,"suspend_days":21})
     assert dunning.status_code==200 and any(item["invoice_id"]==invoice.json()["id"] and item["subscription_status"]=="GRACE_PERIOD" for item in dunning.json()["items"])
     assert dunning.json()["login_disabled"] is False
+
+
+def test_reconciliation_detects_paid_invoice_without_confirmed_payment():
+    tenant=login("a@example.com")
+    created=client.post("/v1/billing/invoices",headers=tenant,json={"due_at":(datetime.now(timezone.utc)+timedelta(days=14)).isoformat()})
+    with DB() as session:
+        invoice=session.get(Invoice,created.json()["id"]);invoice.status="PAID";session.commit()
+    reconciliation=client.get("/v1/billing/reconciliation",headers=tenant)
+    assert reconciliation.status_code==200 and reconciliation.json()["status"]=="DRIFT"
+    assert any(item["invoice_id"]==created.json()["id"] and item["expected"]=="OPEN" for item in reconciliation.json()["issues"])

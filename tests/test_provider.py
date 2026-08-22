@@ -353,3 +353,13 @@ def test_smtp_rechecks_domain_stream_quota_and_suppression_at_submission():
         session.get(SmtpCredential, "smtp-policy-credential").allowed_streams_json = '["BULK"]'
         session.commit()
     assert asyncio.run(relay.handle_DATA(None, smtp_session, envelope)) == "550 5.7.1 stream not authorized"
+
+
+def test_private_metrics_cover_provider_integrations_deliverability_and_billing(tmp_path,monkeypatch):
+    secret=tmp_path/"metrics-token";secret.write_text("private-metrics-test-token")
+    monkeypatch.setenv("KLYROW_METRICS_TOKEN_FILE",str(secret))
+    assert client.get("/metrics").status_code==404
+    response=client.get("/metrics",headers={"Authorization":"Bearer private-metrics-test-token"})
+    assert response.status_code==200
+    names=("klyrow_provider_queue_messages","klyrow_email_outbox_oldest_seconds","klyrow_integration_outbox_items","klyrow_webhook_attempts","klyrow_delivery_ratio","klyrow_domain_dns_invalid","klyrow_billing_reconciliation_drift")
+    assert all(name in response.text for name in names)
