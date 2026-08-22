@@ -1,6 +1,7 @@
-FROM python:3.12.11-alpine3.22
+FROM python:3.12.12-alpine3.22
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 RUN apk upgrade --no-cache
+RUN python -m pip install --no-cache-dir --upgrade "pip==26.2.1"
 RUN adduser --disabled-password --gecos "" --uid 10001 klyrow
 WORKDIR /app
 COPY requirements.txt .
