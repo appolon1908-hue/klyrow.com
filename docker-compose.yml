@@ -35,7 +35,9 @@ services:
       POSTGRES_DB: klyrow
       POSTGRES_USER: klyrow
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
-    volumes: [postgres_data:/var/lib/postgresql/data]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/migrations:ro
     networks: [backend]
     restart: unless-stopped
     healthcheck:

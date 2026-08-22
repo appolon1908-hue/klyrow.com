@@ -8,13 +8,13 @@ Path(SERVICE_TOKEN_FILE).write_text("bounded-beyvra-test-token",encoding="utf-8"
 os.environ.update(KLYROW_DATABASE_URL="sqlite:///./test.db",KLYROW_SESSION_SECRET="test-secret",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple",BEYVRA_EMAIL_SERVICE_TOKEN_FILE=SERVICE_TOKEN_FILE,BEYVRA_EMAIL_TENANT_ID="a")
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from apps.gateway.app.main import Audit,Base,DB,Domain,Event,Message,Suppression,Tenant,User,app,engine,ph
+from apps.gateway.app.main import AllowedSender,Audit,Base,DB,Domain,Event,Message,Suppression,Tenant,User,app,engine,ph
 
 def setup_module():
     Base.metadata.drop_all(engine); Base.metadata.create_all(engine)
     with DB() as s:
         for n in ("a","b"):
-            t=Tenant(id=n,name=n,quota=10); s.add(t); s.add(User(id=n,tenant_id=n,email=f"{n}@example.com",password_hash=ph.hash("long-enough-password"),role="tenant_admin")); s.add(Domain(id=n,tenant_id=n,domain=f"{n}.example.com",token=n,verified=True))
+            t=Tenant(id=n,name=n,quota=10); s.add(t); s.add(User(id=n,tenant_id=n,email=f"{n}@example.com",password_hash=ph.hash("long-enough-password"),role="tenant_admin")); s.add(Domain(id=n,tenant_id=n,domain=f"{n}.example.com",token=n,verified=True));s.add(AllowedSender(id=n,tenant_id=n,address=f"sender@{n}.example.com",role="support"))
         s.commit()
 client=TestClient(app)
 def login(n): return client.post("/v1/auth/login",json={"email":f"{n}@example.com","password":"long-enough-password"}).json()["access_token"]
@@ -33,6 +33,9 @@ def test_safe_send_and_suppression():
     h={**hdr("a"),"Idempotency-Key":"send-1"}; x={"to":"ok@example.net","sender":"sender@a.example.com","subject":"test","html":"<p>test</p>"}; r=client.post("/v1/email/send",headers=h,json=x); assert r.status_code==202 and r.json()["safe_mode"]; assert client.post("/v1/email/send",headers=h,json=x).json()["id"]==r.json()["id"]
     with DB() as s:s.add(Suppression(id="s",tenant_id="a",email="blocked@example.net",reason="unsubscribe"));s.commit()
     x["to"]="blocked@example.net"; assert client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"send-2"},json=x).status_code==422
+def test_unapproved_local_part_is_denied():
+    x={"to":"ok@example.net","sender":"admin@a.example.com","subject":"test","html":"<p>test</p>"}
+    assert client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"unapproved-local"},json=x).status_code==403
 
 def test_idempotency_key_is_tenant_scoped_and_changed_payload_conflicts():
     payload_a={"to":"a@example.net","sender":"sender@a.example.com","subject":"same","html":"<p>a</p>"}
@@ -44,10 +47,10 @@ def test_idempotency_key_is_tenant_scoped_and_changed_payload_conflicts():
 
 def test_beyvra_service_scope_sender_policy_and_idempotency():
     base={"Authorization":"Bearer bounded-beyvra-test-token","X-Service-Identity":"codestra-server-a:beyvra-email-production","X-Service-Scopes":"email.send email.status","Idempotency-Key":"beyvra-1"}
-    payload={"to":"synthetic@example.net","sender":"security@beyvra.com","subject":"Synthetic","html":"<p>Synthetic</p>","text":"Synthetic","stream":"transactional"}
+    payload={"to":"synthetic@example.net","sender":"support@beyvra.com","subject":"Synthetic","html":"<p>Synthetic</p>","text":"Synthetic","stream":"transactional"}
     assert client.post("/v1/internal/email/send",headers={**base,"X-Service-Scopes":"email.status"},json=payload).status_code==403
     assert client.post("/v1/internal/email/send",headers={**base,"Idempotency-Key":"beyvra-spoof"},json={**payload,"sender":"spoof@beyvra.com"}).status_code==403
-    with DB() as s:s.add(Domain(id="beyvra-domain",tenant_id="a",domain="beyvra.com",token="fixture",verified=True));s.commit()
+    with DB() as s:s.add(Domain(id="beyvra-domain",tenant_id="a",domain="beyvra.com",token="fixture",verified=True));s.add(AllowedSender(id="beyvra-support",tenant_id="a",address="support@beyvra.com",role="support"));s.commit()
     with patch("apps.gateway.app.main.emit_middleware",new=AsyncMock(return_value=True)):
         first=client.post("/v1/internal/email/send",headers=base,json=payload);second=client.post("/v1/internal/email/send",headers=base,json=payload)
     assert first.status_code==202 and first.json()["provider_message_id"]==second.json()["provider_message_id"]

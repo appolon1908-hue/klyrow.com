@@ -41,6 +41,13 @@ class ApiKey(Base):
     __tablename__="api_keys"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); name:Mapped[str]=mapped_column(String); key_hash:Mapped[str]=mapped_column(String,unique=True); revoked:Mapped[bool]=mapped_column(Boolean,default=False)
 class Domain(Base):
     __tablename__="domains"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); domain:Mapped[str]=mapped_column(String); token:Mapped[str]=mapped_column(String); verified:Mapped[bool]=mapped_column(Boolean,default=False)
+    __table_args__=(UniqueConstraint("tenant_id","domain",name="uq_domain_tenant_name"),)
+class AllowedSender(Base):
+    __tablename__="allowed_senders"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); address:Mapped[str]=mapped_column(String,index=True); role:Mapped[str]=mapped_column(String); enabled:Mapped[bool]=mapped_column(Boolean,default=True)
+    __table_args__=(UniqueConstraint("tenant_id","address",name="uq_allowed_sender_tenant_address"),)
+class InboundRouteConfig(Base):
+    __tablename__="inbound_route_configs"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); address:Mapped[str]=mapped_column(String,index=True); destination_kind:Mapped[str]=mapped_column(String); destination_ref:Mapped[Optional[str]]=mapped_column(String,nullable=True); verified:Mapped[bool]=mapped_column(Boolean,default=False); enabled:Mapped[bool]=mapped_column(Boolean,default=False)
+    __table_args__=(UniqueConstraint("tenant_id","address",name="uq_inbound_route_tenant_address"),)
 class Message(Base):
     __tablename__="messages"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); recipient:Mapped[str]=mapped_column(String); sender:Mapped[str]=mapped_column(String); subject:Mapped[str]=mapped_column(String); status:Mapped[str]=mapped_column(String); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class Event(Base):
@@ -364,8 +371,11 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
         pref=s.scalar(select(Preference).where(Preference.tenant_id==ctx["tenant"],Preference.profile_id==profile.id,Preference.topic==x.topic))
         latest=s.scalar(select(Consent).where(Consent.tenant_id==ctx["tenant"],Consent.profile_id==profile.id,Consent.topic==x.topic).order_by(Consent.occurred_at.desc()))
         if not pref or not pref.subscribed or not latest or latest.status!="granted":raise HTTPException(422,"marketing_consent_required")
-    domain=x.sender.rsplit("@",1)[1]; allowed=s.scalar(select(Domain).where(Domain.tenant_id==ctx["tenant"],Domain.domain==domain,Domain.verified==True))
+    sender=x.sender.lower();domain=sender.rsplit("@",1)[1];allowed=s.scalar(select(Domain).where(Domain.tenant_id==ctx["tenant"],Domain.domain==domain,Domain.verified==True))
     if not allowed: raise HTTPException(422,"sender_domain_not_verified")
+    if ctx.get("role")!="codestra-email-agent":
+        exact=s.scalar(select(AllowedSender).where(AllowedSender.tenant_id==ctx["tenant"],AllowedSender.address==sender,AllowedSender.enabled==True))
+        if not exact:raise HTTPException(403,"sender_address_not_allowed")
     since=datetime.now(timezone.utc)-timedelta(days=1); count=len(s.scalars(select(Message).where(Message.tenant_id==ctx["tenant"],Message.created_at>=since)).all()); tenant=s.get(Tenant,ctx["tenant"])
     if count>=tenant.quota: raise HTTPException(429,"daily_quota_exceeded")
     mid=str(uuid.uuid4()); status="accepted_test" if SAFE_MODE else "queued"
