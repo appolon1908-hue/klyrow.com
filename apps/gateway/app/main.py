@@ -535,7 +535,8 @@ def domain_verify(did:str,ctx=Depends(require("platform_admin","tenant_admin")),
         import dns.resolver; values=[str(r).strip('"') for r in dns.resolver.resolve("_klyrow-verification."+d.domain,"TXT")]; d.verified=("klyrow="+d.token) in values
     except Exception: d.verified=False
     s.commit(); return {"verified":d.verified}
-@app.post("/v1/email/send",status_code=202)
+@app.post("/v1/messages",status_code=202)
+@app.post("/v1/email/send",status_code=202,include_in_schema=False)
 async def send(x:MailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
     return await _send(x,ctx,s,idempotency_key)
 
