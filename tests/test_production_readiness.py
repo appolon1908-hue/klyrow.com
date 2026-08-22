@@ -63,8 +63,11 @@ def test_single_domain_canary_is_durable_and_fail_closed():
     assert 'production_canary_gate' in migration
     assert 'canary_payload_allowed(payload)' in source
     assert 'item.state="quarantined"' in source
-    assert 'gate.delivered_deliveries+=1' in source
-    assert 'delivered_deliveries integer NOT NULL DEFAULT 0' in migration
+    assert 'gate.claimed_deliveries+=1' in source
+    assert 'claimed_deliveries integer NOT NULL DEFAULT 0' in migration
+    assert 'invalid_outbox_payload' in source
+    assert 'normalized_recipients' in source
+    assert 'except (TypeError,ValueError):maximum=-1' in source
     assert "KLYROW_CANARY_MAX_DELIVERIES" in compose
     assert 'KLYROW_BULK_DELIVERY_ENABLED: "false"' in compose
 

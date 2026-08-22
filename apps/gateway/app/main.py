@@ -76,7 +76,7 @@ class Idempotency(Base):
 class EmailOutbox(Base):
     __tablename__="email_outbox"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); message_id:Mapped[str]=mapped_column(String,unique=True,index=True); payload:Mapped[str]=mapped_column(Text); state:Mapped[str]=mapped_column(String,default="pending",index=True); attempts:Mapped[int]=mapped_column(Integer,default=0); provider_message_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True); next_attempt_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class ProductionCanaryGate(Base):
-    __tablename__="production_canary_gate"; gate_key:Mapped[str]=mapped_column(String,primary_key=True); reserved_deliveries:Mapped[int]=mapped_column(Integer,default=0); delivered_deliveries:Mapped[int]=mapped_column(Integer,default=0); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+    __tablename__="production_canary_gate"; gate_key:Mapped[str]=mapped_column(String,primary_key=True); reserved_deliveries:Mapped[int]=mapped_column(Integer,default=0); claimed_deliveries:Mapped[int]=mapped_column(Integer,default=0); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class WebhookEndpoint(Base):
     __tablename__="webhook_endpoints"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); url:Mapped[str]=mapped_column(String); enabled:Mapped[bool]=mapped_column(Boolean,default=True); secret_hash:Mapped[str]=mapped_column(String)
 
@@ -150,17 +150,20 @@ def require(*roles):
     return inner
 
 def canary_configuration()->tuple[str,str,str,int]:
-    return (os.getenv("KLYROW_CANARY_ALLOWED_DOMAIN","").lower(),os.getenv("KLYROW_CANARY_ALLOWED_SENDER","").lower(),os.getenv("KLYROW_CANARY_ALLOWED_RECIPIENT","").lower(),int(os.getenv("KLYROW_CANARY_MAX_DELIVERIES","0")))
+    try:maximum=int(os.getenv("KLYROW_CANARY_MAX_DELIVERIES","0"))
+    except (TypeError,ValueError):maximum=-1
+    return (os.getenv("KLYROW_CANARY_ALLOWED_DOMAIN","").lower(),os.getenv("KLYROW_CANARY_ALLOWED_SENDER","").lower(),os.getenv("KLYROW_CANARY_ALLOWED_RECIPIENT","").lower(),maximum)
 
 def production_gate_open(s:Session)->bool:
     if SAFE_MODE or os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()!="true" or canary_configuration()!=("klyrow.com","support@klyrow.com","appolon1908@gmail.com",1):return False
     gate=s.get(ProductionCanaryGate,"klyrow-single-domain")
-    return bool(gate and gate.reserved_deliveries<1 and gate.delivered_deliveries<=gate.reserved_deliveries)
+    return bool(gate and gate.reserved_deliveries<1 and gate.claimed_deliveries<=gate.reserved_deliveries)
 
 def canary_payload_allowed(payload:dict)->bool:
     domain,sender,recipient,maximum=canary_configuration()
     recipients=payload.get("to")
-    return (domain,sender,recipient,maximum)==("klyrow.com","support@klyrow.com","appolon1908@gmail.com",1) and payload.get("from","").lower()==sender and sender.endswith("@"+domain) and recipients==[recipient]
+    normalized_recipients=[value.lower() for value in recipients] if isinstance(recipients,list) and all(isinstance(value,str) for value in recipients) else []
+    return (domain,sender,recipient,maximum)==("klyrow.com","support@klyrow.com","appolon1908@gmail.com",1) and payload.get("from","").lower()==sender and sender.endswith("@"+domain) and normalized_recipients==[recipient]
 
 def enforce_production_canary(x,s):
     if SAFE_MODE:return
@@ -330,13 +333,18 @@ async def email_outbox_loop():
                 current=datetime.now(timezone.utc)
                 item=s.scalar(select(EmailOutbox).where(or_(EmailOutbox.state=="pending",(EmailOutbox.state=="retry") & (or_(EmailOutbox.next_attempt_at.is_(None),EmailOutbox.next_attempt_at<=current)),(EmailOutbox.state=="sending") & (EmailOutbox.updated_at<stale)),EmailOutbox.attempts<5).order_by(EmailOutbox.created_at).with_for_update(skip_locked=True))
                 if not item:continue
-                payload=json.loads(item.payload)
+                try:payload=json.loads(item.payload)
+                except (TypeError,ValueError):
+                    item.state="quarantined";item.last_error="invalid_outbox_payload";item.updated_at=current;s.commit();continue
+                if not isinstance(payload,dict):
+                    item.state="quarantined";item.last_error="invalid_outbox_payload";item.updated_at=current;s.commit();continue
                 gate=s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key=="klyrow-single-domain").with_for_update())
-                if not canary_payload_allowed(payload) or not gate or gate.delivered_deliveries>=gate.reserved_deliveries or gate.delivered_deliveries>=1:
+                if not canary_payload_allowed(payload) or not gate or gate.claimed_deliveries>=gate.reserved_deliveries or gate.claimed_deliveries>=1:
                     item.state="quarantined";item.last_error="production_canary_policy_denied";item.updated_at=current
                     message=s.get(Message,item.message_id)
                     if message:message.status="quarantined"
                     s.commit();continue
+                gate.claimed_deliveries+=1;gate.updated_at=current
                 item.state="sending";item.attempts+=1;item.next_attempt_at=None;item.updated_at=current;snapshot=(item.id,item.message_id,item.payload);s.commit()
             key_file=os.getenv("KLYROW_POSTAL_API_KEY_FILE","")
             key=Path(key_file).read_text(encoding="utf-8").strip() if key_file else ""
@@ -348,16 +356,13 @@ async def email_outbox_loop():
                 item=s.get(EmailOutbox,snapshot[0]);message=s.get(Message,snapshot[1])
                 if item:item.state="delivered";item.provider_message_id=provider_id;item.last_error=None;item.updated_at=datetime.now(timezone.utc)
                 if message:message.status="accepted"
-                gate=s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key=="klyrow-single-domain").with_for_update())
-                if not gate or gate.delivered_deliveries>=gate.reserved_deliveries:raise RuntimeError("production canary ledger mismatch")
-                gate.delivered_deliveries+=1;gate.updated_at=datetime.now(timezone.utc)
                 s.commit()
         except Exception as exc:
             with DB() as s:
                 if snapshot is not None:
                     item=s.get(EmailOutbox,snapshot[0])
                     if item:
-                        failed=item.attempts>=5;item.state="failed" if failed else "retry";item.last_error=type(exc).__name__;item.updated_at=datetime.now(timezone.utc);item.next_attempt_at=None if failed else item.updated_at+timedelta(seconds=min(300,2**max(item.attempts,1)))
+                        failed=(not SAFE_MODE) or item.attempts>=5;item.state="failed" if failed else "retry";item.last_error=type(exc).__name__;item.updated_at=datetime.now(timezone.utc);item.next_attempt_at=None if failed else item.updated_at+timedelta(seconds=min(300,2**max(item.attempts,1)))
                         if failed:
                             message=s.get(Message,item.message_id)
                             if message:message.status="failed"
