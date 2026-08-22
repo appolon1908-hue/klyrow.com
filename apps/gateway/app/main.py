@@ -617,3 +617,5 @@ from .saas import router as saas_router
 app.include_router(saas_router)
 from .agent_mailboxes import router as agent_mailbox_router
 app.include_router(agent_mailbox_router)
+from .billing import router as billing_router
+app.include_router(billing_router)

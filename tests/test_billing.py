@@ -1,0 +1,78 @@
+from datetime import datetime, timedelta, timezone
+
+from apps.gateway.app.billing import BillingPrice, Invoice, Payment
+from apps.gateway.app.main import Base, DB, Tenant, User, app, engine, ph
+from fastapi.testclient import TestClient
+
+
+client=TestClient(app)
+
+
+def setup_module():
+    Base.metadata.drop_all(engine);Base.metadata.create_all(engine)
+    with DB() as session:
+        for tenant_id,role in (("a","tenant_admin"),("b","tenant_admin"),("root","platform_admin")):
+            session.add(Tenant(id=tenant_id,name=tenant_id,quota=10000))
+            session.add(User(id=tenant_id,tenant_id=tenant_id,email=f"{tenant_id}@example.com",password_hash=ph.hash("long-enough-password"),role=role))
+        session.commit()
+
+
+def login(email="root@example.com"):
+    response=client.post("/v1/auth/login",json={"email":email,"password":"long-enough-password"})
+    assert response.status_code==200,response.text
+    return {"Authorization":"Bearer "+response.json()["access_token"]}
+
+
+def test_versioned_catalog_subscription_usage_invoice_and_sandbox_payment():
+    root=login()
+    created=client.post("/v1/admin/billing/catalog",headers=root,json={"code":"STARTER","name":"Starter","currency":"USD","cycle":"MONTHLY","base_amount":"10.00","included_units":100,"overage_amount":"0.02","features":{"domains":2}})
+    assert created.status_code==201,created.text
+    second=client.post("/v1/admin/billing/catalog",headers=root,json={"code":"STARTER","name":"Starter","currency":"USD","cycle":"MONTHLY","base_amount":"12.00","included_units":200,"overage_amount":"0.015","features":{"domains":3}})
+    assert second.status_code==201 and second.json()["version"]==2
+    tenant=login("a@example.com")
+    subscription=client.post("/v1/billing/subscription",headers=tenant,json={"plan_code":"STARTER","trial_days":0})
+    assert subscription.status_code==201 and subscription.json()["price_version"]==2
+    usage={"event_key":"accepted-message-0001","message_id":"message-1","quantity":250}
+    first=client.post("/v1/billing/usage-events",headers=tenant,json=usage)
+    duplicate=client.post("/v1/billing/usage-events",headers=tenant,json=usage)
+    conflict=client.post("/v1/billing/usage-events",headers=tenant,json={**usage,"quantity":251})
+    assert first.status_code==202 and duplicate.json()["duplicate"] is True and conflict.status_code==409
+    invoice=client.post("/v1/billing/invoices",headers=tenant,json={"due_at":(datetime.now(timezone.utc)+timedelta(days=14)).isoformat()})
+    assert invoice.status_code==201,invoice.text
+    assert invoice.json()["total"]=="12.75"
+    payment=client.post("/v1/billing/payments",headers=tenant,json={"invoice_id":invoice.json()["id"],"provider":"SANDBOX","provider_reference":"sandbox-payment-0001","amount":"12.75"})
+    assert payment.status_code==201 and payment.json()["invoice_status"]=="PAID"
+    refund=client.post(f"/v1/billing/payments/{payment.json()['id']}/refunds",headers=tenant,json={"amount":"2.75","provider_reference":"sandbox-refund-0001"})
+    assert refund.status_code==201 and refund.json()["status"]=="CONFIRMED"
+
+
+def test_wallet_is_immutable_idempotent_and_cannot_overspend():
+    tenant=login("a@example.com")
+    credit={"kind":"CREDIT","amount":"20.00","currency":"USD","reference":"wallet-credit-0001"}
+    first=client.post("/v1/billing/wallet/transactions",headers=tenant,json=credit)
+    duplicate=client.post("/v1/billing/wallet/transactions",headers=tenant,json=credit)
+    debit=client.post("/v1/billing/wallet/transactions",headers=tenant,json={"kind":"DEBIT","amount":"7.50","currency":"USD","reference":"wallet-debit-0001"})
+    denied=client.post("/v1/billing/wallet/transactions",headers=tenant,json={"kind":"DEBIT","amount":"20.00","currency":"USD","reference":"wallet-debit-0002"})
+    assert first.status_code==201 and duplicate.json()["duplicate"] is True
+    assert debit.json()["balance"]=="12.50" and denied.status_code==409
+
+
+def test_manual_payment_requires_reconciliation_confirmation_and_no_raw_cards():
+    tenant=login("a@example.com");root=login()
+    created=client.post("/v1/billing/invoices",headers=tenant,json={"due_at":(datetime.now(timezone.utc)+timedelta(days=14)).isoformat()})
+    assert created.status_code==201,created.text
+    manual=client.post("/v1/billing/payments",headers=tenant,json={"invoice_id":created.json()["id"],"provider":"MANUAL_OFFLINE","provider_reference":"wire-transfer-0001","amount":created.json()["total"]})
+    assert manual.status_code==201 and manual.json()["status"]=="PENDING_RECONCILIATION"
+    confirmed=client.post(f"/v1/billing/payments/{manual.json()['id']}/confirm",headers=root)
+    assert confirmed.status_code==200 and confirmed.json()["invoice_status"]=="PAID"
+    forbidden=client.post("/v1/billing/payment-methods",headers=tenant,json={"provider":"EXTERNAL_TOKENIZED","provider_reference":"card_number=4111111111111111","label":"bad"})
+    accepted=client.post("/v1/billing/payment-methods",headers=tenant,json={"provider":"EXTERNAL_TOKENIZED","provider_reference":"pm_provider_opaque_123","label":"Business card","is_default":True})
+    assert forbidden.status_code==422 and accepted.status_code==201
+
+
+def test_cross_tenant_billing_access_is_denied():
+    other=login("b@example.com")
+    with DB() as session:
+        invoice=session.query(Invoice).filter(Invoice.tenant_id=="a").first()
+    response=client.post("/v1/billing/payments",headers=other,json={"invoice_id":invoice.id,"provider":"SANDBOX","provider_reference":"cross-tenant-payment","amount":"1.00"})
+    assert response.status_code==404
