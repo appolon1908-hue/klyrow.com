@@ -436,6 +436,13 @@ def health(s:Session=Depends(db)):
 def healthz(s:Session=Depends(db)):s.execute(select(1));return {"status":"ok"}
 @app.get("/readyz")
 def readyz(s:Session=Depends(db)):s.execute(select(1));return {"status":"ready","safe_mode":SAFE_MODE}
+@app.get("/version")
+def version():
+    return {
+        "service":"klyrow-gateway",
+        "version":os.getenv("KLYROW_RELEASE_VERSION","development"),
+        "revision":os.getenv("KLYROW_RELEASE_SHA","unknown"),
+    }
 @app.get("/metrics")
 def metrics(authorization:str=Header(default="")):
     token_file=os.getenv("KLYROW_METRICS_TOKEN_FILE","")
