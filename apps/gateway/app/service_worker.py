@@ -3,7 +3,7 @@ import asyncio, json, os, signal, uuid
 from datetime import timedelta
 from sqlalchemy import select
 
-from .main import DB
+from .main import DB, email_outbox_loop, postal_retry_loop
 from .provider import dispatch_provider_outbox, process_one_sandbox, recover_expired_leases
 from .billing import BillingEvent, BillingWorkItem, now
 
@@ -57,6 +57,10 @@ async def main():
     loop_obj=asyncio.get_running_loop()
     for sig in (signal.SIGTERM,signal.SIGINT):loop_obj.add_signal_handler(sig,stop)
     server=await asyncio.start_server(health,"0.0.0.0",int(os.getenv("KLYROW_WORKER_HEALTH_PORT","8080")))
-    task=asyncio.create_task(loop());await event.wait();task.cancel();server.close();await server.wait_closed()
+    tasks=[asyncio.create_task(loop())]
+    if ROLE=="mail":tasks.extend([asyncio.create_task(postal_retry_loop()),asyncio.create_task(email_outbox_loop())])
+    await event.wait()
+    for task in tasks:task.cancel()
+    server.close();await server.wait_closed()
 
 if __name__=="__main__":asyncio.run(main())

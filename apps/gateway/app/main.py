@@ -459,8 +459,9 @@ async def email_outbox_loop():
 
 @app.on_event("startup")
 async def start_postal_retry_worker():
-    asyncio.create_task(postal_retry_loop())
-    asyncio.create_task(email_outbox_loop())
+    if os.getenv("KLYROW_EMBEDDED_WORKERS","true").lower()=="true":
+        asyncio.create_task(postal_retry_loop())
+        asyncio.create_task(email_outbox_loop())
 
 @app.middleware("http")
 async def headers(request, call_next):
@@ -758,4 +759,4 @@ def reconcile_provider_registry_on_startup():
 
 @app.on_event("startup")
 async def start_provider_worker():
-    asyncio.create_task(provider_worker_loop())
+    if os.getenv("KLYROW_EMBEDDED_WORKERS","true").lower()=="true":asyncio.create_task(provider_worker_loop())
