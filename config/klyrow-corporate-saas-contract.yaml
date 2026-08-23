@@ -1,0 +1,616 @@
+version: 1
+product: Klyrow
+mission: KLYROW_CORPORATE_EMAIL_SAAS_PRODUCTION_CERTIFIED
+source_of_truth:
+  identity: Keycloak/OIDC
+  tenant: Klyrow PostgreSQL
+  email_transport: Postal
+  marketing_orchestration: Klyrow/Mautic where explicitly retained
+  durable_state: PostgreSQL
+  ephemeral_coordination: Redis
+  async_transport: RabbitMQ_or_approved_broker
+  external_business_integration: Middleware
+forbidden_paths:
+  - odoo_to_postal_direct
+  - odoo_to_klyrow_provider_direct
+  - n8n_to_klyrow_database
+  - middleware_to_odoo_database
+  - browser_to_provider_admin_api
+  - redis_as_business_source_of_truth
+api_defaults:
+  version_prefix: /v1
+  auth: bearer
+  request_id: X-Request-Id
+  correlation_id: X-Correlation-Id
+  idempotency_header: Idempotency-Key
+  pagination: cursor
+  error_shape: [code, message, request_id, correlation_id, details]
+  webhook_signature: HMAC-SHA256
+  webhook_replay_persisted: true
+database_defaults:
+  tenant_column: tenant_id
+  timestamps: [created_at, updated_at]
+  secrets: verifier_hash_or_secret_reference_only
+  rls_required_for_sensitive_tenant_tables: true
+  append_only_evidence: true
+scopes:
+  - mail.read
+  - mail.send
+  - mail.admin
+  - domain.read
+  - domain.manage
+  - sender.manage
+  - template.read
+  - template.manage
+  - profile.read
+  - profile.manage
+  - event.ingest
+  - segment.read
+  - segment.manage
+  - campaign.read
+  - campaign.manage
+  - journey.read
+  - journey.manage
+  - analytics.read
+  - deliverability.read
+  - deliverability.manage
+  - webhook.read
+  - webhook.manage
+  - billing.read
+  - billing.manage
+  - team.read
+  - team.manage
+  - enterprise.read
+  - enterprise.manage
+  - compliance.read
+  - compliance.manage
+  - audit.read
+  - support.manage
+  - platform.admin
+role_rules:
+  platform_admin_tenant_grantable: false
+  saml_group_can_grant_platform_admin: false
+  scim_group_can_grant_platform_admin: false
+  ordinary_api_key_can_grant_platform_admin: false
+phases:
+  - id: 1
+    name: production_handshake_and_reconciliation
+    objective: terminal Klyrow-Postal-Middleware delivery event E2E
+    endpoints:
+      - POST /v1/internal/provider-events/postal
+      - POST /v1/internal/middleware/events
+      - GET /v1/internal/middleware/events/{event_id}
+      - POST /v1/admin/reconciliation/email
+      - GET /v1/admin/reconciliation/email/{run_id}
+      - GET /v1/admin/canary-gate
+      - POST /v1/admin/canary-gate/reserve
+      - POST /v1/admin/canary-gate/close
+      - GET /v1/messages/{message_id}/trace
+    tables:
+      - provider_event_inbox
+      - middleware_delivery_outbox
+      - email_reconciliation_runs
+      - email_reconciliation_items
+    requirements:
+      - mtls_service_identity
+      - webhook_signature_and_replay_protection
+      - durable_retry_dlq
+      - single_delivery_canary
+      - exact_domain_sender_recipient_gate
+      - complete_correlation_trace
+      - no_direct_odoo_database
+    acceptance:
+      - exactly_one_canary
+      - duplicate_provider_event_zero_duplicate_effect
+      - middleware_outage_recoverable
+      - reconciliation_zero_unexplained_drift
+  - id: 2
+    name: distributed_gateway_workers_rate_limits
+    endpoints:
+      - GET /v1/admin/system/workers
+      - GET /v1/admin/system/queues
+      - GET /v1/admin/system/rate-limits
+      - POST /v1/admin/system/queues/{queue}/pause
+      - POST /v1/admin/system/queues/{queue}/resume
+      - POST /v1/admin/system/jobs/{job_id}/retry
+      - POST /v1/admin/system/jobs/{job_id}/dead-letter
+    tables:
+      - outbox_events
+      - worker_jobs
+      - worker_heartbeats
+    components:
+      gateway_replicas: 3
+      redis: distributed_rate_and_ephemeral_coordination
+      broker: durable_async_transport
+      worker_types:
+        - mail
+        - provider_event
+        - webhook
+        - journey
+        - campaign
+        - analytics
+        - integration
+    requirements:
+      - production_embedded_workers_false
+      - publisher_confirms
+      - consumer_idempotency
+      - lease_recovery
+      - per_tenant_fairness
+      - redis_loss_no_business_data_loss
+  - id: 3
+    name: journey_execution_engine
+    endpoints:
+      - POST /v1/journeys
+      - GET /v1/journeys
+      - GET /v1/journeys/{journey_id}
+      - PUT /v1/journeys/{journey_id}
+      - POST /v1/journeys/{journey_id}/validate
+      - POST /v1/journeys/{journey_id}/publish
+      - POST /v1/journeys/{journey_id}/pause
+      - POST /v1/journeys/{journey_id}/resume
+      - POST /v1/journeys/{journey_id}/rollback/{version}
+      - POST /v1/journeys/{journey_id}/runs
+      - GET /v1/journeys/{journey_id}/runs
+      - GET /v1/journey-runs/{run_id}
+      - GET /v1/journey-runs/{run_id}/history
+      - POST /v1/journey-runs/{run_id}/cancel
+      - POST /v1/admin/journey-runs/{run_id}/retry-node
+    tables:
+      - journey_node_executions
+      - journey_wakeups
+      - journey_event_waits
+      - journey_goal_hits
+    nodes:
+      - TRIGGER
+      - SEGMENT_ENTRY
+      - EVENT_TRIGGER
+      - WAIT_DURATION
+      - WAIT_UNTIL
+      - EMAIL_SEND
+      - CONDITION
+      - PERCENT_SPLIT
+      - AB_SPLIT
+      - GOAL
+      - PROFILE_UPDATE
+      - WEBHOOK
+      - MIDDLEWARE_EVENT
+      - SEGMENT_ADD
+      - SEGMENT_REMOVE
+      - SUPPRESS
+      - EXIT
+    requirements:
+      - immutable_published_versions
+      - run_version_pinning
+      - durable_waits
+      - deterministic_split
+      - consent_and_suppression_on_send_node
+      - crash_recovery
+  - id: 4
+    name: high_volume_campaign_executor
+    endpoints:
+      - POST /v1/campaigns
+      - GET /v1/campaigns
+      - GET /v1/campaigns/{campaign_id}
+      - PUT /v1/campaigns/{campaign_id}
+      - POST /v1/campaigns/{campaign_id}/test
+      - POST /v1/campaigns/{campaign_id}/preflight
+      - POST /v1/campaigns/{campaign_id}/schedule
+      - POST /v1/campaigns/{campaign_id}/pause
+      - POST /v1/campaigns/{campaign_id}/resume
+      - POST /v1/campaigns/{campaign_id}/cancel
+      - GET /v1/campaigns/{campaign_id}/audience
+      - GET /v1/campaigns/{campaign_id}/progress
+      - GET /v1/campaigns/{campaign_id}/events
+      - POST /v1/admin/campaigns/{campaign_id}/reconcile
+    tables:
+      - campaigns
+      - campaign_executions
+      - audience_snapshots
+      - audience_snapshot_members
+      - campaign_batches
+      - campaign_recipient_state
+    requirements:
+      - frozen_audience_revision
+      - send_time_suppression_recheck
+      - frequency_caps
+      - resumable_batches
+      - per_tenant_domain_stream_budget
+      - no_full_audience_http_loop
+      - duplicate_recipient_effect_zero
+  - id: 5
+    name: scalable_profiles_events_segments
+    endpoints:
+      - POST /v1/profiles
+      - POST /v1/profiles/batch
+      - GET /v1/profiles/{profile_id}
+      - GET /v1/profiles/{profile_id}/timeline
+      - POST /v1/events
+      - POST /v1/events/batch
+      - POST /v1/segments
+      - GET /v1/segments
+      - GET /v1/segments/{segment_id}
+      - PUT /v1/segments/{segment_id}
+      - POST /v1/segments/{segment_id}/preview
+      - POST /v1/segments/{segment_id}/rebuild
+      - GET /v1/segments/{segment_id}/members
+      - GET /v1/segments/{segment_id}/stats
+      - POST /v1/imports/profiles
+      - GET /v1/imports/{job_id}
+    tables:
+      - segment_revisions
+      - segment_materializations
+      - segment_members
+      - segment_rebuild_jobs
+      - profile_identity_keys
+    requirements:
+      - sql_compilation_where_possible
+      - incremental_materialization
+      - background_full_rebuild
+      - no_cross_tenant_identity_merge
+      - event_partitioning_retention
+      - async_batch_import
+  - id: 6
+    name: high_availability_and_disaster_recovery
+    endpoints:
+      - GET /v1/admin/system/topology
+      - GET /v1/admin/system/health
+      - GET /v1/admin/system/readiness
+      - GET /v1/admin/system/databases
+      - GET /v1/admin/system/brokers
+      - GET /v1/admin/system/replication
+      - POST /v1/admin/dr/runbook-check
+    tables:
+      - system_instances
+      - dr_exercises
+      - backup_catalog
+    topology:
+      gateway_nodes_min: 2
+      critical_worker_replicas_min: 2
+      postgres_ha: true
+      broker_quorum: true
+      redis_ha: true
+      offhost_encrypted_backup: true
+      pitr: true
+    requirements:
+      - documented_rpo_rto
+      - automatic_or_governed_failover
+      - isolated_restore_schedule
+      - maintenance_drain_mode
+  - id: 7
+    name: billing_entitlements_payment_adapters
+    endpoints:
+      - GET /v1/billing/plans
+      - GET /v1/billing/subscription
+      - POST /v1/billing/subscription
+      - POST /v1/billing/subscription/change
+      - POST /v1/billing/subscription/cancel
+      - GET /v1/billing/usage
+      - GET /v1/billing/invoices
+      - GET /v1/billing/invoices/{invoice_id}
+      - POST /v1/billing/checkout
+      - GET /v1/billing/payment-methods
+      - POST /v1/billing/payment-methods
+      - DELETE /v1/billing/payment-methods/{id}
+      - POST /v1/internal/billing/providers/{provider}/webhook
+      - POST /v1/admin/billing/reconcile
+      - GET /v1/admin/billing/reconciliation/{run_id}
+      - GET /v1/entitlements
+    tables:
+      - tenant_entitlements
+      - billing_provider_events
+      - billing_reconciliation_runs
+      - billing_reconciliation_items
+    reuse_existing:
+      - klyrow_products
+      - klyrow_plans
+      - klyrow_prices
+      - klyrow_subscriptions
+      - klyrow_usage_events
+      - klyrow_invoices
+      - klyrow_invoice_lines
+      - klyrow_payment_method_references
+      - klyrow_payments
+      - klyrow_credits
+      - klyrow_refunds
+      - klyrow_wallets
+      - klyrow_wallet_transactions
+    entitlements:
+      - messages.monthly
+      - profiles.max
+      - seats.max
+      - domains.max
+      - api.per_minute
+      - retention.days
+      - feature.journeys
+      - feature.saml
+      - feature.dedicated_ip
+    requirements:
+      - central_entitlement_service
+      - provider_agnostic_payment_adapter
+      - signed_idempotent_payment_webhooks
+      - dunning_grace_suspension_recovery
+      - no_raw_card_data
+  - id: 8
+    name: enterprise_sso_saml_scim
+    endpoints:
+      - GET /v1/enterprise/connections
+      - POST /v1/enterprise/connections
+      - GET /v1/enterprise/connections/{id}
+      - PUT /v1/enterprise/connections/{id}
+      - POST /v1/enterprise/connections/{id}/verify
+      - POST /v1/enterprise/connections/{id}/enable
+      - POST /v1/enterprise/connections/{id}/disable
+      - GET /v1/enterprise/group-mappings
+      - PUT /v1/enterprise/group-mappings
+      - GET /v1/security/policies
+      - PUT /v1/security/policies
+      - GET /scim/v2/Users
+      - POST /scim/v2/Users
+      - GET /scim/v2/Users/{id}
+      - PUT /scim/v2/Users/{id}
+      - PATCH /scim/v2/Users/{id}
+      - DELETE /scim/v2/Users/{id}
+      - GET /scim/v2/Groups
+      - POST /scim/v2/Groups
+      - GET /scim/v2/Groups/{id}
+      - PUT /scim/v2/Groups/{id}
+      - PATCH /scim/v2/Groups/{id}
+      - DELETE /scim/v2/Groups/{id}
+      - GET /scim/v2/ServiceProviderConfig
+      - GET /scim/v2/Schemas
+      - GET /scim/v2/ResourceTypes
+    tables:
+      - enterprise_connections
+      - enterprise_group_mappings
+      - scim_tokens
+      - directory_objects
+      - provisioning_events
+    requirements:
+      - keycloak_remains_authority
+      - saml_and_oidc_customer_connections
+      - domain_enforced_sso
+      - jit_provisioning
+      - scim_users_groups
+      - deprovision_revokes_sessions
+      - platform_admin_never_customer_mapped
+  - id: 9
+    name: analytics_and_deliverability
+    endpoints:
+      - GET /v1/analytics/overview
+      - GET /v1/analytics/timeseries
+      - GET /v1/analytics/campaigns
+      - GET /v1/analytics/campaigns/{id}
+      - GET /v1/analytics/journeys/{id}
+      - GET /v1/analytics/segments/{id}
+      - GET /v1/analytics/domains/{id}
+      - GET /v1/analytics/links
+      - GET /v1/analytics/cohorts
+      - GET /v1/deliverability/overview
+      - GET /v1/deliverability/domains
+      - GET /v1/deliverability/domains/{id}
+      - GET /v1/deliverability/ip-pools
+      - GET /v1/deliverability/alerts
+      - POST /v1/deliverability/domains/{id}/check
+      - POST /v1/admin/deliverability/reputation/recalculate
+    tables:
+      - analytics_message_events
+      - analytics_hourly_tenant
+      - analytics_hourly_domain
+      - analytics_hourly_campaign
+      - analytics_hourly_journey
+      - analytics_daily_segment
+      - analytics_link_stats
+      - deliverability_alerts
+    event_types:
+      - accepted
+      - queued
+      - sent
+      - delivered
+      - deferred
+      - soft_bounce
+      - hard_bounce
+      - complaint
+      - unsubscribe
+      - open
+      - unique_open
+      - click
+      - unique_click
+      - conversion
+      - suppression
+      - rejected
+      - provider_failed
+    requirements:
+      - no_unbounded_analytics_on_transactional_tables
+      - tenant_scoped_dashboards
+      - no_invented_revenue
+      - dns_tls_ptr_dkim_dmarc_monitoring
+      - feedback_loop_adapter_foundation
+      - no_spam_evasion
+  - id: 10
+    name: corporate_web_product
+    ui_routes:
+      - /app/overview
+      - /app/email/messages
+      - /app/email/messages/[id]
+      - /app/email/streams
+      - /app/email/domains
+      - /app/email/domains/[id]
+      - /app/email/senders
+      - /app/email/inbound
+      - /app/email/suppressions
+      - /app/content/templates
+      - /app/content/templates/[id]
+      - /app/content/builder/[id]
+      - /app/content/media
+      - /app/content/brand
+      - /app/audience/profiles
+      - /app/audience/profiles/[id]
+      - /app/audience/imports
+      - /app/audience/segments
+      - /app/audience/segments/[id]
+      - /app/audience/preferences
+      - /app/campaigns
+      - /app/campaigns/new
+      - /app/campaigns/[id]
+      - /app/journeys
+      - /app/journeys/new
+      - /app/journeys/[id]/builder
+      - /app/journeys/[id]/runs
+      - /app/analytics/overview
+      - /app/analytics/campaigns
+      - /app/analytics/journeys
+      - /app/analytics/segments
+      - /app/analytics/links
+      - /app/deliverability
+      - /app/deliverability/domains/[id]
+      - /app/deliverability/ip-pools
+      - /app/deliverability/alerts
+      - /app/developer/api-keys
+      - /app/developer/service-accounts
+      - /app/developer/smtp
+      - /app/developer/webhooks
+      - /app/developer/logs
+      - /app/developer/openapi
+      - /app/billing/plan
+      - /app/billing/usage
+      - /app/billing/invoices
+      - /app/billing/payment-methods
+      - /app/settings/organization
+      - /app/settings/team
+      - /app/settings/security
+      - /app/settings/sso
+      - /app/settings/scim
+      - /app/settings/retention
+      - /app/settings/audit
+      - /app/settings/integrations
+      - /app/support
+      - /app/support/tickets/[id]
+      - /admin/tenants
+      - /admin/deliverability
+      - /admin/abuse
+      - /admin/queues
+      - /admin/reconciliation
+      - /admin/billing
+      - /admin/system
+      - /admin/audit
+    requirements:
+      - oidc_pkce
+      - route_rbac
+      - no_privileged_secrets_browser
+      - wcag_2_1_aa
+      - csp_compatible
+      - safe_html
+      - playwright_role_matrix
+      - request_id_visible_on_errors
+  - id: 11
+    name: compliance_privacy_data_governance
+    endpoints:
+      - GET /v1/compliance/preferences/{profile_id}
+      - PUT /v1/compliance/preferences/{profile_id}
+      - POST /v1/compliance/double-opt-in
+      - POST /v1/compliance/double-opt-in/confirm
+      - POST /v1/privacy/exports
+      - GET /v1/privacy/exports/{id}
+      - POST /v1/privacy/deletions
+      - GET /v1/privacy/deletions/{id}
+      - POST /v1/privacy/deletions/{id}/confirm
+      - GET /v1/settings/retention
+      - PUT /v1/settings/retention
+      - GET /v1/audit/events
+      - POST /v1/admin/legal-holds
+      - DELETE /v1/admin/legal-holds/{id}
+      - GET /v1/admin/compliance/retention-jobs
+    tables:
+      - retention_policies
+      - privacy_requests
+      - legal_holds
+      - retention_jobs
+      - security_audit_events
+    requirements:
+      - consent_proof
+      - global_and_topic_unsubscribe
+      - double_opt_in_optional
+      - dsar_export
+      - legal_hold_aware_deletion
+      - retention_enforcement
+      - append_only_admin_audit
+      - expiring_export_objects
+  - id: 12
+    name: corporate_production_certification
+    endpoints:
+      - GET /v1/admin/certification/status
+      - GET /v1/admin/certification/components
+      - GET /v1/admin/certification/evidence
+    test_domains:
+      - api_load
+      - profile_event_batch
+      - segment_materialization
+      - campaign_batches
+      - journey_wakeups
+      - webhook_dispatch
+      - analytics
+      - gateway_loss
+      - worker_loss
+      - redis_loss
+      - broker_loss
+      - postgres_failover
+      - postal_outage
+      - middleware_outage
+      - webhook_destination_outage
+      - tenant_isolation
+      - sast_secret_dependency_container_scan
+      - idor_ssrf_cors_csrf_replay_upload_rate_limit
+      - deliverability_alignment
+    final_gates:
+      CRITICAL_SECURITY_OPEN: 0
+      HIGH_SECURITY_OPEN: 0
+      UNEXPECTED_PUBLIC_PORTS: 0
+      CROSS_TENANT_ACCESS: 0
+      DUPLICATE_LOGICAL_EFFECTS: 0
+      DATA_LOSS: 0
+      OPEN_RELAY: DENIED
+      DATABASE_PUBLIC: DENIED
+      REDIS_PUBLIC: DENIED
+      BROKER_PUBLIC: DENIED
+      BACKUP: PASS
+      RESTORE: PASS
+      ROLLBACK: PASS
+      HA_FAILOVER: PASS
+      API_LOAD: PASS
+      CAMPAIGN_ENGINE: PASS
+      JOURNEY_ENGINE: PASS
+      BILLING_RECONCILIATION: PASS
+      SSO_SCIM: PASS
+      COMPLIANCE_WORKFLOWS: PASS
+      DELIVERABILITY: PASS
+ui_layout:
+  shell:
+    top_bar: [organization_switcher, environment, search, help, user]
+    left_navigation: [overview, email, audience, campaigns, journeys, analytics, deliverability, developer, billing, settings, support]
+  minimum_desktop_test: 1366x768
+migration_policy:
+  discover_before_create: true
+  additive_forward_migrations: true
+  rollback_test_required: true
+  public_route_compatibility_required: true
+  no_duplicate_sources_of_truth:
+    - billing
+    - canary_gate
+    - tenant_membership
+    - message_state
+    - suppression
+    - domain_ownership
+implementation_order: [1,2,3,4,5,6,7,8,9,10,11,12]
+required_artifacts_per_phase:
+  - source
+  - migrations
+  - openapi
+  - sdk_update_if_public
+  - unit_tests
+  - integration_tests
+  - security_tests
+  - migration_upgrade_reapply_rollback_test
+  - operations_doc
+  - monitoring_alerts
+  - rollback_plan
+  - evidence_manifest
