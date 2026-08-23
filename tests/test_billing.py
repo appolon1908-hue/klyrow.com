@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 from apps.gateway.app.main import Base, DB, Tenant, User, app, engine, ph, rate_buckets
 from apps.gateway.app.billing import BillingPrice, Invoice, InvoiceLine, Payment
 from fastapi.testclient import TestClient
+import jwt
+from apps.gateway.app.main import SECRET
 
 
 client=TestClient(app)
@@ -58,6 +60,12 @@ def test_wallet_is_immutable_idempotent_and_cannot_overspend():
     denied=client.post("/v1/billing/wallet/transactions",headers=tenant,json={"kind":"DEBIT","amount":"20.00","currency":"USD","reference":"wallet-debit-0002"})
     assert first.status_code==201 and duplicate.json()["duplicate"] is True
     assert debit.json()["balance"]=="12.50" and denied.status_code==409
+
+
+def test_read_only_member_cannot_mutate_wallet():
+    raw=jwt.encode({"sub":"readonly-user","tenant":"a","role":"READ_ONLY","exp":datetime.now(timezone.utc)+timedelta(hours=1)},SECRET,algorithm="HS256")
+    response=client.post("/v1/billing/wallet/transactions",headers={"Authorization":"Bearer "+raw},json={"kind":"CREDIT","amount":"999.00","currency":"USD","reference":"unauthorized-credit-0001"})
+    assert response.status_code==403 and response.json()["detail"]=="billing_management_denied"
 
 
 def test_billing_worker_retry_cannot_duplicate_invoice_or_lines():

@@ -37,6 +37,11 @@ class ConfirmIn(BaseModel):confirmation:str
 class KillIn(BaseModel):enabled:bool;reason:str=Field(min_length=3,max_length=300)
 class RecoverIn(BaseModel):reason:str=Field(min_length=3,max_length=500)
 
+def enforce_tenant_send_gate(s:Session,tenant_id:str)->None:
+    gate=s.get(TenantSendGate,tenant_id)
+    if gate is not None and not gate.enabled:
+        raise HTTPException(403,"tenant_send_gate_disabled")
+
 def owned(s,model,item_id,tenant):
     item=s.scalar(select(model).where(model.id==item_id,model.tenant_id==tenant))
     if not item:raise HTTPException(404,"not_found")

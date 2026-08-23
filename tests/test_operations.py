@@ -25,6 +25,7 @@ def test_support_odoo_and_n8n_use_durable_outbox_not_direct_database():
 def test_export_closure_and_immediate_kill_switch_preserve_data():
     export=client.post("/v1/exports",headers=h("a"),json={"scopes":["account","contacts","billing","audit"]});assert export.status_code==202 and export.json()["asynchronous"] is True
     disabled=client.put("/v1/settings/send-gate",headers=h("a"),json={"enabled":False,"reason":"Emergency owner stop"});assert disabled.json()["effective_immediately"] is True and disabled.json()["sending_enabled"] is False
+    blocked=client.post("/v1/messages",headers={**h("a"),"Idempotency-Key":"kill-switch-send-0001"},json={"to":"sink@example.com","sender":"sender@example.com","subject":"blocked","html":"blocked"});assert blocked.status_code==403 and blocked.json()["detail"]=="tenant_send_gate_disabled"
     closure=client.post("/v1/account/closure",headers=h("a"),json={"grace_days":30,"retention_policy":"STANDARD"});assert closure.status_code==202 and closure.json()["sending_enabled"] is False
     confirmed=client.post(f"/v1/account/closure/{closure.json()['id']}/confirm",headers=h("a"),json={"confirmation":closure.json()["confirmation"]});assert confirmed.json()["state"]=="CONFIRMED" and confirmed.json()["data_erased"] is False
     assert client.post(f"/v1/account/closure/{closure.json()['id']}/confirm",headers=h("b"),json={"confirmation":closure.json()["confirmation"]}).status_code==404

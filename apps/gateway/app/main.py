@@ -597,6 +597,8 @@ async def beyvra_send(x:MailIn,ctx=Depends(beyvra_service_auth),s:Session=Depend
 
 async def _send(x:MailIn,ctx,s,idempotency_key):
     if not idempotency_key: raise HTTPException(400,"idempotency_key_required")
+    from .operations import enforce_tenant_send_gate
+    enforce_tenant_send_gate(s,ctx["tenant"])
     from .agent_mailboxes import authorize_agent_sender
     authorize_agent_sender(s,ctx,x.sender,x.campaign_id,x.reply_to)
     request_hash=sha(x.model_dump_json())

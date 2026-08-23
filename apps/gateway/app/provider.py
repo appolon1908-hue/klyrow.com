@@ -513,6 +513,8 @@ def preflight(payload: ProviderMailIn, ctx: dict, s: Session) -> dict:
     tenant = s.get(Tenant, ctx["tenant"])
     if not tenant or not tenant.enabled:
         raise HTTPException(403, "tenant_suspended")
+    from .operations import enforce_tenant_send_gate
+    enforce_tenant_send_gate(s, ctx["tenant"])
     policy = policy_for(s, ctx["tenant"])
     if policy.reputation_state not in REPUTATION_STATES:
         raise HTTPException(503, "invalid_reputation_policy")

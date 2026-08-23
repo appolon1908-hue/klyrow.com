@@ -9,11 +9,15 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func, select
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from .main import Base, Domain, Event, Message, Suppression, Tenant, audit, auth, db, safe_webhook_url, sha
+from .main import AllowedSender, Base, Domain, Event, Message, Suppression, Tenant, audit, auth, db, safe_webhook_url, sha
 
 router=APIRouter(prefix="/v1",tags=["Email SaaS"])
 now=lambda:datetime.now(timezone.utc)
 STREAMS={"TRANSACTIONAL","MARKETING","SECURITY","SYSTEM","BULK"}
+
+def resolve_txt(name:str)->list[str]:
+    import dns.resolver
+    return [b"".join(record.strings).decode() for record in dns.resolver.resolve(name,"TXT")]
 
 class DomainClaim(Base):
     __tablename__="domain_claims"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); domain:Mapped[str]=mapped_column(String,unique=True,index=True); state:Mapped[str]=mapped_column(String,default="DNS_REQUIRED"); challenge_hash:Mapped[str]=mapped_column(String); dkim_selector:Mapped[str]=mapped_column(String); dkim_version:Mapped[int]=mapped_column(Integer,default=1); return_path:Mapped[str]=mapped_column(String); tracking_domain:Mapped[str]=mapped_column(String); verified_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); suspended_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
@@ -83,9 +87,16 @@ def domain_claim(x:DomainClaimIn,ctx=Depends(auth),s:Session=Depends(db)):
     challenge=secrets.token_urlsafe(24);selector="kly"+secrets.token_hex(4);item=DomainClaim(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],domain=name,challenge_hash=sha(challenge),dkim_selector=selector,return_path="bounce."+name,tracking_domain="track."+name);s.add(item);audit(s,ctx,"domain.claimed");s.commit();return {"id":item.id,"state":item.state,"dns":{"ownership":{"type":"TXT","name":"_klyrow-verification."+name,"value":"klyrow="+challenge},"spf":{"type":"TXT","name":name,"recommended":"v=spf1 include:spf.klyrow.com -all"},"dkim":{"selector":selector},"dmarc":{"type":"TXT","name":"_dmarc."+name,"recommended":"v=DMARC1; p=none; rua=mailto:dmarc@klyrow.com"},"return_path":item.return_path,"tracking":item.tracking_domain,"mx":"mail.klyrow.com"}}
 @router.post("/domains/claims/{item_id}/verify")
 def domain_verify(item_id:str,x:dict,ctx=Depends(auth),s:Session=Depends(db)):
-    item=tenant_get(s,DomainClaim,item_id,ctx["tenant"]);proof=str(x.get("challenge", ""))
-    if not proof or not hmac.compare_digest(item.challenge_hash,sha(proof)):raise HTTPException(422,"dns_ownership_not_verified")
-    item.state="VERIFIED";item.verified_at=now();audit(s,ctx,"domain.verified");s.commit();return {"id":item.id,"state":item.state}
+    item=tenant_get(s,DomainClaim,item_id,ctx["tenant"])
+    try:records=resolve_txt("_klyrow-verification."+item.domain)
+    except Exception:records=[]
+    verified=any(value.startswith("klyrow=") and hmac.compare_digest(item.challenge_hash,sha(value.split("=",1)[1])) for value in records)
+    if not verified:raise HTTPException(422,"dns_ownership_not_verified")
+    item.state="VERIFIED";item.verified_at=now()
+    legacy=s.scalar(select(Domain).where(Domain.tenant_id==ctx["tenant"],Domain.domain==item.domain))
+    if legacy is None:s.add(Domain(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],domain=item.domain,token="dns-verified",verified=True))
+    else:legacy.verified=True
+    audit(s,ctx,"domain.verified");s.commit();return {"id":item.id,"state":item.state}
 @router.post("/domains/claims/{item_id}/dkim/rotate",status_code=201)
 def dkim_rotate(item_id:str,ctx=Depends(auth),s:Session=Depends(db)):
     item=tenant_get(s,DomainClaim,item_id,ctx["tenant"])
@@ -98,7 +109,11 @@ def sender_create(x:SenderIn,ctx=Depends(auth),s:Session=Depends(db)):
     if claim.state not in {"VERIFIED","SENDING_ENABLED"}:raise HTTPException(409,"verified_domain_required")
     if x.email.lower().rsplit("@",1)[1]!=claim.domain:raise HTTPException(403,"sender_spoofing_denied")
     if kind not in STREAMS:raise HTTPException(422,"invalid_message_stream")
-    item=SenderIdentity(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],domain_claim_id=claim.id,address=x.email.lower(),display_name=x.display_name,reply_to=str(x.reply_to).lower() if x.reply_to else None,stream=kind,status="ACTIVE",verified=True);s.add(item);audit(s,ctx,"sender.created");s.commit();return {"id":item.id,"status":item.status,"verified":item.verified}
+    item=SenderIdentity(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],domain_claim_id=claim.id,address=x.email.lower(),display_name=x.display_name,reply_to=str(x.reply_to).lower() if x.reply_to else None,stream=kind,status="ACTIVE",verified=True);s.add(item)
+    allowed=s.scalar(select(AllowedSender).where(AllowedSender.tenant_id==ctx["tenant"],AllowedSender.address==item.address))
+    if allowed is None:s.add(AllowedSender(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],address=item.address,role="customer_sender",enabled=True))
+    else:allowed.enabled=True
+    audit(s,ctx,"sender.created");s.commit();return {"id":item.id,"status":item.status,"verified":item.verified}
 @router.get("/senders")
 def senders(ctx=Depends(auth),s:Session=Depends(db)):
     return s.scalars(select(SenderIdentity).where(SenderIdentity.tenant_id==ctx["tenant"]).order_by(SenderIdentity.address)).all()

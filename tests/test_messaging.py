@@ -2,22 +2,25 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
-from apps.gateway.app.main import Base, DB, Message, Tenant, User, app, engine, ph
+from apps.gateway.app.main import AllowedSender, Base, DB, Message, Tenant, User, app, engine, ph
+from apps.gateway.app import messaging
 
 client=TestClient(app)
+tokens={}
 
 def setup_module():
-    Base.metadata.drop_all(engine);Base.metadata.create_all(engine)
+    tokens.clear();Base.metadata.drop_all(engine);Base.metadata.create_all(engine)
     with DB() as s:
         for tid in ("a","b"):
             s.add(Tenant(id=tid,name=tid,quota=10000));s.add(User(id=tid,tenant_id=tid,email=f"{tid}@example.com",password_hash=ph.hash("long-enough-password"),role="tenant_admin"))
         s.commit()
 def headers(tid):
-    response=client.post("/v1/auth/login",json={"email":f"{tid}@example.com","password":"long-enough-password"});assert response.status_code==200;return {"Authorization":"Bearer "+response.json()["access_token"]}
+    if tid in tokens:return tokens[tid]
+    response=client.post("/v1/auth/login",json={"email":f"{tid}@example.com","password":"long-enough-password"});assert response.status_code==200;tokens[tid]={"Authorization":"Bearer "+response.json()["access_token"]};return tokens[tid]
 
 def claim_domain(tid="a",domain="tenant-a.example"):
     h=headers(tid);created=client.post("/v1/domains/claims",headers=h,json={"domain":domain});assert created.status_code==201,created.text
-    challenge=created.json()["dns"]["ownership"]["value"].split("=",1)[1];verified=client.post(f"/v1/domains/claims/{created.json()['id']}/verify",headers=h,json={"challenge":challenge});assert verified.status_code==200
+    record=created.json()["dns"]["ownership"]["value"];messaging.resolve_txt=lambda _name:[record];verified=client.post(f"/v1/domains/claims/{created.json()['id']}/verify",headers=h,json={"challenge":record.split("=",1)[1]});assert verified.status_code==200
     return h,created.json()["id"]
 
 def test_domain_global_ownership_dkim_rotation_and_sender_spoof_denial():
@@ -25,6 +28,7 @@ def test_domain_global_ownership_dkim_rotation_and_sender_spoof_denial():
     rotated=client.post(f"/v1/domains/claims/{claim}/dkim/rotate",headers=h);assert rotated.status_code==201 and rotated.json()["private_key_exported"] is False
     denied=client.post("/v1/senders",headers=h,json={"domain_claim_id":claim,"email":"spoof@other.example","display_name":"Spoof","stream":"MARKETING"});assert denied.status_code==403
     sender=client.post("/v1/senders",headers=h,json={"domain_claim_id":claim,"email":"news@tenant-a.example","display_name":"News","stream":"MARKETING"});assert sender.status_code==201
+    with DB() as s:assert s.scalar(__import__('sqlalchemy').select(AllowedSender).where(AllowedSender.tenant_id=="a",AllowedSender.address=="news@tenant-a.example",AllowedSender.enabled==True))
     assert client.post("/v1/senders",headers=headers("b"),json={"domain_claim_id":claim,"email":"bad@tenant-a.example","display_name":"Bad","stream":"MARKETING"}).status_code==404
     assert {row["domain"] for row in client.get("/v1/domains/claims",headers=h).json()}=={"tenant-a.example"}
     assert {row["address"] for row in client.get("/v1/senders",headers=h).json()}=={"news@tenant-a.example"}
@@ -32,7 +36,7 @@ def test_domain_global_ownership_dkim_rotation_and_sender_spoof_denial():
 
 def test_stream_separation_template_version_render_rollback_and_campaign_safety():
     h=headers("a")
-    claim_response=client.post("/v1/domains/claims",headers=h,json={"domain":"campaign.example"});challenge=claim_response.json()["dns"]["ownership"]["value"].split("=",1)[1];claim=claim_response.json()["id"];client.post(f"/v1/domains/claims/{claim}/verify",headers=h,json={"challenge":challenge})
+    claim_response=client.post("/v1/domains/claims",headers=h,json={"domain":"campaign.example"});record=claim_response.json()["dns"]["ownership"]["value"];messaging.resolve_txt=lambda _name:[record];claim=claim_response.json()["id"];client.post(f"/v1/domains/claims/{claim}/verify",headers=h,json={"challenge":record.split("=",1)[1]})
     sender=client.post("/v1/senders",headers=h,json={"domain_claim_id":claim,"email":"campaign@campaign.example","display_name":"Campaign","stream":"MARKETING"}).json()["id"]
     assert client.post("/v1/streams",headers=h,json={"name":"security","kind":"SECURITY","rate_limit":100,"retention_days":90,"suppression_policy":"MARKETING_GLOBAL"}).status_code==422
     assert client.post("/v1/streams",headers=h,json={"name":"marketing","kind":"MARKETING","rate_limit":100,"retention_days":90,"suppression_policy":"MARKETING_GLOBAL"}).status_code==201
@@ -51,6 +55,12 @@ def test_stream_separation_template_version_render_rollback_and_campaign_safety(
     assert len(client.get("/v1/streams",headers=h).json())==1
     assert len(client.get("/v1/campaign-definitions",headers=h).json())==1
     assert client.get("/v1/templates",headers=headers("b")).json()==[]
+
+def test_echoed_domain_challenge_without_dns_control_is_denied():
+    h=headers("a");created=client.post("/v1/domains/claims",headers=h,json={"domain":"unowned.example"});record=created.json()["dns"]["ownership"]["value"]
+    messaging.resolve_txt=lambda _name:[]
+    response=client.post(f"/v1/domains/claims/{created.json()['id']}/verify",headers=h,json={"challenge":record.split("=",1)[1]})
+    assert response.status_code==422 and response.json()["detail"]=="dns_ownership_not_verified"
 
 def test_exact_inbound_routing_duplicate_protection_and_quarantine():
     h,claim=claim_domain("a","inbound.example")
