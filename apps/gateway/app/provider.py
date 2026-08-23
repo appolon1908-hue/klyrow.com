@@ -22,7 +22,8 @@ from argon2.exceptions import VerifyMismatchError
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from .main import AllowedSender, Audit, Base, Domain, InboundRouteConfig, Message, Suppression, Tenant, auth, db
+from .main import (AllowedSender, Audit, Base, Domain, InboundRouteConfig, Message,
+                   Suppression, Tenant, auth, db, verify_postal_signature)
 
 router = APIRouter(prefix="/v1/internal/email", tags=["Klyrow provider"])
 status_router = APIRouter(tags=["Klyrow provider status"])
@@ -308,6 +309,16 @@ class InboundFixtureIn(BaseModel):
     provider_spam_score: int = Field(default=0, ge=0, le=1000)
 
 
+class PostalInboundRaw(BaseModel):
+    """Postal 3.x RawMessage/BodyAsJSON HTTP endpoint payload."""
+    id: int = Field(ge=1)
+    rcpt_to: EmailStr
+    mail_from: str = Field(default="", max_length=320)
+    message: str = Field(min_length=4, max_length=70_000_000)
+    base64: bool
+    size: int = Field(ge=0, le=50_000_000)
+
+
 class SmtpCredentialIn(BaseModel):
     allowed_sender_ids: list[str] = Field(min_length=1, max_length=100)
     allowed_streams: list[str] = Field(default_factory=lambda: ["TRANSACTIONAL"], min_length=1, max_length=5)
@@ -350,7 +361,8 @@ def parse_inbound(raw: bytes, max_message_bytes: int, max_attachment_bytes: int)
                 raise HTTPException(413, "inbound_attachment_too_large")
             if PurePath(clean.lower()).suffix in EXECUTABLE_SUFFIXES:
                 disposition = "QUARANTINE"
-            attachments.append({"filename": clean, "content_type": content_type, "size": len(content), "sha256": hashlib.sha256(content).hexdigest()})
+            attachments.append({"filename": clean, "content_type": content_type, "size": len(content),
+                "sha256": hashlib.sha256(content).hexdigest(), "data_b64": base64.b64encode(content).decode()})
         elif content_type == "text/plain" and text_body is None:
             text_body = content.decode(part.get_content_charset() or "utf-8", errors="replace")
         elif content_type == "text/html" and html_body is None:
@@ -1054,6 +1066,74 @@ def inbound_receive(payload: InboundFixtureIn, ctx=Depends(auth), s: Session = D
     s.commit()
     return {"inbound_id": item.id, "duplicate": False, "disposition": item.disposition,
         "route_id": route.id, "attachments": parsed["attachments"]}
+
+
+@status_router.post("/v1/webhooks/postal-inbound")
+async def postal_inbound(request: Request, x_postal_signature_256: str = Header(default=""),
+                         s: Session = Depends(db)):
+    """Accept only Postal-signed raw MIME for one configured exact recipient."""
+    body = await request.body()
+    verify_postal_signature(body, x_postal_signature_256)
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        raise HTTPException(415, "postal_json_required")
+    try:
+        payload = PostalInboundRaw.model_validate_json(body)
+    except Exception as exc:
+        raise HTTPException(422, "invalid_postal_inbound_payload") from exc
+    if not payload.base64:
+        raise HTTPException(422, "postal_base64_required")
+    try:
+        raw = base64.b64decode(payload.message, validate=True)
+    except ValueError as exc:
+        raise HTTPException(422, "invalid_mime_encoding") from exc
+    if len(raw) != payload.size:
+        raise HTTPException(422, "postal_message_size_mismatch")
+    recipient = str(payload.rcpt_to).lower()
+    routes = list(s.scalars(select(InboundRouteConfig).where(
+        InboundRouteConfig.address == recipient, InboundRouteConfig.verified == True,
+        InboundRouteConfig.enabled == True)).all())
+    if len(routes) != 1:
+        raise HTTPException(404, "inbound_recipient_not_configured")
+    route = routes[0]
+    provider_event_id = f"postal:{payload.id}"
+    existing = s.scalar(select(ProviderInbound).where(
+        ProviderInbound.tenant_id == route.tenant_id,
+        ProviderInbound.provider_event_id == provider_event_id))
+    if existing:
+        return {"accepted": True, "inbound_id": existing.id, "duplicate": True,
+            "disposition": existing.disposition}
+    tenant_policy = policy_for(s, route.tenant_id)
+    parsed = parse_inbound(raw, tenant_policy.max_message_bytes, tenant_policy.max_attachment_bytes)
+    if parsed["message_id"]:
+        duplicate = s.scalar(select(ProviderInbound).where(
+            ProviderInbound.tenant_id == route.tenant_id, ProviderInbound.route_id == route.id,
+            ProviderInbound.message_id_header == parsed["message_id"]))
+        if duplicate:
+            return {"accepted": True, "inbound_id": duplicate.id, "duplicate": True,
+                "disposition": duplicate.disposition}
+    item = ProviderInbound(id=str(uuid.uuid4()), tenant_id=route.tenant_id,
+        provider_event_id=provider_event_id, route_id=route.id,
+        message_id_header=parsed["message_id"], sender=parsed["from"], recipient=recipient,
+        subject=parsed["subject"], text_body=parsed["text"], html_body=parsed["html"],
+        attachments_json=json.dumps(parsed["attachments"], separators=(",", ":"), sort_keys=True),
+        disposition=parsed["disposition"])
+    s.add(item)
+    event_id = str(uuid.uuid4())
+    normalized = {"event_id": event_id, "event": "inbound.received", "tenant_id": route.tenant_id,
+        "inbound_id": item.id, "provider_event_id": provider_event_id, "route_id": route.id,
+        "destination_kind": route.destination_kind, "destination_ref": route.destination_ref,
+        "disposition": item.disposition, "recipient": recipient, "sender": parsed["from"],
+        "subject": parsed["subject"], "message_id": parsed["message_id"],
+        "in_reply_to": parsed["in_reply_to"], "references": parsed["references"],
+        "date": parsed["date"], "cc": parsed["cc"], "text": parsed["text"],
+        "html": parsed["html"], "attachments": parsed["attachments"]}
+    s.add(ProviderEvent(id=event_id, tenant_id=route.tenant_id, message_id=item.id,
+        kind="inbound.received", payload_json=json.dumps(normalized, separators=(",", ":"), sort_keys=True)))
+    s.add(ProviderAudit(id=str(uuid.uuid4()), tenant_id=route.tenant_id, actor="provider:postal",
+        action="inbound.received", outcome=item.disposition, resource_id=item.id))
+    s.commit()
+    return {"accepted": True, "inbound_id": item.id, "duplicate": False,
+        "disposition": item.disposition, "route_id": route.id}
 
 
 @router.post("/messages/{message_id}/tracking/{kind}", status_code=201)
