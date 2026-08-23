@@ -255,10 +255,16 @@ async def emit_middleware(event_type:str,payload:dict)->bool:
     event_id=payload.get("event_id") or str(uuid.uuid4()); payload={"event_id":event_id,"source_system":"klyrow","event_type":event_type,"timestamp":datetime.now(timezone.utc).isoformat(),**payload}
     body=json.dumps(payload,separators=(",",":"),sort_keys=True).encode(); ts=str(int(time.time())); canonical=ts.encode()+b"\n"+event_id.encode()+b"\nklyrow\n"+body
     signature=hmac.new(secret.encode(),canonical,hashlib.sha256).hexdigest(); headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","X-Source-System":"klyrow","X-Klyrow-Timestamp":ts,"X-Klyrow-Event-Id":event_id,"X-Klyrow-Signature":"sha256="+signature}
-    path={"klyrow.email.bounced":"bounces","klyrow.email.complained":"complaints","klyrow.email.unsubscribed":"unsubscribes"}.get(event_type,"events")
-    targets=[f"{base}/api/v1/klyrow/{path}"]
     email_target=os.getenv("KLYROW_EMAIL_EVENT_URL","").strip()
-    if email_target:targets.append(email_target)
+    # Email lifecycle events have one canonical callback authority.  Do not
+    # send them through the legacy generic route first: a failure there used
+    # to abort delivery before the dedicated, mTLS-protected endpoint was
+    # attempted and incorrectly exhausted the outbox into DLQ.
+    if event_type.startswith("klyrow.email.") and email_target:
+        targets=[email_target]
+    else:
+        path={"klyrow.email.bounced":"bounces","klyrow.email.complained":"complaints","klyrow.email.unsubscribed":"unsubscribes"}.get(event_type,"events")
+        targets=[f"{base}/api/v1/klyrow/{path}"]
     try:
         if any(not target.lower().startswith("https://") for target in targets):
             raise RuntimeError("plaintext_middleware_target_denied")
