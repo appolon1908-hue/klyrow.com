@@ -74,5 +74,5 @@ def test_experiment_ai_billing_and_admin_suspension():
     with DB() as s:a=s.scalar(__import__('sqlalchemy').select(ExperimentAssignment).where(ExperimentAssignment.experiment_id==exp["id"]));a.converted=True;s.commit()
     assert client.get(f"/v1/experiments/{exp['id']}/results",headers=ah).json()["winner"]==v1
     assert client.post("/v1/ai/assist",headers=ah,json={"capability":"subject","prompt":"Draft a subject"}).status_code==503
-    assert client.get("/v1/billing/usage",headers=ah).json()["billing_active"] is False
+    assert client.get("/v1/billing/usage",headers=ah).json()["billing_active"] is True
     root=hdr("root");assert client.get("/v1/admin/operations",headers=root).status_code==200;assert client.post("/v1/admin/tenants/b/suspend",headers=root).status_code==200;assert client.get("/v1/domains",headers=hdr("b")).status_code==403

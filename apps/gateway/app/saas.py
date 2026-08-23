@@ -240,7 +240,7 @@ def ai_assist(x:AiIn,ctx=Depends(auth)):
 def integration_create(x:IntegrationIn,ctx=Depends(auth),s:Session=Depends(db)):i=Integration(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind=x.kind,name=x.name,config_json=json.dumps(x.config),enabled=False);s.add(i);audit(s,ctx,"integration.created");s.commit();return {"id":i.id,"enabled":False}
 @router.post("/admin/plans",status_code=201)
 def plan_create(x:PlanIn,ctx=Depends(require("platform_admin")),s:Session=Depends(db)):p=Plan(id=str(uuid.uuid4()),name=x.name,messages=x.messages,profiles=x.profiles,seats=x.seats,api_per_minute=x.api_per_minute);s.add(p);s.commit();return p
-@router.get("/billing/usage")
+@router.get("/legacy/billing/usage",deprecated=True)
 def billing_usage(ctx=Depends(auth),s:Session=Depends(db)):return {"entries":s.scalars(select(UsageLedger).where(UsageLedger.tenant_id==ctx["tenant"])).all(),"billing_active":False}
 @router.get("/admin/operations")
 def admin_operations(ctx=Depends(require("platform_admin")),s:Session=Depends(db)):return {"tenants":s.scalar(select(func.count(Tenant.id))),"suspended":s.scalar(select(func.count(Tenant.id)).where(Tenant.enabled==False)),"messages":s.scalar(select(func.count(Message.id))),"safe_mode":os.getenv("KLYROW_SAFE_MODE","true").lower()=="true"}

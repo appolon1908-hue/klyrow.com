@@ -9,7 +9,7 @@ Path(SERVICE_TOKEN_FILE).write_text("bounded-beyvra-test-token",encoding="utf-8"
 os.environ.update(KLYROW_DATABASE_URL="sqlite:///./test.db",KLYROW_SESSION_SECRET="test-session-secret-at-least-32-bytes",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple",BEYVRA_EMAIL_SERVICE_TOKEN_FILE=SERVICE_TOKEN_FILE,BEYVRA_EMAIL_TENANT_ID="a",KLYROW_AUTH_RATE_PER_MINUTE="1000")
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from apps.gateway.app.main import AllowedSender,Audit,Base,DB,Domain,Event,Message,Suppression,Tenant,User,app,engine,ph
+from apps.gateway.app.main import AllowedSender,Audit,Base,DB,Domain,Event,Message,PostalEvent,Suppression,Tenant,User,app,engine,ph
 
 def setup_module():
     Base.metadata.drop_all(engine); Base.metadata.create_all(engine)
@@ -101,6 +101,10 @@ def test_postal_native_signature_normalization_and_idempotency(tmp_path):
         first=client.post("/v1/webhooks/postal-native",headers=headers,content=body); duplicate=client.post("/v1/webhooks/postal-native",headers=headers,content=body)
     assert first.status_code==202 and duplicate.status_code==202 and duplicate.json()["duplicate"] is True
     sent=emit.await_args.args; assert sent[0]=="klyrow.email.bounced" and sent[1]["correlation_id"]=="correlation-1"
+    assert sent[1]["canonical_status"]=="hard_bounce"
+    with DB() as s:
+        stored=json.loads(s.get(PostalEvent,payload["uuid"]).payload)
+        assert stored["canonical_status"]=="hard_bounce"
     assert client.post("/v1/webhooks/postal-native",headers={"X-Postal-Signature-256":"bad"},content=body).status_code==401
 
 
@@ -111,6 +115,7 @@ def test_postal_outage_retries_without_loss_or_second_canary_claim(tmp_path,monk
     monkeypatch.setattr(gateway,"SAFE_MODE",False)
     monkeypatch.setenv("KLYROW_POSTAL_API_KEY_FILE",str(key_file))
     monkeypatch.setenv("KLYROW_POSTAL_API_URL","https://postal.invalid")
+    monkeypatch.setenv("KLYROW_POSTAL_API_HOST_HEADER","app.klyrow.com")
     monkeypatch.setenv("KLYROW_CANARY_ALLOWED_DOMAIN","a.example.com")
     monkeypatch.setenv("KLYROW_CANARY_ALLOWED_SENDER","sender@a.example.com")
     monkeypatch.setenv("KLYROW_CANARY_ALLOWED_RECIPIENT","sink@example.net")
@@ -140,7 +145,9 @@ def test_postal_outage_retries_without_loss_or_second_canary_claim(tmp_path,monk
     response=type("Response",(),{"raise_for_status":lambda self:None,
         "json":lambda self:{"data":{"message_id":"synthetic-provider-id"}}})()
     class RecoveredClient(FailedClient):
-        async def post(self,*_,**__):return response
+        async def post(self,*_,**kwargs):
+            assert kwargs["headers"]["Host"]=="app.klyrow.com"
+            return response
     with patch.object(gateway.asyncio,"sleep",new=AsyncMock(side_effect=[None,asyncio.CancelledError()])), \
          patch.object(gateway.httpx,"AsyncClient",return_value=RecoveredClient()):
         with pytest.raises(asyncio.CancelledError):asyncio.run(gateway.email_outbox_loop())
