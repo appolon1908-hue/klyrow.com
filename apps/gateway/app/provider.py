@@ -367,10 +367,18 @@ def parse_inbound(raw: bytes, max_message_bytes: int, max_attachment_bytes: int)
             text_body = content.decode(part.get_content_charset() or "utf-8", errors="replace")
         elif content_type == "text/html" and html_body is None:
             html_body = content.decode(part.get_content_charset() or "utf-8", errors="replace")
+    spam_score_header = message.get("X-Klyrow-Spam-Score")
+    try:
+        provider_spam_score = int(spam_score_header) if spam_score_header is not None else None
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, "invalid_provider_spam_score") from exc
+    if provider_spam_score is not None and not 0 <= provider_spam_score <= 1000:
+        raise HTTPException(422, "invalid_provider_spam_score")
     return {"message_id": message.get("Message-ID"), "from": message.get("From", ""), "to": message.get("To", ""),
         "cc": message.get("Cc"), "date": message.get("Date"), "in_reply_to": message.get("In-Reply-To"),
         "references": message.get("References"), "subject": message.get("Subject", ""), "text": text_body,
-        "html": html_body, "attachments": attachments, "disposition": disposition}
+        "html": html_body, "attachments": attachments, "disposition": disposition,
+        "provider_spam_score": provider_spam_score}
 
 
 def smtp_authorize(s: Session, payload: SmtpPreflightIn, tenant_id: str) -> SmtpCredential:
@@ -1089,12 +1097,23 @@ async def postal_inbound(request: Request, x_postal_signature_256: str = Header(
     if len(raw) != payload.size:
         raise HTTPException(422, "postal_message_size_mismatch")
     recipient = str(payload.rcpt_to).lower()
-    routes = list(s.scalars(select(InboundRouteConfig).where(
+    configured_routes = list(s.scalars(select(InboundRouteConfig).where(
         InboundRouteConfig.address == recipient, InboundRouteConfig.verified == True,
         InboundRouteConfig.enabled == True)).all())
+    # The customer-facing API predates the provider registry. Resolve exact routes
+    # from both stores until their migration is complete; ambiguity fails closed.
+    from .messaging import DomainClaim, InboundRoute
+    api_routes = list(s.scalars(select(InboundRoute).join(DomainClaim,
+        DomainClaim.id == InboundRoute.domain_claim_id).where(
+        InboundRoute.recipient == recipient, InboundRoute.enabled == True,
+        InboundRoute.wildcard == False, DomainClaim.state.in_({"VERIFIED", "SENDING_ENABLED"}))).all())
+    routes = configured_routes + api_routes
     if len(routes) != 1:
         raise HTTPException(404, "inbound_recipient_not_configured")
     route = routes[0]
+    tenant = s.scalar(select(Tenant).where(Tenant.id == route.tenant_id, Tenant.enabled == True))
+    if not tenant:
+        raise HTTPException(403, "tenant_suspended")
     provider_event_id = f"postal:{payload.id}"
     existing = s.scalar(select(ProviderInbound).where(
         ProviderInbound.tenant_id == route.tenant_id,
@@ -1104,6 +1123,13 @@ async def postal_inbound(request: Request, x_postal_signature_256: str = Header(
             "disposition": existing.disposition}
     tenant_policy = policy_for(s, route.tenant_id)
     parsed = parse_inbound(raw, tenant_policy.max_message_bytes, tenant_policy.max_attachment_bytes)
+    spam_score = parsed["provider_spam_score"]
+    if spam_score is None:
+        parsed["disposition"] = "QUARANTINE"
+    elif spam_score >= tenant_policy.spam_reject_score:
+        parsed["disposition"] = "REJECT"
+    elif spam_score >= tenant_policy.spam_quarantine_score:
+        parsed["disposition"] = "QUARANTINE"
     if parsed["message_id"]:
         duplicate = s.scalar(select(ProviderInbound).where(
             ProviderInbound.tenant_id == route.tenant_id, ProviderInbound.route_id == route.id,
@@ -1119,9 +1145,14 @@ async def postal_inbound(request: Request, x_postal_signature_256: str = Header(
         disposition=parsed["disposition"])
     s.add(item)
     event_id = str(uuid.uuid4())
+    destination_kind = route.destination_kind
+    if destination_kind == "SUPPORT":
+        destination_kind = "odoo_helpdesk"
+    elif destination_kind == "ODOO":
+        destination_kind = "odoo_accounting" if "account" in (route.destination_ref or "").lower() else "odoo_helpdesk"
     normalized = {"event_id": event_id, "event": "inbound.received", "tenant_id": route.tenant_id,
         "inbound_id": item.id, "provider_event_id": provider_event_id, "route_id": route.id,
-        "destination_kind": route.destination_kind, "destination_ref": route.destination_ref,
+        "destination_kind": destination_kind, "destination_ref": route.destination_ref,
         "disposition": item.disposition, "recipient": recipient, "sender": parsed["from"],
         "subject": parsed["subject"], "message_id": parsed["message_id"],
         "in_reply_to": parsed["in_reply_to"], "references": parsed["references"],

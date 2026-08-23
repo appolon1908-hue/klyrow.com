@@ -155,7 +155,7 @@ def test_inbound_dangerous_filename_rejected():
 
 
 def test_postal_native_inbound_requires_exact_signature_and_is_idempotent(tmp_path):
-    raw = (b"From: Sender <person@example.net>\r\nTo: support@codestra.co\r\n"
+    raw = (b"From: Sender <person@example.net>\r\nTo: support@codestra.co\r\nX-Klyrow-Spam-Score: 0\r\n"
            b"Message-ID: <postal-native@example.net>\r\nSubject: Native\r\n\r\nhello")
     payload = {"id": 90210, "rcpt_to": "support@codestra.co", "mail_from": "person@example.net",
         "message": base64.b64encode(raw).decode(), "base64": True, "size": len(raw)}
@@ -176,6 +176,43 @@ def test_postal_native_inbound_requires_exact_signature_and_is_idempotent(tmp_pa
     assert first.status_code == 200 and first.json()["accepted"] is True and first.json()["duplicate"] is False
     replay = client.post("/v1/webhooks/postal-inbound", content=body, headers=headers)
     assert replay.status_code == 200 and replay.json()["duplicate"] is True
+
+    def signed_delivery(delivery_id, recipient, message):
+        candidate = {"id": delivery_id, "rcpt_to": recipient, "mail_from": "person@example.net",
+            "message": base64.b64encode(message).decode(), "base64": True, "size": len(message)}
+        encoded = json.dumps(candidate, separators=(",", ":")).encode()
+        signed = base64.b64encode(private_key.sign(encoded, padding.PKCS1v15(), hashes.SHA256())).decode()
+        return client.post("/v1/webhooks/postal-inbound", content=encoded,
+            headers={"Content-Type": "application/json", "X-Postal-Signature-256": signed})
+
+    # Missing trusted scanner evidence must fail closed to quarantine.
+    unscored = (b"From: person@example.net\r\nTo: support@codestra.co\r\n"
+        b"Message-ID: <postal-unscored@example.net>\r\n\r\nhello")
+    assert signed_delivery(90211, "support@codestra.co", unscored).json()["disposition"] == "QUARANTINE"
+
+    # Tenant suspension applies even though Postal authenticates successfully.
+    with DB() as session:
+        session.query(Tenant).filter_by(id="tenant-a").one().enabled = False
+        session.commit()
+    suspended = raw.replace(b"postal-native", b"postal-suspended")
+    assert signed_delivery(90212, "support@codestra.co", suspended).status_code == 403
+    with DB() as session:
+        session.query(Tenant).filter_by(id="tenant-a").one().enabled = True
+        session.commit()
+
+    # Routes created by the customer-facing inbound API registry are resolved too.
+    from apps.gateway.app.messaging import DomainClaim, InboundRoute
+    with DB() as session:
+        session.add(DomainClaim(id="api-claim", tenant_id="tenant-a", domain="codestra.co",
+            state="VERIFIED", challenge_hash="hash", dkim_selector="selector",
+            return_path="bounce.codestra.co", tracking_domain="track.codestra.co"))
+        session.add(InboundRoute(id="api-route", tenant_id="tenant-a", domain_claim_id="api-claim",
+            recipient="billing@codestra.co", wildcard=False, destination_kind="ODOO",
+            destination_ref="odoo_accounting", enabled=True))
+        session.commit()
+    api_routed = (b"From: person@example.net\r\nTo: billing@codestra.co\r\n"
+        b"X-Klyrow-Spam-Score: 0\r\nMessage-ID: <postal-api-route@example.net>\r\n\r\nhello")
+    assert signed_delivery(90213, "billing@codestra.co", api_routed).status_code == 200
 
 
 def test_smtp_credential_once_rotation_revocation_and_tenant_isolation():
