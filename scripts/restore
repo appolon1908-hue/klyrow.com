@@ -1,9 +1,30 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/lib.sh"; require_env
-src="${1:?usage: scripts/restore BACKUP_DIR}"; [[ -f "$src/SHA256SUMS" ]] || { echo "Invalid backup" >&2; exit 1; }
-(cd "$src" && sha256sum -c SHA256SUMS)
-[[ "${CONFIRM_RESTORE:-}" == "RESTORE_KLYROW" ]] || { echo "Set CONFIRM_RESTORE=RESTORE_KLYROW; restore overwrites Klyrow databases" >&2; exit 2; }
-docker compose exec -T postgres pg_restore -U klyrow --clean --if-exists -d klyrow < "$src/klyrow.dump"
-gzip -dc "$src/mautic.sql.gz" | docker compose exec -T mautic-db mariadb -uroot -p"$(sed -n 's/^MAUTIC_DB_ROOT_PASSWORD=//p' .env)" mautic
-gzip -dc "$src/postal.sql.gz" | docker compose exec -T postal-db mariadb -uroot -p"$(sed -n 's/^POSTAL_DB_PASSWORD=//p' .env)"
 
+umask 077
+archive="${1:?usage: scripts/restore ENCRYPTED_BACKUP.tar.gz.gpg}"
+private_key="${KLYROW_BACKUP_PRIVATE_KEY_FILE:-}"
+staging_root="${KLYROW_BACKUP_STAGING_ROOT:-/dev/shm}"
+
+[[ -f "$archive" && -f "$archive.sha256" ]] || { echo "Encrypted backup or checksum missing" >&2; exit 1; }
+(cd "$(dirname "$archive")" && sha256sum -c "$(basename "$archive").sha256")
+[[ "${CONFIRM_RESTORE:-}" == "RESTORE_KLYROW" ]] || { echo "Set CONFIRM_RESTORE=RESTORE_KLYROW; restore overwrites only Klyrow databases" >&2; exit 2; }
+[[ "$(stat -f -c %T "$staging_root")" == "tmpfs" ]] || { echo "Restore staging must be tmpfs" >&2; exit 2; }
+stage="$(mktemp -d "$staging_root/klyrow-restore.XXXXXX")"
+[[ "$stage" == "$staging_root"/klyrow-restore.* ]] || { echo "Unsafe restore staging path" >&2; exit 2; }
+cleanup(){ find "$stage" -type f -exec shred -u {} + 2>/dev/null || true; rm -rf -- "$stage"; }
+trap cleanup EXIT
+
+gpg_home="${KLYROW_BACKUP_GNUPGHOME:-$stage/gnupg}"
+if [[ "$gpg_home" == "$stage/gnupg" ]]; then
+  [[ -r "$private_key" ]] || { echo "Backup private key unavailable" >&2; exit 2; }
+  install -d -m 0700 "$gpg_home"
+  gpg --batch --homedir "$gpg_home" --import "$private_key" >/dev/null 2>&1
+fi
+gpg --batch --homedir "$gpg_home" --decrypt "$archive" | tar -xz -C "$stage"
+(cd "$stage" && sha256sum -c MANIFEST.sha256)
+
+docker compose exec -T postgres pg_restore -U klyrow --clean --if-exists -d klyrow <"$stage/klyrow.dump"
+gzip -dc "$stage/mautic.sql.gz" | docker compose exec -T mautic-db sh -lc 'MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb -uroot "$MARIADB_DATABASE"'
+gzip -dc "$stage/postal.sql.gz" | docker compose exec -T postal-db sh -lc 'MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb -uroot'
+printf 'Klyrow databases restored from encrypted backup; configuration was not overwritten.\n'
