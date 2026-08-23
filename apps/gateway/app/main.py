@@ -260,7 +260,7 @@ async def emit_middleware(event_type:str,payload:dict)->bool:
     # send them through the legacy generic route first: a failure there used
     # to abort delivery before the dedicated, mTLS-protected endpoint was
     # attempted and incorrectly exhausted the outbox into DLQ.
-    if event_type.startswith("klyrow.email.") and email_target:
+    if event_type.startswith(("klyrow.email.", "klyrow.message.")) and email_target:
         targets=[email_target]
     else:
         path={"klyrow.email.bounced":"bounces","klyrow.email.complained":"complaints","klyrow.email.unsubscribed":"unsubscribes"}.get(event_type,"events")
