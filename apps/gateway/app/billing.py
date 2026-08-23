@@ -55,6 +55,8 @@ class TaxRule(Base):
     __tablename__="klyrow_tax_rules"; id:Mapped[str]=mapped_column(String,primary_key=True); jurisdiction:Mapped[str]=mapped_column(String); mode:Mapped[str]=mapped_column(String); rate:Mapped[Decimal]=mapped_column(Numeric(8,6),default=0); evidence_label:Mapped[str]=mapped_column(String); active:Mapped[bool]=mapped_column(Boolean,default=True)
 class BillingEvent(Base):
     __tablename__="klyrow_billing_events"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); kind:Mapped[str]=mapped_column(String); reference:Mapped[str]=mapped_column(String,index=True); payload_json:Mapped[str]=mapped_column(Text,default="{}"); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+class BillingWorkItem(Base):
+    __tablename__="klyrow_billing_work_items"; id:Mapped[str]=mapped_column(String,primary_key=True); billing_event_id:Mapped[str]=mapped_column(String,unique=True,index=True); tenant_id:Mapped[str]=mapped_column(String,index=True); kind:Mapped[str]=mapped_column(String,index=True); state:Mapped[str]=mapped_column(String,default="PENDING",index=True); attempts:Mapped[int]=mapped_column(Integer,default=0); available_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True); lease_expires_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True); completed_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class CheckoutSession(Base):
     __tablename__="klyrow_checkout_sessions"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); plan_id:Mapped[str]=mapped_column(String); price_id:Mapped[str]=mapped_column(String); provider:Mapped[str]=mapped_column(String); state:Mapped[str]=mapped_column(String); provider_reference:Mapped[str]=mapped_column(String,unique=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class CreditNote(Base):
@@ -236,3 +238,43 @@ def reconcile(ctx=Depends(auth),s:Session=Depends(db)):
 @router.get("/billing/portal")
 def billing_portal(ctx=Depends(auth),s:Session=Depends(db)):
     sub=s.scalar(select(BillingSubscription).where(BillingSubscription.tenant_id==ctx["tenant"]));wallet=s.get(Wallet,ctx["tenant"]);return {"subscription":sub,"invoices":s.scalars(select(Invoice).where(Invoice.tenant_id==ctx["tenant"])).all(),"payments":s.scalars(select(Payment).where(Payment.tenant_id==ctx["tenant"])).all(),"credits":s.scalars(select(Credit).where(Credit.tenant_id==ctx["tenant"])).all(),"wallet":{"balance":str(wallet.balance),"currency":wallet.currency} if wallet else None,"raw_card_storage":False}
+
+# Stable dedicated-billing-service read and command contract. All lookups remain
+# tenant-qualified; the aliases preserve compatibility with the original API.
+@router.get("/billing/plan")
+def billing_plan(ctx=Depends(auth),s:Session=Depends(db)):
+    sub=s.scalar(select(BillingSubscription).where(BillingSubscription.tenant_id==ctx["tenant"]));
+    if not sub:raise HTTPException(404,"subscription_not_found")
+    plan=s.get(BillingPlan,sub.plan_id);price=s.get(BillingPrice,sub.price_id)
+    return {"code":plan.code,"name":plan.name,"features":json.loads(plan.features_json),"price_version":price.version,"currency":price.currency}
+@router.get("/billing/subscription")
+def billing_subscription(ctx=Depends(auth),s:Session=Depends(db)):
+    item=s.scalar(select(BillingSubscription).where(BillingSubscription.tenant_id==ctx["tenant"]));
+    if not item:raise HTTPException(404,"subscription_not_found")
+    return item
+@router.get("/billing/usage")
+def billing_usage(ctx=Depends(auth),s:Session=Depends(db)):
+    rows=s.scalars(select(UsageEvent).where(UsageEvent.tenant_id==ctx["tenant"]).order_by(UsageEvent.occurred_at.desc()).limit(500)).all();return {"events":rows,"quantity":sum(row.quantity for row in rows),"billing_active":True}
+@router.get("/billing/quota")
+def billing_quota(ctx=Depends(auth),s:Session=Depends(db)):
+    sub=s.scalar(select(BillingSubscription).where(BillingSubscription.tenant_id==ctx["tenant"]));
+    if not sub:raise HTTPException(404,"subscription_not_found")
+    price=s.get(BillingPrice,sub.price_id);used=s.scalar(select(func.sum(UsageEvent.quantity)).where(UsageEvent.subscription_id==sub.id,UsageEvent.occurred_at>=sub.period_start,UsageEvent.occurred_at<sub.period_end)) or 0
+    return {"included":price.included_units,"used":used,"remaining":max(0,price.included_units-used),"behavior":"OVERAGE"}
+@router.get("/billing/invoices")
+def billing_invoices(ctx=Depends(auth),s:Session=Depends(db)):return s.scalars(select(Invoice).where(Invoice.tenant_id==ctx["tenant"]).order_by(Invoice.created_at.desc())).all()
+@router.get("/billing/invoices/{invoice_id}")
+def billing_invoice(invoice_id:str,ctx=Depends(auth),s:Session=Depends(db)):
+    item=tenant_item(s,Invoice,invoice_id,ctx["tenant"]);lines=s.scalars(select(InvoiceLine).where(InvoiceLine.invoice_id==item.id)).all();return {"invoice":item,"lines":lines}
+@router.get("/billing/credits")
+def billing_credits(ctx=Depends(auth),s:Session=Depends(db)):return s.scalars(select(Credit).where(Credit.tenant_id==ctx["tenant"]).order_by(Credit.created_at.desc())).all()
+@router.post("/billing/subscription/change")
+def billing_subscription_change(x:PlanChangeIn,ctx=Depends(auth),s:Session=Depends(db)):return change_plan(x,ctx,s)
+@router.post("/billing/subscription/cancel")
+def billing_subscription_cancel(ctx=Depends(auth),s:Session=Depends(db)):return transition("CANCEL_AT_PERIOD_END",ctx,s)
+@router.post("/billing/payments/manual",status_code=201)
+def billing_manual_payment(x:PaymentIn,ctx=Depends(auth),s:Session=Depends(db)):
+    if x.provider!="MANUAL_OFFLINE":raise HTTPException(422,"manual_offline_provider_required")
+    return pay(x,ctx,s)
+@router.post("/billing/refunds",status_code=201)
+def billing_refund(payment_id:str,x:RefundIn,ctx=Depends(auth),s:Session=Depends(db)):return refund(payment_id,x,ctx,s)

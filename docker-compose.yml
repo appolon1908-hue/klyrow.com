@@ -44,6 +44,104 @@ services:
       interval: 20s
       timeout: 5s
       retries: 5
+  worker:
+    build: ./apps/gateway
+    env_file: '${KLYROW_ENV_FILE:-.env}'
+    environment:
+      KLYROW_ENV: production
+      KLYROW_WORKER_ROLE: mail
+      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
+      KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
+      KLYROW_POSTAL_API_KEY_FILE: /run/secrets/klyrow_postal_api_key
+      KLYROW_SAFE_MODE: "true"
+      LIVE_EMAIL_DELIVERY: "false"
+      EXTERNAL_EMAIL_DELIVERY: "false"
+      PRODUCTION_PROVIDER_ROUTING: "false"
+    command: ["python", "-m", "app.service_worker"]
+    secrets: [klyrow_session_secret, klyrow_postal_api_key]
+    depends_on:
+      postgres: {condition: service_healthy}
+      gateway-migrate: {condition: service_completed_successfully}
+    networks: [frontend, backend]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+  scheduler:
+    build: ./apps/gateway
+    environment:
+      KLYROW_WORKER_ROLE: scheduler
+      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
+      KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
+    command: ["python", "-m", "app.service_worker"]
+    secrets: [klyrow_session_secret]
+    depends_on:
+      postgres: {condition: service_healthy}
+      gateway-migrate: {condition: service_completed_successfully}
+    networks: [backend]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+  billing-api:
+    build: ./apps/gateway
+    env_file: '${KLYROW_ENV_FILE:-.env}'
+    environment:
+      KLYROW_ENV: production
+      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
+      KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
+      KLYROW_METRICS_TOKEN_FILE: /run/secrets/klyrow_metrics_token
+      KLYROW_SAFE_MODE: "true"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    secrets: [klyrow_session_secret, klyrow_metrics_token]
+    depends_on:
+      postgres: {condition: service_healthy}
+      gateway-migrate: {condition: service_completed_successfully}
+    networks: [backend]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+  billing-worker:
+    build: ./apps/gateway
+    environment:
+      KLYROW_WORKER_ROLE: billing
+      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
+      KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
+    command: ["python", "-m", "app.service_worker"]
+    secrets: [klyrow_session_secret]
+    depends_on:
+      postgres: {condition: service_healthy}
+      gateway-migrate: {condition: service_completed_successfully}
+    networks: [backend]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
   smtp-relay:
     build: ./apps/gateway
     environment:
