@@ -106,7 +106,7 @@ services:
       KLYROW_METRICS_TOKEN_FILE: /run/secrets/klyrow_metrics_token
       KLYROW_SAFE_MODE: "true"
       KLYROW_EMBEDDED_WORKERS: "false"
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     secrets: [klyrow_session_secret, klyrow_metrics_token]
     depends_on:
       postgres: {condition: service_healthy}
