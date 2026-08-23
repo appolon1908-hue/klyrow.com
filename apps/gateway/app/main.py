@@ -244,6 +244,10 @@ def campaign_canary_payload_allowed(payload:dict,tenant_id:str)->bool:
         and payload.get("from","").lower()==os.getenv("KLYROW_CAMPAIGN_CANARY_SENDER","").lower()
         and len(allowed)==1 and normalized==[next(iter(allowed))] and payload.get("stream")=="marketing")
 
+def campaign_worker_payload_allowed(payload:dict,tenant_id:str)->bool:
+    if campaign_execution_mode()=="CAMPAIGN_PRODUCTION_ENABLED":return payload.get("stream")=="marketing"
+    return campaign_canary_payload_allowed(payload,tenant_id)
+
 def production_gate_open(s:Session)->bool:
     if SAFE_MODE or os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()!="true" or not canary_configuration_valid():return False
     gate=s.get(ProductionCanaryGate,canary_gate_key())
@@ -414,6 +418,7 @@ async def postal_native_hook(request:Request,x_postal_signature_256:str=Header(d
     item.attempts=(item.attempts or 0)+1; item.updated_at=datetime.now(timezone.utc); s.commit()
     canonical_status=persist_email_event(s,event_id=event_id,tenant_id=tenant,message_id=message_id,correlation_id=correlation,event_type=canonical,recipient=normalized.get("recipient"),raw_status=normalized.get("status"),payload=item.payload)
     normalized["canonical_status"]=canonical_status
+    item=s.get(PostalEvent,event_id);item.payload=json.dumps(normalized,separators=(",",":"),sort_keys=True);s.commit()
     delivered=await emit_middleware("klyrow."+canonical,{**normalized,"customer_id":tenant})
     item=s.get(PostalEvent,event_id)
     if delivered:
@@ -478,20 +483,21 @@ async def email_outbox_loop():
                 if not isinstance(payload,dict):
                     item.state="quarantined";item.last_error="invalid_outbox_payload";item.updated_at=current;s.commit();continue
                 campaign_payload=payload.get("stream")=="marketing"
+                campaign_production=campaign_payload and campaign_execution_mode()=="CAMPAIGN_PRODUCTION_ENABLED"
                 gate_key=("campaign:"+str(payload.get("campaign_id"))) if campaign_payload else canary_gate_key()
-                gate=s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key==gate_key).with_for_update())
+                gate=None if campaign_production else s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key==gate_key).with_for_update())
                 maximum=1 if campaign_payload else canary_configuration()[3]
                 first_attempt=(item.attempts or 0)==0
-                reservation_denied=(not gate or (first_attempt and
+                reservation_denied=False if campaign_production else (not gate or (first_attempt and
                     (gate.claimed_deliveries>=gate.reserved_deliveries or gate.claimed_deliveries>=maximum)))
-                payload_allowed=campaign_canary_payload_allowed(payload,item.tenant_id) if campaign_payload else canary_payload_allowed(payload)
+                payload_allowed=campaign_worker_payload_allowed(payload,item.tenant_id) if campaign_payload else canary_payload_allowed(payload)
                 if not payload_allowed or reservation_denied:
                     item.state="quarantined";item.last_error="production_canary_policy_denied";item.updated_at=current
                     message=s.get(Message,item.message_id)
                     if message:message.status="quarantined"
                     s.commit();continue
                 if first_attempt:
-                    gate.claimed_deliveries+=1;gate.updated_at=current
+                    if gate:gate.claimed_deliveries+=1;gate.updated_at=current
                 item.state="sending";item.attempts+=1;item.next_attempt_at=None;item.updated_at=current;snapshot=(item.id,item.message_id,item.payload);s.commit()
             key_file=os.getenv("KLYROW_POSTAL_API_KEY_FILE","")
             key=Path(key_file).read_text(encoding="utf-8").strip() if key_file else ""
@@ -667,7 +673,6 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
     if prior:
         if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
         return json.loads(prior.response_json)
-    if x.stream=="marketing" and x.campaign_id:enforce_campaign_canary(x,ctx,s)
     enforce_production_canary(x,s)
     from .preferences import enforce_suppression
     enforce_suppression(s,ctx["tenant"],x.to.lower(),x.stream,x.campaign_id)
@@ -678,6 +683,7 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
         pref=s.scalar(select(Preference).where(Preference.tenant_id==ctx["tenant"],Preference.profile_id==profile.id,Preference.topic==x.topic))
         latest=s.scalar(select(Consent).where(Consent.tenant_id==ctx["tenant"],Consent.profile_id==profile.id,Consent.topic==x.topic).order_by(Consent.occurred_at.desc()))
         if not pref or not pref.subscribed or not latest or latest.status!="granted":raise HTTPException(422,"marketing_consent_required")
+        if x.campaign_id or not SAFE_MODE:enforce_campaign_canary(x,ctx,s)
     sender=x.sender.lower();domain=sender.rsplit("@",1)[1]
     from .delivery_controls import enforce_delivery_controls
     enforce_delivery_controls(s,ctx["tenant"],sender,x.stream)

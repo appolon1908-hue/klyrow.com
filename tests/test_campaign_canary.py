@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from apps.gateway.app.main import campaign_canary_payload_allowed, campaign_execution_mode, enforce_campaign_canary
+from apps.gateway.app.main import campaign_canary_payload_allowed, campaign_execution_mode, campaign_worker_payload_allowed, enforce_campaign_canary
 
 
 def configured(monkeypatch):
@@ -67,3 +67,11 @@ def test_worker_revalidates_exact_campaign_canary_scope(monkeypatch):
     assert not campaign_canary_payload_allowed({**payload,"to":["arbitrary@example.net"]},"tenant-approved")
     assert not campaign_canary_payload_allowed({**payload,"stream":"bulk"},"tenant-approved")
     assert not campaign_canary_payload_allowed(payload,"tenant-other")
+
+
+def test_explicit_production_mode_is_distinct_from_canary(monkeypatch):
+    configured(monkeypatch)
+    monkeypatch.setenv("KLYROW_CAMPAIGN_EXECUTION_MODE","CAMPAIGN_PRODUCTION_ENABLED")
+    payload={"to":["customer@example.net"],"from":"sender@mail.klyrow.com","campaign_id":"campaign-production","stream":"marketing"}
+    assert campaign_worker_payload_allowed(payload,"tenant-production")
+    assert not campaign_worker_payload_allowed({**payload,"stream":"bulk"},"tenant-production")

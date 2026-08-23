@@ -66,6 +66,10 @@ services:
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
       KLYROW_POSTAL_API_KEY_FILE: /run/secrets/klyrow_postal_api_key
       KLYROW_POSTAL_API_HOST_HEADER: ${KLYROW_POSTAL_API_HOST_HEADER:-app.klyrow.com}
+      KLYROW_EMAIL_EVENT_URL: https://middleware-email-events.internal.codestra.agency:18080/internal/provider-events/klyrow
+      KLYROW_SERVER_A_CA_FILE: /run/codestra-mtls/server-a/root-ca.crt
+      KLYROW_SERVER_A_CLIENT_CERT_FILE: /run/codestra-mtls/server-a/client-fullchain.crt
+      KLYROW_SERVER_A_CLIENT_KEY_FILE: /run/codestra-mtls/server-a/client.key
       KLYROW_CAMPAIGN_EXECUTION_MODE: "${KLYROW_CAMPAIGN_EXECUTION_MODE:-CAMPAIGN_EXECUTION_DISABLED}"
       KLYROW_CAMPAIGN_CANARY_ENABLED: "${KLYROW_CAMPAIGN_CANARY_ENABLED:-false}"
       KLYROW_CAMPAIGN_CANARY_MAX_RECIPIENTS: "${KLYROW_CAMPAIGN_CANARY_MAX_RECIPIENTS:-1}"
@@ -73,12 +77,14 @@ services:
       KLYROW_CAMPAIGN_CANARY_CAMPAIGN_ID: "${KLYROW_CAMPAIGN_CANARY_CAMPAIGN_ID:-}"
       KLYROW_CAMPAIGN_CANARY_RECIPIENTS: "${KLYROW_CAMPAIGN_CANARY_RECIPIENTS:-}"
       KLYROW_CAMPAIGN_CANARY_SENDER: "${KLYROW_CAMPAIGN_CANARY_SENDER:-}"
-      KLYROW_SAFE_MODE: "true"
+      KLYROW_SAFE_MODE: "${KLYROW_SAFE_MODE:-true}"
       LIVE_EMAIL_DELIVERY: "false"
       EXTERNAL_EMAIL_DELIVERY: "false"
       PRODUCTION_PROVIDER_ROUTING: "false"
     command: ["python", "-m", "app.service_worker"]
     secrets: [klyrow_session_secret, klyrow_postal_api_key]
+    volumes:
+      - /etc/codestra/mtls/server-a-event-client:/run/codestra-mtls/server-a:ro
     depends_on:
       postgres: {condition: service_healthy}
       gateway-migrate: {condition: service_completed_successfully}
