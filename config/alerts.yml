@@ -1,0 +1,78 @@
+groups:
+  - name: klyrow-mail-engine
+    rules:
+      - alert: KlyrowGatewayUnavailable
+        expr: up{job="klyrow"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "Klyrow provider gateway unavailable"}
+      - alert: KlyrowMailDeadLetter
+        expr: klyrow_provider_queue_messages{status="DEAD_LETTER"} > 0
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "Klyrow mail entered dead letter"}
+      - alert: KlyrowEventDeliveryStalled
+        expr: klyrow_provider_events{state=~"RETRY|DEAD_LETTER"} > 0
+        for: 10m
+        labels: {severity: critical}
+        annotations: {summary: "Klyrow provider events are not reaching Server A"}
+      - alert: KlyrowUsageDeliveryStalled
+        expr: klyrow_provider_usage_events{state=~"RETRY|DEAD_LETTER"} > 0
+        for: 10m
+        labels: {severity: critical}
+        annotations: {summary: "Klyrow usage events are not reaching its billing control plane"}
+      - alert: KlyrowHostDiskPressure
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) < 0.15
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Klyrow host disk space below 15 percent"}
+      - alert: KlyrowEmailQueueStalled
+        expr: klyrow_email_outbox_oldest_seconds > 300
+        for: 5m
+        labels: {severity: critical}
+        annotations: {summary: "Oldest Klyrow email outbox item exceeds five minutes"}
+      - alert: KlyrowN8nDeliveryStalled
+        expr: sum(klyrow_integration_outbox_items{target="N8N",state=~"RETRY|DEAD_LETTER"}) > 0
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Klyrow events are not reaching n8n"}
+      - alert: KlyrowOdooDeliveryStalled
+        expr: sum(klyrow_integration_outbox_items{target="ODOO",state=~"RETRY|DEAD_LETTER"}) > 0
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Klyrow synchronization is not reaching Odoo"}
+      - alert: KlyrowCustomerWebhookFailures
+        expr: sum(klyrow_webhook_attempts{state=~"RETRY|DEAD_LETTER"}) > 0
+        for: 10m
+        labels: {severity: warning}
+        annotations: {summary: "Customer webhook delivery is failing"}
+      - alert: KlyrowHighBounceRate
+        expr: klyrow_delivery_ratio{outcome="bounced"} > 0.05
+        for: 15m
+        labels: {severity: critical}
+        annotations: {summary: "Klyrow aggregate bounce rate exceeds five percent"}
+      - alert: KlyrowHighComplaintRate
+        expr: klyrow_delivery_ratio{outcome="complained"} > 0.002
+        for: 15m
+        labels: {severity: critical}
+        annotations: {summary: "Klyrow aggregate complaint rate exceeds 0.2 percent"}
+      - alert: KlyrowDomainDnsInvalid
+        expr: klyrow_domain_dns_invalid > 0
+        for: 30m
+        labels: {severity: warning}
+        annotations: {summary: "One or more Klyrow domains are not verified for sending"}
+      - alert: KlyrowBillingReconciliationFailure
+        expr: klyrow_billing_reconciliation_drift > 0
+        for: 10m
+        labels: {severity: critical}
+        annotations: {summary: "Klyrow billing ledger reconciliation found drift"}
+      - alert: KlyrowHostCpuPressure
+        expr: 1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) > 0.90
+        for: 15m
+        labels: {severity: warning}
+        annotations: {summary: "Klyrow host CPU exceeds 90 percent"}
+      - alert: KlyrowHostMemoryPressure
+        expr: 1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.90
+        for: 15m
+        labels: {severity: warning}
+        annotations: {summary: "Klyrow host memory exceeds 90 percent"}

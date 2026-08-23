@@ -70,8 +70,8 @@ DO $$ BEGIN
   ALTER TABLE production_canary_gate ADD CONSTRAINT production_canary_gate_claim_bounds CHECK (claimed_deliveries <= reserved_deliveries);
  END IF;
 END $$;
-INSERT INTO production_canary_gate(gate_key, reserved_deliveries)
-VALUES ('klyrow-single-domain', 0)
+INSERT INTO production_canary_gate(gate_key, reserved_deliveries, claimed_deliveries, updated_at)
+VALUES ('klyrow-single-domain', 0, 0, now())
 ON CONFLICT (gate_key) DO NOTHING;
 
 COMMIT;

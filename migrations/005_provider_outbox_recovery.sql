@@ -1,0 +1,15 @@
+BEGIN;
+ALTER TABLE provider_events ADD COLUMN IF NOT EXISTS available_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE provider_events ADD COLUMN IF NOT EXISTS last_error VARCHAR NULL;
+ALTER TABLE provider_events ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
+CREATE INDEX IF NOT EXISTS ix_provider_events_available_at ON provider_events (available_at);
+ALTER TABLE provider_usage_events ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE provider_usage_events ADD COLUMN IF NOT EXISTS available_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE provider_usage_events ADD COLUMN IF NOT EXISTS last_error VARCHAR NULL;
+CREATE INDEX IF NOT EXISTS ix_provider_usage_events_available_at ON provider_usage_events (available_at);
+ALTER TABLE tenant_mail_policies ADD COLUMN IF NOT EXISTS warmup_daily_limit INTEGER NOT NULL DEFAULT 100;
+ALTER TABLE tenant_mail_policies ADD COLUMN IF NOT EXISTS warmup_hourly_limit INTEGER NOT NULL DEFAULT 20;
+ALTER TABLE tenant_mail_policies ADD COLUMN IF NOT EXISTS warmup_growth_percent INTEGER NOT NULL DEFAULT 20;
+ALTER TABLE tenant_mail_policies ADD COLUMN IF NOT EXISTS ip_pool VARCHAR NOT NULL DEFAULT 'SHARED';
+ALTER TABLE tenant_mail_policies ADD COLUMN IF NOT EXISTS tracking_mode VARCHAR NOT NULL DEFAULT 'DISABLED';
+COMMIT;

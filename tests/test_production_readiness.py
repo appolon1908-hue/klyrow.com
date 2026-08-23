@@ -18,10 +18,18 @@ def test_runtime_secret_bootstrap_never_prints_credentials():
 
 def test_schema_migration_is_a_required_gateway_dependency():
     compose = (ROOT / "docker-compose.yml").read_text()
+    runner = (ROOT / "scripts/migrate").read_text()
     assert "gateway-migrate: {condition: service_completed_successfully}" in compose
-    assert "2026082201_email_outbox_and_tenant_idempotency.sql" in compose
     assert "2026082202_production_canary_claim_ledger.sql" in compose
-    assert "ON_ERROR_STOP=1" in compose
+    assert "docker/migrate.Dockerfile" in compose
+    assert "pg_advisory_xact_lock" in runner
+    assert "applied migration checksum mismatch" in runner
+    canary = (ROOT / "migrations/2026082202_production_canary_claim_ledger.sql").read_text()
+    assert "ALTER COLUMN updated_at SET DEFAULT now()" in canary
+    assert "claimed_deliveries, updated_at" in canary
+    legacy = (ROOT / "migrations/0000_legacy_schema_compat.sql").read_text()
+    assert "RENAME COLUMN domain_id TO domain_claim_id" in legacy
+    assert "RENAME COLUMN secret_hash TO verifier_hash" in legacy
 
 
 def test_upgrade_migrates_legacy_environment_secrets_before_compose():
@@ -46,6 +54,8 @@ def test_outbox_retries_back_off_and_terminal_failure_updates_message():
     source = (ROOT / "apps/gateway/app/main.py").read_text()
     migration = (ROOT / "migrations/2026082201_email_outbox_and_tenant_idempotency.sql").read_text()
     assert "EmailOutbox.next_attempt_at<=current" in source
+    assert "failed=item.attempts>=5" in source
+    assert "if first_attempt:" in source
     assert "min(300,2**max(item.attempts,1))" in source
     assert 'message.status="failed"' in source
     assert 'kind="klyrow.email.failed"' in source
@@ -94,3 +104,13 @@ def test_prometheus_uses_the_private_metrics_credential():
     prometheus = (ROOT / "config/prometheus.yml").read_text()
     assert "secrets: [klyrow_metrics_token]" in compose
     assert "credentials_file: /run/secrets/klyrow_metrics_token" in prometheus
+    alerts=(ROOT/"config/alerts.yml").read_text()
+    for name in ("KlyrowEmailQueueStalled","KlyrowN8nDeliveryStalled","KlyrowOdooDeliveryStalled","KlyrowCustomerWebhookFailures","KlyrowHighBounceRate","KlyrowHighComplaintRate","KlyrowDomainDnsInvalid","KlyrowBillingReconciliationFailure","KlyrowHostCpuPressure","KlyrowHostMemoryPressure"):
+        assert "alert: "+name in alerts
+
+
+def test_container_scan_fails_only_for_configured_high_and_critical_findings():
+    workflow=(ROOT/".github/workflows/ci.yml").read_text()
+    assert "severity: CRITICAL,HIGH" in workflow
+    assert "limit-severities-for-sarif: true" in workflow
+    assert 'exit-code: "1"' in workflow

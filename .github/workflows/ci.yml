@@ -9,10 +9,26 @@ on:
 permissions:
   contents: read
   packages: write
+  security-events: write
+  attestations: write
+  id-token: write
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6-bookworm
+        env:
+          POSTGRES_DB: klyrow_ci
+          POSTGRES_USER: klyrow
+          POSTGRES_PASSWORD: ci-only-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U klyrow -d klyrow_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -21,15 +37,29 @@ jobs:
           cache: pip
           cache-dependency-path: apps/gateway/requirements.txt
       - name: Install gateway and test dependencies
-        run: pip install -r apps/gateway/requirements.txt pytest
+        run: pip install -r apps/gateway/requirements.txt pytest pip-audit
+      - name: Audit Python dependencies
+        run: pip-audit --requirement apps/gateway/requirements.txt
+      - name: Apply migrations twice and verify the ledger
+        env:
+          KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:ci-only-password@127.0.0.1:5432/klyrow_ci
+        run: |
+          python scripts/migrate
+          python scripts/migrate
+          python - <<'PY'
+          import os
+          from sqlalchemy import create_engine, text
+          with create_engine(os.environ["KLYROW_DATABASE_URL"]).connect() as connection:
+              count = connection.execute(text("SELECT count(*) FROM klyrow_schema_migrations")).scalar_one()
+              expected = sum(1 for _ in __import__("pathlib").Path("migrations").glob("*.sql"))
+              assert count == expected, (count, expected)
+          PY
       - name: Compile and test
         env:
           PYTHONPATH: .
         run: |
           python -m compileall -q apps/gateway
           pytest -q tests
-      - name: Build immutable candidate
-        run: docker build -t "klyrow-gateway:${GITHUB_SHA}" apps/gateway
 
   secrets:
     runs-on: ubuntu-latest
@@ -41,9 +71,47 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  image:
+    needs: [test, secrets]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - name: Build immutable candidate
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/gateway
+          load: true
+          tags: klyrow-gateway:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Scan candidate image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: klyrow-gateway:${{ github.sha }}
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: "1"
+          ignore-unfixed: true
+      - name: Upload container scan
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-results.sarif
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: klyrow-gateway:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: klyrow-gateway-${{ github.sha }}.cdx.json
+          upload-artifact: true
+
   publish:
     if: github.event_name == 'workflow_dispatch'
-    needs: [test, secrets]
+    needs: [image]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -53,11 +121,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
+      - id: push
+        uses: docker/build-push-action@v6
         with:
           context: apps/gateway
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/klyrow-gateway:${{ github.sha }}
+          provenance: mode=max
+          sbom: true
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
+      - name: Attest published digest
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/klyrow-gateway
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

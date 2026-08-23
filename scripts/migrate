@@ -1,28 +1,46 @@
-#!/usr/bin/env bash
-source "$(dirname "$0")/lib.sh"; require_env
+#!/usr/bin/env python3
+"""Apply ordered SQL migrations exactly once under a PostgreSQL advisory lock."""
+import hashlib
+import os
+import re
+from pathlib import Path
 
-docker compose up -d postgres
-docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U klyrow -d klyrow <<'SQL'
-CREATE TABLE IF NOT EXISTS schema_migrations (
-  version VARCHAR PRIMARY KEY,
-  applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-SQL
+from sqlalchemy import create_engine, text
 
-for migration in migrations/*.sql; do
-  version="$(basename "$migration")"
-  applied="$(docker compose exec -T postgres psql -U klyrow -d klyrow -At \
-    -v version="$version" \
-    -c "SELECT 1 FROM schema_migrations WHERE version = :'version'")"
-  if [[ "$applied" == "1" ]]; then
-    echo "Migration already applied: $version"
-    continue
-  fi
 
-  echo "Applying migration: $version"
-  docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U klyrow -d klyrow \
-    -f "/migrations/$version"
-  docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U klyrow -d klyrow \
-    -v version="$version" \
-    -c "INSERT INTO schema_migrations(version) VALUES (:'version') ON CONFLICT DO NOTHING"
-done
+root = Path(__file__).resolve().parents[1]
+database_url = os.environ["KLYROW_DATABASE_URL"]
+if not database_url.startswith(("postgresql://", "postgresql+psycopg://")):
+    raise SystemExit("production migrations require PostgreSQL")
+
+engine = create_engine(database_url, pool_pre_ping=True)
+files = sorted((root / "migrations").glob("*.sql"))
+with engine.begin() as connection:
+    connection.execute(text("SELECT pg_advisory_xact_lock(1263294032)"))
+    connection.execute(text("""
+        CREATE TABLE IF NOT EXISTS klyrow_schema_migrations (
+            version text PRIMARY KEY,
+            sha256 text NOT NULL,
+            applied_at timestamptz NOT NULL DEFAULT now()
+        )
+    """))
+    applied = dict(connection.execute(text("SELECT version, sha256 FROM klyrow_schema_migrations")).tuples().all())
+    for path in files:
+        payload = path.read_bytes()
+        digest = hashlib.sha256(payload).hexdigest()
+        if path.name in applied:
+            if applied[path.name] != digest:
+                raise SystemExit(f"applied migration checksum mismatch: {path.name}")
+            continue
+        sql = payload.decode("utf-8")
+        # Migration files are also directly runnable with psql. The runner owns
+        # the transaction so embedded wrappers are removed, and psycopg literal
+        # percent signs are escaped before using its native multi-statement path.
+        sql = re.sub(r"\A\s*BEGIN\s*;", "", sql, flags=re.IGNORECASE)
+        sql = re.sub(r"COMMIT\s*;(?=\s*(?:--[^\n]*\n?)*\Z)", "", sql, flags=re.IGNORECASE)
+        connection.exec_driver_sql(sql.replace("%", "%%"))
+        connection.execute(
+            text("INSERT INTO klyrow_schema_migrations(version, sha256) VALUES (:version, :sha256)"),
+            {"version": path.name, "sha256": digest},
+        )
+        print(f"applied {path.name} {digest}")

@@ -13,6 +13,11 @@ CREATE TABLE IF NOT EXISTS production_canary_gate (
 ALTER TABLE production_canary_gate
   ADD COLUMN IF NOT EXISTS claimed_deliveries integer NOT NULL DEFAULT 0;
 
+ALTER TABLE production_canary_gate
+  ALTER COLUMN reserved_deliveries SET DEFAULT 0,
+  ALTER COLUMN claimed_deliveries SET DEFAULT 0,
+  ALTER COLUMN updated_at SET DEFAULT now();
+
 DO $$
 BEGIN
  IF EXISTS (
@@ -37,8 +42,8 @@ DO $$ BEGIN
  END IF;
 END $$;
 
-INSERT INTO production_canary_gate(gate_key, reserved_deliveries, claimed_deliveries)
-VALUES ('klyrow-single-domain', 0, 0)
+INSERT INTO production_canary_gate(gate_key, reserved_deliveries, claimed_deliveries, updated_at)
+VALUES ('klyrow-single-domain', 0, 0, now())
 ON CONFLICT (gate_key) DO NOTHING;
 
 COMMIT;
