@@ -32,6 +32,16 @@ def test_schema_migration_is_a_required_gateway_dependency():
     assert "RENAME COLUMN secret_hash TO verifier_hash" in legacy
 
 
+def test_mail_worker_has_the_canonical_mtls_event_delivery_contract():
+    compose = (ROOT / "docker-compose.yml").read_text()
+    worker = compose.split("  worker:", 1)[1].split("  scheduler:", 1)[0]
+    assert "KLYROW_EMAIL_EVENT_URL: https://middleware-email-events.internal.codestra.agency:18080/internal/provider-events/klyrow" in worker
+    assert "KLYROW_SERVER_A_CA_FILE: /run/codestra-mtls/server-a/root-ca.crt" in worker
+    assert "KLYROW_SERVER_A_CLIENT_CERT_FILE: /run/codestra-mtls/server-a/client-fullchain.crt" in worker
+    assert "KLYROW_SERVER_A_CLIENT_KEY_FILE: /run/codestra-mtls/server-a/client.key" in worker
+    assert "/etc/codestra/mtls/server-a-event-client:/run/codestra-mtls/server-a:ro" in worker
+
+
 def test_upgrade_migrates_legacy_environment_secrets_before_compose():
     update = (ROOT / "scripts/update").read_text()
     deploy = (ROOT / "scripts/deploy").read_text()

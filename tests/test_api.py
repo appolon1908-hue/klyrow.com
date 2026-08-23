@@ -9,7 +9,7 @@ Path(SERVICE_TOKEN_FILE).write_text("bounded-beyvra-test-token",encoding="utf-8"
 os.environ.update(KLYROW_DATABASE_URL="sqlite:///./test.db",KLYROW_SESSION_SECRET="test-session-secret-at-least-32-bytes",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple",BEYVRA_EMAIL_SERVICE_TOKEN_FILE=SERVICE_TOKEN_FILE,BEYVRA_EMAIL_TENANT_ID="a",KLYROW_AUTH_RATE_PER_MINUTE="1000")
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from apps.gateway.app.main import AllowedSender,Audit,Base,DB,Domain,Event,Message,Suppression,Tenant,User,app,engine,ph
+from apps.gateway.app.main import AllowedSender,Audit,Base,DB,Domain,Event,Message,PostalEvent,Suppression,Tenant,User,app,engine,ph
 
 def setup_module():
     Base.metadata.drop_all(engine); Base.metadata.create_all(engine)
@@ -101,6 +101,10 @@ def test_postal_native_signature_normalization_and_idempotency(tmp_path):
         first=client.post("/v1/webhooks/postal-native",headers=headers,content=body); duplicate=client.post("/v1/webhooks/postal-native",headers=headers,content=body)
     assert first.status_code==202 and duplicate.status_code==202 and duplicate.json()["duplicate"] is True
     sent=emit.await_args.args; assert sent[0]=="klyrow.email.bounced" and sent[1]["correlation_id"]=="correlation-1"
+    assert sent[1]["canonical_status"]=="hard_bounce"
+    with DB() as s:
+        stored=json.loads(s.get(PostalEvent,payload["uuid"]).payload)
+        assert stored["canonical_status"]=="hard_bounce"
     assert client.post("/v1/webhooks/postal-native",headers={"X-Postal-Signature-256":"bad"},content=body).status_code==401
 
 

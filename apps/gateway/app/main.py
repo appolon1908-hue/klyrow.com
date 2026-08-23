@@ -410,14 +410,14 @@ async def postal_native_hook(request:Request,x_postal_signature_256:str=Header(d
     message_id=str(message.get("id") or message.get("message_id") or "")
     correlation=str(payload.get("correlation_id") or message.get("tag") or message.get("message_id") or event_id)
     recipient=str(message.get("to") or "")
-    normalized={"event":canonical,"event_id":event_id,"event_version":"1.0","tenant_id":tenant,"message_id":message_id,"provider_message_id":str(message.get("message_id") or message_id),"stream":"transactional","correlation_id":correlation,"causation_id":correlation,"recipient_reference":"sha256:"+hashlib.sha256(recipient.lower().encode()).hexdigest(),"recipient":recipient,"sender":message.get("from"),"provider":"postal","status":payload.get("status") or canonical.rsplit(".",1)[-1],"occurred_at":datetime.fromtimestamp(event_timestamp,timezone.utc).isoformat(),"attempt":1,"metadata":{"provider_event":event_name,"provider_message_token":message.get("token")}}
+    canonical_status=TERMINAL_MESSAGE_STATUSES.get(canonical,canonical.rsplit(".",1)[-1])
+    normalized={"event":canonical,"event_id":event_id,"event_version":"1.0","tenant_id":tenant,"message_id":message_id,"provider_message_id":str(message.get("message_id") or message_id),"stream":"transactional","correlation_id":correlation,"causation_id":correlation,"recipient_reference":"sha256:"+hashlib.sha256(recipient.lower().encode()).hexdigest(),"recipient":recipient,"sender":message.get("from"),"provider":"postal","status":payload.get("status") or canonical.rsplit(".",1)[-1],"canonical_status":canonical_status,"occurred_at":datetime.fromtimestamp(event_timestamp,timezone.utc).isoformat(),"attempt":1,"metadata":{"provider_event":event_name,"provider_message_token":message.get("token")}}
     item=s.get(PostalEvent,event_id)
     if item and item.state=="delivered":return {"accepted":True,"duplicate":True}
     if not item:
         item=PostalEvent(id=event_id,event_type=canonical,correlation_id=correlation,message_id=message_id,tenant_id=tenant,payload=json.dumps(normalized,separators=(",",":"),sort_keys=True)); s.add(item)
     item.attempts=(item.attempts or 0)+1; item.updated_at=datetime.now(timezone.utc); s.commit()
     canonical_status=persist_email_event(s,event_id=event_id,tenant_id=tenant,message_id=message_id,correlation_id=correlation,event_type=canonical,recipient=normalized.get("recipient"),raw_status=normalized.get("status"),payload=item.payload)
-    normalized["canonical_status"]=canonical_status
     item=s.get(PostalEvent,event_id);item.payload=json.dumps(normalized,separators=(",",":"),sort_keys=True);s.commit()
     delivered=await emit_middleware("klyrow."+canonical,{**normalized,"customer_id":tenant})
     item=s.get(PostalEvent,event_id)
