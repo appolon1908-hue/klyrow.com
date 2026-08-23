@@ -1,6 +1,7 @@
-import base64,hashlib,hmac,json,os,subprocess,sys,time,uuid
+import asyncio,base64,hashlib,hmac,json,os,subprocess,sys,time,uuid
 from pathlib import Path
 from unittest.mock import AsyncMock,patch
+import pytest
 from cryptography.hazmat.primitives import hashes,serialization
 from cryptography.hazmat.primitives.asymmetric import padding,rsa
 SERVICE_TOKEN_FILE="/tmp/klyrow-beyvra-test-token"
@@ -101,3 +102,49 @@ def test_postal_native_signature_normalization_and_idempotency(tmp_path):
     assert first.status_code==202 and duplicate.status_code==202 and duplicate.json()["duplicate"] is True
     sent=emit.await_args.args; assert sent[0]=="klyrow.email.bounced" and sent[1]["correlation_id"]=="correlation-1"
     assert client.post("/v1/webhooks/postal-native",headers={"X-Postal-Signature-256":"bad"},content=body).status_code==401
+
+
+def test_postal_outage_retries_without_loss_or_second_canary_claim(tmp_path,monkeypatch):
+    from apps.gateway.app import main as gateway
+    from datetime import datetime,timezone,timedelta
+    key_file=tmp_path/"postal-key";key_file.write_text("synthetic-key")
+    monkeypatch.setattr(gateway,"SAFE_MODE",False)
+    monkeypatch.setenv("KLYROW_POSTAL_API_KEY_FILE",str(key_file))
+    monkeypatch.setenv("KLYROW_POSTAL_API_URL","https://postal.invalid")
+    monkeypatch.setenv("KLYROW_CANARY_ALLOWED_DOMAIN","a.example.com")
+    monkeypatch.setenv("KLYROW_CANARY_ALLOWED_SENDER","sender@a.example.com")
+    monkeypatch.setenv("KLYROW_CANARY_ALLOWED_RECIPIENT","sink@example.net")
+    monkeypatch.setenv("KLYROW_CANARY_ALLOWED_CAMPAIGN","COD-WEB-OUT")
+    monkeypatch.setenv("KLYROW_CANARY_MAX_DELIVERIES","1")
+    payload={"to":["sink@example.net"],"from":"sender@a.example.com","subject":"outage",
+        "plain_body":"fixture","campaign_id":"COD-WEB-OUT"}
+    with DB() as s:
+        s.merge(gateway.ProductionCanaryGate(gate_key=gateway.canary_gate_key(),reserved_deliveries=1,claimed_deliveries=0))
+        s.add(Message(id="postal-outage-message",tenant_id="a",recipient="sink@example.net",
+            sender="sender@a.example.com",subject="outage",status="queued"))
+        s.add(gateway.EmailOutbox(id="postal-outage-outbox",tenant_id="a",message_id="postal-outage-message",
+            payload=json.dumps(payload),state="pending",attempts=0))
+        s.commit()
+    class FailedClient:
+        async def __aenter__(self):return self
+        async def __aexit__(self,*_):return False
+        async def post(self,*_,**__):raise RuntimeError("synthetic_provider_unavailable")
+    with patch.object(gateway.asyncio,"sleep",new=AsyncMock(side_effect=[None,asyncio.CancelledError()])), \
+         patch.object(gateway.httpx,"AsyncClient",return_value=FailedClient()):
+        with pytest.raises(asyncio.CancelledError):asyncio.run(gateway.email_outbox_loop())
+    with DB() as s:
+        item=s.get(gateway.EmailOutbox,"postal-outage-outbox");gate=s.get(gateway.ProductionCanaryGate,gateway.canary_gate_key())
+        assert item.state=="retry" and item.attempts==1 and s.get(Message,"postal-outage-message").status=="queued"
+        assert gate.claimed_deliveries==1
+        item.next_attempt_at=datetime.now(timezone.utc)-timedelta(seconds=1);s.commit()
+    response=type("Response",(),{"raise_for_status":lambda self:None,
+        "json":lambda self:{"data":{"message_id":"synthetic-provider-id"}}})()
+    class RecoveredClient(FailedClient):
+        async def post(self,*_,**__):return response
+    with patch.object(gateway.asyncio,"sleep",new=AsyncMock(side_effect=[None,asyncio.CancelledError()])), \
+         patch.object(gateway.httpx,"AsyncClient",return_value=RecoveredClient()):
+        with pytest.raises(asyncio.CancelledError):asyncio.run(gateway.email_outbox_loop())
+    with DB() as s:
+        item=s.get(gateway.EmailOutbox,"postal-outage-outbox");gate=s.get(gateway.ProductionCanaryGate,gateway.canary_gate_key())
+        assert item.state=="delivered" and item.provider_message_id=="synthetic-provider-id" and item.attempts==2
+        assert s.get(Message,"postal-outage-message").status=="accepted" and gate.claimed_deliveries==1
