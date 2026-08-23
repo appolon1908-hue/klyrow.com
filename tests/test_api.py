@@ -111,6 +111,7 @@ def test_postal_outage_retries_without_loss_or_second_canary_claim(tmp_path,monk
     monkeypatch.setattr(gateway,"SAFE_MODE",False)
     monkeypatch.setenv("KLYROW_POSTAL_API_KEY_FILE",str(key_file))
     monkeypatch.setenv("KLYROW_POSTAL_API_URL","https://postal.invalid")
+    monkeypatch.setenv("KLYROW_POSTAL_API_HOST_HEADER","app.klyrow.com")
     monkeypatch.setenv("KLYROW_CANARY_ALLOWED_DOMAIN","a.example.com")
     monkeypatch.setenv("KLYROW_CANARY_ALLOWED_SENDER","sender@a.example.com")
     monkeypatch.setenv("KLYROW_CANARY_ALLOWED_RECIPIENT","sink@example.net")
@@ -140,7 +141,9 @@ def test_postal_outage_retries_without_loss_or_second_canary_claim(tmp_path,monk
     response=type("Response",(),{"raise_for_status":lambda self:None,
         "json":lambda self:{"data":{"message_id":"synthetic-provider-id"}}})()
     class RecoveredClient(FailedClient):
-        async def post(self,*_,**__):return response
+        async def post(self,*_,**kwargs):
+            assert kwargs["headers"]["Host"]=="app.klyrow.com"
+            return response
     with patch.object(gateway.asyncio,"sleep",new=AsyncMock(side_effect=[None,asyncio.CancelledError()])), \
          patch.object(gateway.httpx,"AsyncClient",return_value=RecoveredClient()):
         with pytest.raises(asyncio.CancelledError):asyncio.run(gateway.email_outbox_loop())

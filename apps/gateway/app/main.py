@@ -204,6 +204,46 @@ def canary_configuration_valid()->bool:
     domain,sender,recipient,maximum=canary_configuration()
     return bool(domain and sender and recipient and maximum==1 and sender.endswith("@"+domain))
 
+def campaign_execution_mode()->str:
+    mode=os.getenv("KLYROW_CAMPAIGN_EXECUTION_MODE","CAMPAIGN_EXECUTION_DISABLED").upper()
+    if mode not in {"CAMPAIGN_EXECUTION_DISABLED","CAMPAIGN_CANARY_ONLY","CAMPAIGN_PRODUCTION_ENABLED"}:
+        return "CAMPAIGN_EXECUTION_DISABLED"
+    return mode
+
+def enforce_campaign_canary(x,ctx,s):
+    mode=campaign_execution_mode()
+    if mode=="CAMPAIGN_EXECUTION_DISABLED":raise HTTPException(403,"campaign_execution_disabled")
+    if mode=="CAMPAIGN_PRODUCTION_ENABLED":return
+    if os.getenv("KLYROW_ENV","").lower()!="production" or os.getenv("KLYROW_CAMPAIGN_CANARY_ENABLED","false").lower()!="true":raise HTTPException(403,"campaign_canary_disabled")
+    try:maximum=int(os.getenv("KLYROW_CAMPAIGN_CANARY_MAX_RECIPIENTS","1"))
+    except ValueError:maximum=0
+    if maximum!=1:raise HTTPException(503,"campaign_canary_hard_limit_invalid")
+    if ctx["tenant"]!=os.getenv("KLYROW_CAMPAIGN_CANARY_TENANT_ID",""):raise HTTPException(403,"campaign_canary_tenant_denied")
+    if not x.campaign_id or x.campaign_id!=os.getenv("KLYROW_CAMPAIGN_CANARY_CAMPAIGN_ID",""):raise HTTPException(403,"campaign_canary_campaign_denied")
+    allowed={value.strip().lower() for value in os.getenv("KLYROW_CAMPAIGN_CANARY_RECIPIENTS","").split(",") if value.strip()}
+    if len(allowed)!=1 or str(x.to).lower() not in allowed:raise HTTPException(403,"campaign_canary_recipient_denied")
+    sender=os.getenv("KLYROW_CAMPAIGN_CANARY_SENDER","").lower()
+    if not sender or x.sender.lower()!=sender:raise HTTPException(403,"campaign_canary_sender_denied")
+    gate_key="campaign:"+x.campaign_id
+    gate=s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key==gate_key).with_for_update()) if s else None
+    if s and not gate:
+        gate=ProductionCanaryGate(gate_key=gate_key,reserved_deliveries=0,claimed_deliveries=0);s.add(gate);s.flush()
+    if gate and gate.reserved_deliveries>=maximum:raise HTTPException(409,"campaign_canary_limit_reached")
+    if gate:gate.reserved_deliveries+=1;gate.updated_at=datetime.now(timezone.utc)
+
+def campaign_canary_payload_allowed(payload:dict,tenant_id:str)->bool:
+    try:maximum=int(os.getenv("KLYROW_CAMPAIGN_CANARY_MAX_RECIPIENTS","1"))
+    except ValueError:return False
+    recipients=payload.get("to")
+    allowed={value.strip().lower() for value in os.getenv("KLYROW_CAMPAIGN_CANARY_RECIPIENTS","").split(",") if value.strip()}
+    normalized=[value.lower() for value in recipients] if isinstance(recipients,list) and all(isinstance(value,str) for value in recipients) else []
+    return (campaign_execution_mode()=="CAMPAIGN_CANARY_ONLY" and os.getenv("KLYROW_ENV","").lower()=="production"
+        and os.getenv("KLYROW_CAMPAIGN_CANARY_ENABLED","false").lower()=="true" and maximum==1
+        and tenant_id==os.getenv("KLYROW_CAMPAIGN_CANARY_TENANT_ID","")
+        and payload.get("campaign_id")==os.getenv("KLYROW_CAMPAIGN_CANARY_CAMPAIGN_ID","")
+        and payload.get("from","").lower()==os.getenv("KLYROW_CAMPAIGN_CANARY_SENDER","").lower()
+        and len(allowed)==1 and normalized==[next(iter(allowed))] and payload.get("stream")=="marketing")
+
 def production_gate_open(s:Session)->bool:
     if SAFE_MODE or os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()!="true" or not canary_configuration_valid():return False
     gate=s.get(ProductionCanaryGate,canary_gate_key())
@@ -219,6 +259,7 @@ def canary_payload_allowed(payload:dict)->bool:
 
 def enforce_production_canary(x,s):
     if SAFE_MODE:return
+    if x.stream=="marketing":return
     domain,sender,recipient,maximum=canary_configuration()
     if not canary_configuration_valid():raise HTTPException(503,"production_canary_configuration_invalid")
     allowed_campaign=os.getenv("KLYROW_CANARY_ALLOWED_CAMPAIGN","")
@@ -252,7 +293,16 @@ class WebhookIn(BaseModel): url:str=Field(pattern=r"^https://")
 async def emit_middleware(event_type:str,payload:dict)->bool:
     base=os.getenv("KLYROW_MIDDLEWARE_URL","").rstrip("/"); key=os.getenv("KLYROW_MIDDLEWARE_API_KEY",""); secret=os.getenv("KLYROW_WEBHOOK_SECRET","")
     if not base or not key or not secret:return False
-    event_id=payload.get("event_id") or str(uuid.uuid4()); payload={"event_id":event_id,"source_system":"klyrow","event_type":event_type,"timestamp":datetime.now(timezone.utc).isoformat(),**payload}
+    event_id=payload.get("event_id") or str(uuid.uuid4())
+    if event_type.startswith(("klyrow.email.", "klyrow.message.")):
+        payload={"event_id":event_id,"source_system":"klyrow","event_type":event_type,"event_version":str(payload.get("event_version") or "1.0"),
+            "occurred_at":str(payload.get("occurred_at") or datetime.now(timezone.utc).isoformat()),"tenant_id":str(payload.get("tenant_id") or payload.get("customer_id") or ""),
+            "message_id":str(payload.get("message_id") or ""),"provider_message_id":str(payload.get("provider_message_id") or payload.get("message_id") or ""),
+            "stream":str(payload.get("stream") or "transactional"),"recipient_reference":str(payload.get("recipient_reference") or "sha256:"+hashlib.sha256(str(payload.get("recipient") or "").lower().encode()).hexdigest()),
+            "status":str(payload.get("canonical_status") or payload.get("status") or event_type.rsplit(".",1)[-1]),"provider":str(payload.get("provider") or "postal"),
+            "correlation_id":str(payload.get("correlation_id") or event_id),"causation_id":str(payload.get("causation_id") or payload.get("correlation_id") or event_id),
+            "attempt":max(1,int(payload.get("attempt") or 1)),"metadata":payload.get("metadata") if isinstance(payload.get("metadata"),dict) else {}}
+    else:payload={"event_id":event_id,"source_system":"klyrow","event_type":event_type,"timestamp":datetime.now(timezone.utc).isoformat(),**payload}
     body=json.dumps(payload,separators=(",",":"),sort_keys=True).encode(); ts=str(int(time.time())); canonical=ts.encode()+b"\n"+event_id.encode()+b"\nklyrow\n"+body
     signature=hmac.new(secret.encode(),canonical,hashlib.sha256).hexdigest(); headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","X-Source-System":"klyrow","X-Klyrow-Timestamp":ts,"X-Klyrow-Event-Id":event_id,"X-Klyrow-Signature":"sha256="+signature}
     email_target=os.getenv("KLYROW_EMAIL_EVENT_URL","").strip()
@@ -355,7 +405,8 @@ async def postal_native_hook(request:Request,x_postal_signature_256:str=Header(d
     if not tenant:raise HTTPException(503,"postal_tenant_not_configured")
     message_id=str(message.get("id") or message.get("message_id") or "")
     correlation=str(payload.get("correlation_id") or message.get("tag") or message.get("message_id") or event_id)
-    normalized={"event":canonical,"event_id":event_id,"tenant_id":tenant,"message_id":message_id,"correlation_id":correlation,"recipient":message.get("to"),"sender":message.get("from"),"provider":"postal","status":payload.get("status"),"occurred_at":event_timestamp,"provider_event":event_name,"provider_message_token":message.get("token")}
+    recipient=str(message.get("to") or "")
+    normalized={"event":canonical,"event_id":event_id,"event_version":"1.0","tenant_id":tenant,"message_id":message_id,"provider_message_id":str(message.get("message_id") or message_id),"stream":"transactional","correlation_id":correlation,"causation_id":correlation,"recipient_reference":"sha256:"+hashlib.sha256(recipient.lower().encode()).hexdigest(),"recipient":recipient,"sender":message.get("from"),"provider":"postal","status":payload.get("status") or canonical.rsplit(".",1)[-1],"occurred_at":datetime.fromtimestamp(event_timestamp,timezone.utc).isoformat(),"attempt":1,"metadata":{"provider_event":event_name,"provider_message_token":message.get("token")}}
     item=s.get(PostalEvent,event_id)
     if item and item.state=="delivered":return {"accepted":True,"duplicate":True}
     if not item:
@@ -426,12 +477,15 @@ async def email_outbox_loop():
                     item.state="quarantined";item.last_error="invalid_outbox_payload";item.updated_at=current;s.commit();continue
                 if not isinstance(payload,dict):
                     item.state="quarantined";item.last_error="invalid_outbox_payload";item.updated_at=current;s.commit();continue
-                gate=s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key==canary_gate_key()).with_for_update())
-                maximum=canary_configuration()[3]
+                campaign_payload=payload.get("stream")=="marketing"
+                gate_key=("campaign:"+str(payload.get("campaign_id"))) if campaign_payload else canary_gate_key()
+                gate=s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key==gate_key).with_for_update())
+                maximum=1 if campaign_payload else canary_configuration()[3]
                 first_attempt=(item.attempts or 0)==0
                 reservation_denied=(not gate or (first_attempt and
                     (gate.claimed_deliveries>=gate.reserved_deliveries or gate.claimed_deliveries>=maximum)))
-                if not canary_payload_allowed(payload) or reservation_denied:
+                payload_allowed=campaign_canary_payload_allowed(payload,item.tenant_id) if campaign_payload else canary_payload_allowed(payload)
+                if not payload_allowed or reservation_denied:
                     item.state="quarantined";item.last_error="production_canary_policy_denied";item.updated_at=current
                     message=s.get(Message,item.message_id)
                     if message:message.status="quarantined"
@@ -443,6 +497,8 @@ async def email_outbox_loop():
             key=Path(key_file).read_text(encoding="utf-8").strip() if key_file else ""
             if not key:raise RuntimeError("postal credential unavailable")
             headers={"X-Server-API-Key":key,"Idempotency-Key":"klyrow:"+snapshot[1]}
+            postal_host=os.getenv("KLYROW_POSTAL_API_HOST_HEADER","").strip()
+            if postal_host:headers["Host"]=postal_host
             async with httpx.AsyncClient(timeout=10,trust_env=False,follow_redirects=False) as client:
                 response=await client.post(os.environ["KLYROW_POSTAL_API_URL"]+"/api/v1/send/message",headers=headers,json=json.loads(snapshot[2]));response.raise_for_status();provider_id=str(response.json().get("data",{}).get("message_id") or snapshot[1])
             with DB() as s:
@@ -611,6 +667,7 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
     if prior:
         if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
         return json.loads(prior.response_json)
+    if x.stream=="marketing" and x.campaign_id:enforce_campaign_canary(x,ctx,s)
     enforce_production_canary(x,s)
     from .preferences import enforce_suppression
     enforce_suppression(s,ctx["tenant"],x.to.lower(),x.stream,x.campaign_id)
@@ -633,7 +690,7 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
     if count>=tenant.quota: raise HTTPException(429,"daily_quota_exceeded")
     mid=str(uuid.uuid4()); status="accepted_test" if SAFE_MODE else "queued"
     result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=x.to.lower(),sender=x.sender.lower(),subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload=json.dumps({"stream":x.stream}))); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageLedger(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind="message."+x.stream,quantity=1,reference=mid))
-    if not SAFE_MODE:s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,payload=json.dumps({"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text,"campaign_id":x.campaign_id},separators=(",",":"),sort_keys=True)))
+    if not SAFE_MODE:s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,payload=json.dumps({"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text,"campaign_id":x.campaign_id,"stream":x.stream},separators=(",",":"),sort_keys=True)))
     s.commit(); MAIL.labels("queued").inc(); await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{"stream":x.stream}}); return result
 
 @app.post("/v1/email/bulk",status_code=202)

@@ -4,7 +4,10 @@ services:
     build: ./apps/gateway
     env_file: '${KLYROW_ENV_FILE:-.env}'
     environment:
-      KLYROW_EMAIL_EVENT_URL: http://10.40.0.1:18080/internal/provider-events/klyrow
+      KLYROW_EMAIL_EVENT_URL: https://middleware-email-events.internal.codestra.agency:18080/internal/provider-events/klyrow
+      KLYROW_SERVER_A_CA_FILE: /run/codestra-mtls/server-a/root-ca.crt
+      KLYROW_SERVER_A_CLIENT_CERT_FILE: /run/codestra-mtls/server-a/client-fullchain.crt
+      KLYROW_SERVER_A_CLIENT_KEY_FILE: /run/codestra-mtls/server-a/client.key
       KLYROW_ENV: production
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
       KLYROW_POSTAL_API_KEY_FILE: /run/secrets/klyrow_postal_api_key
@@ -17,6 +20,13 @@ services:
       KLYROW_REQUIRED_SCHEMA_VERSION: 2026082202_production_canary_claim_ledger.sql
       KLYROW_BULK_DELIVERY_ENABLED: "false"
       KLYROW_CAMPAIGN_DELIVERY_ENABLED: "false"
+      KLYROW_CAMPAIGN_EXECUTION_MODE: "${KLYROW_CAMPAIGN_EXECUTION_MODE:-CAMPAIGN_EXECUTION_DISABLED}"
+      KLYROW_CAMPAIGN_CANARY_ENABLED: "${KLYROW_CAMPAIGN_CANARY_ENABLED:-false}"
+      KLYROW_CAMPAIGN_CANARY_MAX_RECIPIENTS: "${KLYROW_CAMPAIGN_CANARY_MAX_RECIPIENTS:-1}"
+      KLYROW_CAMPAIGN_CANARY_TENANT_ID: "${KLYROW_CAMPAIGN_CANARY_TENANT_ID:-}"
+      KLYROW_CAMPAIGN_CANARY_CAMPAIGN_ID: "${KLYROW_CAMPAIGN_CANARY_CAMPAIGN_ID:-}"
+      KLYROW_CAMPAIGN_CANARY_RECIPIENTS: "${KLYROW_CAMPAIGN_CANARY_RECIPIENTS:-}"
+      KLYROW_CAMPAIGN_CANARY_SENDER: "${KLYROW_CAMPAIGN_CANARY_SENDER:-}"
       KLYROW_EMBEDDED_WORKERS: "false"
       LIVE_SMS_DELIVERY: "false"
       LIVE_EMAIL_DELIVERY: "false"
@@ -27,6 +37,7 @@ services:
     secrets: [klyrow_session_secret, klyrow_postal_api_key, klyrow_metrics_token]
     volumes:
       - ./secrets/postal/webhook-signing-public.pem:/run/klyrow/postal-webhook-signing-public.pem:ro
+      - /etc/codestra/mtls/server-a-event-client:/run/codestra-mtls/server-a:ro
       - dkim_keys:/var/lib/klyrow/dkim
     depends_on:
       postgres: {condition: service_healthy}
@@ -54,6 +65,14 @@ services:
       KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
       KLYROW_POSTAL_API_KEY_FILE: /run/secrets/klyrow_postal_api_key
+      KLYROW_POSTAL_API_HOST_HEADER: ${KLYROW_POSTAL_API_HOST_HEADER:-app.klyrow.com}
+      KLYROW_CAMPAIGN_EXECUTION_MODE: "${KLYROW_CAMPAIGN_EXECUTION_MODE:-CAMPAIGN_EXECUTION_DISABLED}"
+      KLYROW_CAMPAIGN_CANARY_ENABLED: "${KLYROW_CAMPAIGN_CANARY_ENABLED:-false}"
+      KLYROW_CAMPAIGN_CANARY_MAX_RECIPIENTS: "${KLYROW_CAMPAIGN_CANARY_MAX_RECIPIENTS:-1}"
+      KLYROW_CAMPAIGN_CANARY_TENANT_ID: "${KLYROW_CAMPAIGN_CANARY_TENANT_ID:-}"
+      KLYROW_CAMPAIGN_CANARY_CAMPAIGN_ID: "${KLYROW_CAMPAIGN_CANARY_CAMPAIGN_ID:-}"
+      KLYROW_CAMPAIGN_CANARY_RECIPIENTS: "${KLYROW_CAMPAIGN_CANARY_RECIPIENTS:-}"
+      KLYROW_CAMPAIGN_CANARY_SENDER: "${KLYROW_CAMPAIGN_CANARY_SENDER:-}"
       KLYROW_SAFE_MODE: "true"
       LIVE_EMAIL_DELIVERY: "false"
       EXTERNAL_EMAIL_DELIVERY: "false"
