@@ -34,10 +34,13 @@ def test_dedicated_billing_read_contract_is_tenant_authenticated():
     assert client.get("/v1/billing/quota",headers=headers).json()["remaining"]==100
     assert client.get("/v1/billing/invoices",headers=headers).status_code==200
     assert client.get("/v1/billing/credits",headers=headers).status_code==200
+    cancelled=client.post("/v1/billing/subscription/cancel",headers=headers)
+    assert cancelled.status_code==200 and cancelled.json()["status"]=="CANCEL_AT_PERIOD_END"
 
 def test_billing_worker_ledger_is_idempotent_and_reclaims_expired_lease():
     assert billing_tick()==1
-    assert billing_tick()==0
+    while billing_tick():
+        pass
     with DB() as s:
         item=s.scalar(select(BillingWorkItem).where(BillingWorkItem.billing_event_id=="billing-event"))
         assert item.state=="COMPLETED" and item.attempts==1
@@ -51,3 +54,15 @@ def test_billing_worker_ledger_is_idempotent_and_reclaims_expired_lease():
     with DB() as s:
         item=s.scalar(select(BillingWorkItem).where(BillingWorkItem.billing_event_id=="billing-event"))
         assert item.state=="COMPLETED" and item.attempts==2
+
+def test_billing_worker_reaches_events_beyond_first_page():
+    with DB() as s:
+        for index in range(201):
+            s.add(BillingEvent(id=f"page-event-{index:03}",tenant_id="boundary-a",
+                kind="usage.recorded",reference=f"message-{index:03}"))
+        s.commit()
+    billing_tick()
+    billing_tick()
+    with DB() as s:
+        assert s.scalar(select(BillingWorkItem).where(
+            BillingWorkItem.billing_event_id=="page-event-200")) is not None

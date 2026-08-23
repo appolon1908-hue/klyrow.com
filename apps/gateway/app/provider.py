@@ -367,18 +367,10 @@ def parse_inbound(raw: bytes, max_message_bytes: int, max_attachment_bytes: int)
             text_body = content.decode(part.get_content_charset() or "utf-8", errors="replace")
         elif content_type == "text/html" and html_body is None:
             html_body = content.decode(part.get_content_charset() or "utf-8", errors="replace")
-    spam_score_header = message.get("X-Klyrow-Spam-Score")
-    try:
-        provider_spam_score = int(spam_score_header) if spam_score_header is not None else None
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(422, "invalid_provider_spam_score") from exc
-    if provider_spam_score is not None and not 0 <= provider_spam_score <= 1000:
-        raise HTTPException(422, "invalid_provider_spam_score")
     return {"message_id": message.get("Message-ID"), "from": message.get("From", ""), "to": message.get("To", ""),
         "cc": message.get("Cc"), "date": message.get("Date"), "in_reply_to": message.get("In-Reply-To"),
         "references": message.get("References"), "subject": message.get("Subject", ""), "text": text_body,
-        "html": html_body, "attachments": attachments, "disposition": disposition,
-        "provider_spam_score": provider_spam_score}
+        "html": html_body, "attachments": attachments, "disposition": disposition}
 
 
 def smtp_authorize(s: Session, payload: SmtpPreflightIn, tenant_id: str) -> SmtpCredential:
@@ -1122,14 +1114,13 @@ async def postal_inbound(request: Request, x_postal_signature_256: str = Header(
         return {"accepted": True, "inbound_id": existing.id, "duplicate": True,
             "disposition": existing.disposition}
     tenant_policy = policy_for(s, route.tenant_id)
-    parsed = parse_inbound(raw, tenant_policy.max_message_bytes, tenant_policy.max_attachment_bytes)
-    spam_score = parsed["provider_spam_score"]
-    if spam_score is None:
-        parsed["disposition"] = "QUARANTINE"
-    elif spam_score >= tenant_policy.spam_reject_score:
-        parsed["disposition"] = "REJECT"
-    elif spam_score >= tenant_policy.spam_quarantine_score:
-        parsed["disposition"] = "QUARANTINE"
+    route_message_limit = getattr(route, "max_bytes", tenant_policy.max_message_bytes)
+    parsed = parse_inbound(raw, min(tenant_policy.max_message_bytes, route_message_limit),
+        tenant_policy.max_attachment_bytes)
+    # Postal's native payload has no independently authenticated scanner score.
+    # MIME headers are sender-controlled, so native deliveries remain quarantined
+    # until a trusted scanner supplies metadata outside the transported message.
+    parsed["disposition"] = "QUARANTINE"
     if parsed["message_id"]:
         duplicate = s.scalar(select(ProviderInbound).where(
             ProviderInbound.tenant_id == route.tenant_id, ProviderInbound.route_id == route.id,

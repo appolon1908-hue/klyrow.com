@@ -174,6 +174,7 @@ def test_postal_native_inbound_requires_exact_signature_and_is_idempotent(tmp_pa
     headers = {"Content-Type": "application/json", "X-Postal-Signature-256": signature}
     first = client.post("/v1/webhooks/postal-inbound", content=body, headers=headers)
     assert first.status_code == 200 and first.json()["accepted"] is True and first.json()["duplicate"] is False
+    assert first.json()["disposition"] == "QUARANTINE"
     replay = client.post("/v1/webhooks/postal-inbound", content=body, headers=headers)
     assert replay.status_code == 200 and replay.json()["duplicate"] is True
 
@@ -208,11 +209,14 @@ def test_postal_native_inbound_requires_exact_signature_and_is_idempotent(tmp_pa
             return_path="bounce.codestra.co", tracking_domain="track.codestra.co"))
         session.add(InboundRoute(id="api-route", tenant_id="tenant-a", domain_claim_id="api-claim",
             recipient="billing@codestra.co", wildcard=False, destination_kind="ODOO",
-            destination_ref="odoo_accounting", enabled=True))
+            destination_ref="odoo_accounting", max_bytes=1024, enabled=True))
         session.commit()
     api_routed = (b"From: person@example.net\r\nTo: billing@codestra.co\r\n"
         b"X-Klyrow-Spam-Score: 0\r\nMessage-ID: <postal-api-route@example.net>\r\n\r\nhello")
     assert signed_delivery(90213, "billing@codestra.co", api_routed).status_code == 200
+    oversized = (b"From: person@example.net\r\nTo: billing@codestra.co\r\n"
+        b"Message-ID: <postal-route-limit@example.net>\r\n\r\n" + b"x" * 1024)
+    assert signed_delivery(90214, "billing@codestra.co", oversized).status_code == 413
 
 
 def test_smtp_credential_once_rotation_revocation_and_tenant_isolation():

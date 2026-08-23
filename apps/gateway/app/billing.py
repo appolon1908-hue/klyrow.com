@@ -105,6 +105,11 @@ def subscribe(x:SubscribeIn,ctx=Depends(auth),s:Session=Depends(db)):
     sub.plan_id=plan.id;sub.price_id=price.id;sub.status=status;sub.period_start=start;sub.period_end=end;sub.trial_end=end if x.trial_days else None;sub.cancel_at_period_end=False
     s.add(sub);s.add(BillingEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind="subscription.created",reference=sub.id));audit(s,ctx,"billing.subscription.created");s.commit();return {"id":sub.id,"status":sub.status,"price_version":price.version}
 
+@router.post("/billing/subscription/change")
+def billing_subscription_change(x:PlanChangeIn,ctx=Depends(auth),s:Session=Depends(db)):return change_plan(x,ctx,s)
+@router.post("/billing/subscription/cancel")
+def billing_subscription_cancel(ctx=Depends(auth),s:Session=Depends(db)):return transition("CANCEL_AT_PERIOD_END",ctx,s)
+
 @router.post("/billing/subscription/{status}")
 def transition(status:str,ctx=Depends(auth),s:Session=Depends(db)):
     target=status.upper();sub=s.scalar(select(BillingSubscription).where(BillingSubscription.tenant_id==ctx["tenant"]).with_for_update())
@@ -274,10 +279,6 @@ def billing_invoice(invoice_id:str,ctx=Depends(auth),s:Session=Depends(db)):
     item=tenant_item(s,Invoice,invoice_id,ctx["tenant"]);lines=s.scalars(select(InvoiceLine).where(InvoiceLine.invoice_id==item.id)).all();return {"invoice":item,"lines":lines}
 @router.get("/billing/credits")
 def billing_credits(ctx=Depends(auth),s:Session=Depends(db)):return s.scalars(select(Credit).where(Credit.tenant_id==ctx["tenant"]).order_by(Credit.created_at.desc())).all()
-@router.post("/billing/subscription/change")
-def billing_subscription_change(x:PlanChangeIn,ctx=Depends(auth),s:Session=Depends(db)):return change_plan(x,ctx,s)
-@router.post("/billing/subscription/cancel")
-def billing_subscription_cancel(ctx=Depends(auth),s:Session=Depends(db)):return transition("CANCEL_AT_PERIOD_END",ctx,s)
 @router.post("/billing/payments/manual",status_code=201)
 def billing_manual_payment(x:PaymentIn,ctx=Depends(auth),s:Session=Depends(db)):
     if x.provider!="MANUAL_OFFLINE":raise HTTPException(422,"manual_offline_provider_required")
