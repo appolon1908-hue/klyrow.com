@@ -124,6 +124,12 @@ def meter(x:UsageIn,ctx=Depends(auth),s:Session=Depends(db)):
 
 @router.post("/billing/wallet/transactions",status_code=201)
 def wallet_tx(x:WalletIn,ctx=Depends(auth),s:Session=Depends(db)):
+    if ctx.get("role") not in {"platform_admin","tenant_admin","OWNER","ADMIN","BILLING"}:
+        from .tenancy import ROLE_PERMISSIONS,TenantMember
+        membership=s.scalar(select(TenantMember).where(TenantMember.tenant_id==ctx["tenant"],TenantMember.user_id==ctx["sub"],TenantMember.active==True))
+        permissions=ROLE_PERMISSIONS.get(membership.role,set()) if membership else set()
+        if "*" not in permissions and "billing.manage" not in permissions:
+            raise HTTPException(403,"billing_management_denied")
     old=s.scalar(select(WalletTransaction).where(WalletTransaction.tenant_id==ctx["tenant"],WalletTransaction.reference==x.reference));
     if old:return {"id":old.id,"duplicate":True}
     wallet=s.scalar(select(Wallet).where(Wallet.tenant_id==ctx["tenant"]).with_for_update()) or Wallet(tenant_id=ctx["tenant"],currency=x.currency,balance=0,version=0)
