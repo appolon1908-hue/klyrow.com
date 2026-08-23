@@ -353,6 +353,7 @@ Reuse `journeys`, `journey_versions`, `journey_runs`; add durable execution tabl
 - profile_id
 - node_id
 - node_type
+- execution_generation
 - state (`PENDING|READY|RUNNING|WAITING|COMPLETED|SKIPPED|RETRY|FAILED|CANCELLED`)
 - attempt
 - input_json
@@ -472,6 +473,7 @@ Canonical campaign metadata; reuse existing definition table if possible.
 - tenant_id
 - campaign_id
 - campaign_version
+- execution_generation
 - state
 - audience_snapshot_id
 - started_at

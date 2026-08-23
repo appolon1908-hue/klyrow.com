@@ -557,6 +557,7 @@ phases:
       - postal_outage
       - middleware_outage
       - webhook_destination_outage
+      - analytics_store_outage
       - tenant_isolation
       - sast_secret_dependency_container_scan
       - idor_ssrf_cors_csrf_replay_upload_rate_limit
