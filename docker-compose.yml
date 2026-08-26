@@ -1,7 +1,9 @@
 name: klyrow
 services:
   gateway:
-    build: ./apps/gateway
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
     env_file: '${KLYROW_ENV_FILE:-.env}'
     environment:
       KLYROW_EMAIL_EVENT_URL: https://middleware-email-events.internal.codestra.agency:18080/internal/provider-events/klyrow
@@ -57,7 +59,9 @@ services:
       timeout: 5s
       retries: 5
   worker:
-    build: ./apps/gateway
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
     env_file: '${KLYROW_ENV_FILE:-.env}'
     environment:
       KLYROW_ENV: production
@@ -100,7 +104,9 @@ services:
       timeout: 5s
       retries: 5
   scheduler:
-    build: ./apps/gateway
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
     environment:
       KLYROW_WORKER_ROLE: scheduler
       KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
@@ -122,7 +128,9 @@ services:
       timeout: 5s
       retries: 5
   billing-api:
-    build: ./apps/gateway
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
     env_file: '${KLYROW_ENV_FILE:-.env}'
     environment:
       KLYROW_ENV: production
@@ -148,7 +156,9 @@ services:
       timeout: 5s
       retries: 5
   billing-worker:
-    build: ./apps/gateway
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
     environment:
       KLYROW_WORKER_ROLE: billing
       KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
@@ -170,7 +180,9 @@ services:
       timeout: 5s
       retries: 5
   smtp-relay:
-    build: ./apps/gateway
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
     environment:
       KLYROW_DATABASE_URL: ${KLYROW_DATABASE_URL:?required}
       KLYROW_SMTP_PORT: "8025"

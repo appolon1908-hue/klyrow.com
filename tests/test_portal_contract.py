@@ -30,3 +30,21 @@ def test_portal_has_keyboard_and_live_region_foundations():
     assert page.count('aria-live="assertive"')>=2
     assert 'aria-current="page"' in page
     assert '@media(max-width:820px)' in page
+
+
+def test_auth_ui_routes_preserve_legacy_portal_and_do_not_implement_bff():
+    paths={route.path for route in app.routes if hasattr(route,"path")}
+    assert "/portal" in paths
+    source=(ROOT/"apps/web/src/App.vue").read_text()
+    assert "/auth/google?return_to=" in source
+    assert "localStorage" not in source and "sessionStorage" not in source
+    assert "client_secret" not in source and "token_endpoint" not in source
+
+
+def test_keycloak_theme_has_complete_localized_surfaces():
+    theme=ROOT/"themes/klyrow"
+    english=(theme/"login/messages/messages_en.properties").read_text()
+    spanish=(theme/"login/messages/messages_es.properties").read_text()
+    for key in ("loginTitle","registerTitle","emailVerifyTitle","emailForgotTitle","updatePasswordTitle","pageExpiredTitle","errorTitle","termsTitle","configureTotpTitle","confirmLinkIdpTitle","logoutConfirmTitle"):
+        assert f"{key}=" in english and f"{key}=" in spanish
+    assert "client_secret" not in "\n".join(path.read_text() for path in theme.rglob("*") if path.is_file())
