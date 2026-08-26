@@ -1,6 +1,7 @@
 import asyncio,base64,hashlib,hmac,json,os,subprocess,sys,time,uuid
 from pathlib import Path
 from unittest.mock import AsyncMock,patch
+import httpx
 import pytest
 from cryptography.hazmat.primitives import hashes,serialization
 from cryptography.hazmat.primitives.asymmetric import padding,rsa
@@ -21,6 +22,18 @@ client=TestClient(app)
 def login(n): return client.post("/v1/auth/login",json={"email":f"{n}@example.com","password":"long-enough-password"}).json()["access_token"]
 def hdr(n): return {"Authorization":"Bearer "+login(n)}
 def test_unauthorized(): assert client.get("/v1/domains").status_code==401
+def test_resolver_outage_is_reported_as_authorization_unavailable():
+    response=httpx.Response(503,json={"message":"core_web_api_maintenance"})
+    with patch.dict(os.environ,{"KLYROW_TENANT_RESOLVER_URL":"https://resolver.test/resolve"}),patch("apps.gateway.app.main.httpx.get",return_value=response):
+        result=client.get("/v1/domains",headers={"Authorization":"Bearer approved-service-token"})
+    assert result.status_code==503
+    assert result.json()=={"detail":"authorization_unavailable"}
+def test_resolver_network_failure_is_reported_as_authorization_unavailable():
+    request=httpx.Request("GET","https://resolver.test/resolve")
+    with patch.dict(os.environ,{"KLYROW_TENANT_RESOLVER_URL":"https://resolver.test/resolve"}),patch("apps.gateway.app.main.httpx.get",side_effect=httpx.ConnectError("unavailable",request=request)):
+        result=client.get("/v1/domains",headers={"Authorization":"Bearer approved-service-token"})
+    assert result.status_code==503
+    assert result.json()=={"detail":"authorization_unavailable"}
 def test_logout_revokes_active_session():
     access=login("a");h={"Authorization":"Bearer "+access}
     assert client.get("/v1/me",headers=h).status_code==200
