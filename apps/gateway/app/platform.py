@@ -9,11 +9,16 @@ from fastapi.responses import FileResponse
 from .main import AUTH_WEB_DIST, app
 from . import auth_bff
 from .auth_bff import router as auth_bff_router
+from .browser_auth_actions import install_auth_extensions, router as browser_auth_actions_router
 from .tenancy_onboarding import router as tenancy_onboarding_router
 from .browser_email_setup import router as browser_email_setup_router
 from .postal_provisioning import resolve_identity_context_with_provisioning, router as postal_provisioning_router
 
 SHELL_PATHS = {"/app", "/onboarding", "/app/{path:path}"}
+
+# Replace the historical rotating-CSRF session route before any router routes are
+# copied into the production application.
+install_auth_extensions()
 
 # The historical onboarding router contains SPA shell routes before its API
 # routes. Strip those routes from the source router *before* include_router()
@@ -41,6 +46,7 @@ if not getattr(app.state, "klyrow_browser_api_routes_registered", False):
     auth_bff._identity_context = resolve_identity_context_with_provisioning
     for browser_router in (
         auth_bff_router,
+        browser_auth_actions_router,
         tenancy_onboarding_router,
         browser_email_setup_router,
         postal_provisioning_router,
