@@ -1,0 +1,20 @@
+services:
+  worker:
+    environment:
+      KLYROW_SECURITY_PAYLOAD_KEY_FILE: /run/secrets/klyrow_security_payload_key
+      KLYROW_SECURITY_PAYLOAD_MAX_AGE_SECONDS: "${KLYROW_SECURITY_PAYLOAD_MAX_AGE_SECONDS:-3600}"
+    secrets:
+      - klyrow_session_secret
+      - klyrow_postal_api_key
+      - klyrow_security_payload_key
+
+  smtp-relay:
+    environment:
+      KLYROW_SECURITY_PAYLOAD_KEY_FILE: /run/secrets/klyrow_security_payload_key
+      KLYROW_SECURITY_PAYLOAD_MAX_AGE_SECONDS: "${KLYROW_SECURITY_PAYLOAD_MAX_AGE_SECONDS:-3600}"
+    secrets:
+      - klyrow_security_payload_key
+
+secrets:
+  klyrow_security_payload_key:
+    file: '${KLYROW_SECURITY_PAYLOAD_KEY_FILE:?set the root-owned SECURITY payload Fernet key path}'
