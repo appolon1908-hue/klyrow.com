@@ -31,14 +31,21 @@ for route in list(app.router.routes):
     ):
         app.router.routes.remove(route)
 
-# Register browser APIs once. Re-importing this module must not duplicate route
-# handlers or change first-match ordering.
+# Register browser APIs once. FastAPI 0.141 represents include_router() calls as
+# nested _IncludedRouter entries, which hides their concrete paths from
+# app.routes and breaks release-time route inventory checks. These routers have
+# no prefixes or router-level dependencies, so registering their APIRoute
+# objects directly preserves their metadata and runtime behavior while keeping
+# the production route table inspectable.
 if not getattr(app.state, "klyrow_browser_api_routes_registered", False):
     auth_bff._identity_context = resolve_identity_context_with_provisioning
-    app.include_router(auth_bff_router)
-    app.include_router(tenancy_onboarding_router)
-    app.include_router(browser_email_setup_router)
-    app.include_router(postal_provisioning_router)
+    for browser_router in (
+        auth_bff_router,
+        tenancy_onboarding_router,
+        browser_email_setup_router,
+        postal_provisioning_router,
+    ):
+        app.router.routes.extend(browser_router.routes)
     app.state.klyrow_browser_api_routes_registered = True
 else:
     auth_bff._identity_context = resolve_identity_context_with_provisioning
