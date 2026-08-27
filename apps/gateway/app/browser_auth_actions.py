@@ -16,11 +16,12 @@ from sqlalchemy.orm import Session
 
 from . import auth_bff
 from .auth_bff import BrowserSession, OidcLoginTransaction
-from .main import SECRET, auth_rate, db, sha
-from .tenancy import TenantInvitation
+from .main import SECRET, User, auth_rate, db, sha
+from .tenancy import OidcIdentity, TenantInvitation
 
 router = APIRouter(tags=["Browser account actions"])
 _ORIGINAL_NEW_SESSION = auth_bff._new_session
+_ORIGINAL_GET_BROWSER_SESSION = auth_bff._get_browser_session
 _INSTALLED = False
 _ACTION_MODES = {"update-password", "verify-email"}
 
@@ -44,9 +45,60 @@ def stable_csrf_token(session_id: str) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
 
+def _active_principal(
+    session: Session, item: BrowserSession
+) -> tuple[OidcIdentity, User]:
+    """Fail closed and revoke the session when either local principal is disabled."""
+
+    identity = session.get(OidcIdentity, item.identity_id)
+    user = session.get(User, item.user_id)
+    if identity is not None:
+        session.refresh(identity)
+    if user is not None:
+        session.refresh(user)
+    if (
+        identity is None
+        or not identity.enabled
+        or user is None
+        or not user.enabled
+    ):
+        item.revoked_at = auth_bff.now()
+        session.commit()
+        raise HTTPException(401, "principal_disabled")
+    return identity, user
+
+
+def _get_browser_session_with_principal_validation(
+    request: Request, session: Session, touch: bool = True
+) -> BrowserSession:
+    item = _ORIGINAL_GET_BROWSER_SESSION(request, session, touch=touch)
+    _active_principal(session, item)
+    return item
+
+
 def _new_session_with_stable_csrf(*args, **kwargs):
-    item, raw, _csrf = _ORIGINAL_NEW_SESSION(*args, **kwargs)
     session: Session = args[0] if args else kwargs["s"]
+    identity = args[2] if len(args) > 2 else kwargs["identity"]
+    user = args[3] if len(args) > 3 else kwargs["user"]
+
+    # Re-read both records immediately before issuing or rotating a browser
+    # session. This closes the refresh race where an administrator disables a
+    # principal while Keycloak is completing a token exchange.
+    identity_item = session.get(OidcIdentity, identity.id)
+    user_item = session.get(User, user.id)
+    if identity_item is not None:
+        session.refresh(identity_item)
+    if user_item is not None:
+        session.refresh(user_item)
+    if (
+        identity_item is None
+        or not identity_item.enabled
+        or user_item is None
+        or not user_item.enabled
+    ):
+        raise HTTPException(401, "principal_disabled")
+
+    item, raw, _csrf = _ORIGINAL_NEW_SESSION(*args, **kwargs)
     csrf = stable_csrf_token(item.id)
     item.csrf_hash = sha(csrf)
     session.commit()
@@ -77,7 +129,7 @@ def _identity_action_url(
 
 
 def install_auth_extensions() -> None:
-    """Replace rotating session/callback routes and session creation exactly once."""
+    """Replace historical routes and session helpers exactly once."""
 
     global _INSTALLED
     if _INSTALLED:
@@ -85,6 +137,7 @@ def install_auth_extensions() -> None:
     for route in list(auth_bff.router.routes):
         if getattr(route, "path", "") in {"/auth/session", "/auth/callback"}:
             auth_bff.router.routes.remove(route)
+    auth_bff._get_browser_session = _get_browser_session_with_principal_validation
     auth_bff._new_session = _new_session_with_stable_csrf
     _INSTALLED = True
 
