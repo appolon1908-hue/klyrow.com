@@ -23,6 +23,7 @@ from .provider import (
     TenantMailPolicy,
     smtp_hasher,
 )
+from .security_payload import encrypted_security_payload
 from .smtp_policy import SmtpPolicyError, effective_sandbox, select_credential_stream
 
 
@@ -223,6 +224,22 @@ class GovernedRelay:
                 return "550 5.7.1 live security delivery not authorized"
 
             raw_digest = hashlib.sha256(raw).hexdigest()
+            if stream == "SECURITY":
+                payload = encrypted_security_payload(
+                    raw,
+                    raw_sha256=raw_digest,
+                    message_id=message_id,
+                    stream=stream,
+                )
+            else:
+                payload = {
+                    "raw_sha256": raw_digest,
+                    "raw_b64": base64.b64encode(raw).decode(),
+                    "message_id": message_id,
+                    "size": len(raw),
+                    "stream": stream,
+                }
+
             for recipient in envelope.rcpt_tos:
                 digest = hashlib.sha256(
                     (credential.id + message_id + recipient).encode()
@@ -245,13 +262,7 @@ class GovernedRelay:
                     recipient=recipient,
                     subject=subject,
                     payload_json=json.dumps(
-                        {
-                            "raw_sha256": raw_digest,
-                            "raw_b64": base64.b64encode(raw).decode(),
-                            "message_id": message_id,
-                            "size": len(raw),
-                            "stream": stream,
-                        },
+                        payload,
                         separators=(",", ":"),
                         sort_keys=True,
                     ),
