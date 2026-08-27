@@ -36,18 +36,21 @@ def _urllib_transport(method: str, url: str, headers: Mapping[str, str], body: O
 
 
 class Klyrow:
-    def __init__(self, token: str, tenant_id: Optional[str] = None, base_url: str = "https://api.klyrow.com", transport: Transport = _urllib_transport):
+    def __init__(self, token: str, tenant_id: Optional[str] = None, base_url: str = "https://api.klyrow.com", transport: Transport = _urllib_transport, client_id: Optional[str] = None):
         if not token:
             raise ValueError("token is required")
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.tenant_id = tenant_id
         self.transport = transport
+        self.client_id = client_id
 
     def request(self, method: str, path: str, *, json_body: Optional[dict] = None, idempotency_key: Optional[str] = None) -> Any:
         headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/json"}
         if self.tenant_id:
             headers["X-Klyrow-Tenant-Id"] = self.tenant_id
+        if self.client_id:
+            headers["X-Klyrow-Client-Id"] = self.client_id
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
         body = None
@@ -77,6 +80,21 @@ class Klyrow:
 
     def create_webhook(self, url: str, events: list[str]) -> dict:
         return self.request("POST", "/v1/webhook-subscriptions", json_body={"url": url, "events": events})
+
+    def mail_readiness(self) -> dict:
+        return self.request("GET", "/v1/mail/readiness")
+
+    def role_addresses(self) -> dict:
+        return self.request("GET", "/v1/mail/role-addresses")
+
+    def inbound_messages(self, *, limit: int = 100, offset: int = 0) -> dict:
+        return self.request("GET", f"/v1/internal/email/inbound/messages?limit={limit}&offset={offset}")
+
+    def tracking_summary(self) -> dict:
+        return self.request("GET", "/v1/mail/tracking/summary")
+
+    def run_gmail_placement(self, seed_mailbox_id: str, message_id: str, rfc_message_id: str) -> dict:
+        return self.request("POST", "/v1/mail/placement-checks/run", json_body={"seed_mailbox_id": seed_mailbox_id, "message_id": message_id, "rfc_message_id": rfc_message_id})
 
 
 def verify_webhook(secret: str, timestamp: str, event_id: str, body: bytes, signature: str, *, now: Optional[int] = None, tolerance_seconds: int = 300) -> bool:

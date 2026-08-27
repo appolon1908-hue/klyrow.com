@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Prepare or apply the canonical role-address provisioning API request."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--api-url", default="https://api.klyrow.com")
+parser.add_argument("--token-file", required=True)
+parser.add_argument("--tenant-id", required=True)
+parser.add_argument("--domain", action="append", default=[])
+parser.add_argument("--destinations-file", required=True)
+parser.add_argument("--activate", action="store_true")
+parser.add_argument("--apply", action="store_true", help="POST the request; otherwise print a redacted plan")
+args = parser.parse_args()
+
+destinations = json.loads(Path(args.destinations_file).read_text(encoding="utf-8"))
+if not isinstance(destinations, dict):
+    raise SystemExit("destinations file must contain one JSON object")
+payload = {"tenant_id": args.tenant_id, "domains": args.domain, "destination_refs": destinations, "activate": args.activate}
+if not args.apply:
+    print(json.dumps({**payload, "destination_refs": sorted(destinations)}, indent=2))
+    raise SystemExit(0)
+token = Path(args.token_file).read_text(encoding="utf-8").strip()
+request = urllib.request.Request(
+    args.api_url.rstrip("/") + "/v1/admin/mail/role-addresses/provision",
+    data=json.dumps(payload).encode(),
+    headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(request, timeout=30) as response:
+        print(response.read().decode())
+except urllib.error.HTTPError as exc:
+    raise SystemExit(f"provisioning denied ({exc.code}): {exc.read().decode()}") from exc

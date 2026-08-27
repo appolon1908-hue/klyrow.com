@@ -16,6 +16,11 @@ groups:
         for: 10m
         labels: {severity: critical}
         annotations: {summary: "Klyrow provider events are not reaching Server A"}
+      - alert: KlyrowPostalMiddlewareDeliveryStalled
+        expr: sum(klyrow_postal_middleware_events{state=~"retry|dlq"}) > 0
+        for: 10m
+        labels: {severity: critical}
+        annotations: {summary: "Persisted Postal lifecycle events are not reaching middleware"}
       - alert: KlyrowUsageDeliveryStalled
         expr: klyrow_provider_usage_events{state=~"RETRY|DEAD_LETTER"} > 0
         for: 10m

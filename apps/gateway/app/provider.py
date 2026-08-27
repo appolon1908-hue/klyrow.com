@@ -308,6 +308,15 @@ class InboundFixtureIn(BaseModel):
     provider_spam_score: int = Field(default=0, ge=0, le=1000)
 
 
+class PostalInboundHttpIn(BaseModel):
+    id: str | int
+    rcpt_to: str = Field(min_length=3, max_length=320)
+    mail_from: str = Field(default="", max_length=320)
+    message: str = Field(min_length=4, max_length=35_000_000)
+    base64: bool
+    size: int = Field(ge=0, le=25_000_000)
+
+
 class SmtpCredentialIn(BaseModel):
     allowed_sender_ids: list[str] = Field(min_length=1, max_length=100)
     allowed_streams: list[str] = Field(default_factory=lambda: ["TRANSACTIONAL"], min_length=1, max_length=5)
@@ -359,6 +368,46 @@ def parse_inbound(raw: bytes, max_message_bytes: int, max_attachment_bytes: int)
         "cc": message.get("Cc"), "date": message.get("Date"), "in_reply_to": message.get("In-Reply-To"),
         "references": message.get("References"), "subject": message.get("Subject", ""), "text": text_body,
         "html": html_body, "attachments": attachments, "disposition": disposition}
+
+
+def persist_provider_inbound(*, s: Session, tenant_id: str, route: InboundRouteConfig,
+        provider_event_id: str, recipient: str, raw: bytes, provider_spam_score: int,
+        actor: str) -> dict:
+    existing = s.scalar(select(ProviderInbound).where(
+        ProviderInbound.tenant_id == tenant_id,
+        ProviderInbound.provider_event_id == provider_event_id,
+    ))
+    if existing:
+        return {"inbound_id": existing.id, "duplicate": True, "disposition": existing.disposition}
+    tenant_policy = policy_for(s, tenant_id)
+    parsed = parse_inbound(raw, tenant_policy.max_message_bytes, tenant_policy.max_attachment_bytes)
+    if provider_spam_score >= tenant_policy.spam_reject_score:
+        parsed["disposition"] = "REJECT"
+    elif provider_spam_score >= tenant_policy.spam_quarantine_score:
+        parsed["disposition"] = "QUARANTINE"
+    duplicate_message = None
+    if parsed["message_id"]:
+        duplicate_message = s.scalar(select(ProviderInbound).where(
+            ProviderInbound.tenant_id == tenant_id, ProviderInbound.route_id == route.id,
+            ProviderInbound.message_id_header == parsed["message_id"],
+        ))
+    if duplicate_message:
+        return {"inbound_id": duplicate_message.id, "duplicate": True, "disposition": duplicate_message.disposition}
+    item = ProviderInbound(id=str(uuid.uuid4()), tenant_id=tenant_id, provider_event_id=provider_event_id,
+        route_id=route.id, message_id_header=parsed["message_id"], sender=parsed["from"], recipient=recipient,
+        subject=parsed["subject"], text_body=parsed["text"], html_body=parsed["html"],
+        attachments_json=json.dumps(parsed["attachments"], separators=(",", ":"), sort_keys=True),
+        disposition=parsed["disposition"])
+    s.add(item)
+    event_id = str(uuid.uuid4())
+    s.add(ProviderEvent(id=event_id, tenant_id=tenant_id, message_id=item.id, kind="inbound.received",
+        payload_json=json.dumps({"event_id": event_id, "event": "inbound.received", "tenant_id": tenant_id,
+            "inbound_id": item.id, "route_id": route.id, "destination_kind": route.destination_kind,
+            "destination_ref": route.destination_ref, "disposition": item.disposition}, separators=(",", ":"), sort_keys=True)))
+    audit_provider(s, {"tenant": tenant_id, "sub": actor}, "inbound.received", item.disposition, resource_id=item.id)
+    s.commit()
+    return {"inbound_id": item.id, "duplicate": False, "disposition": item.disposition,
+        "route_id": route.id, "attachments": parsed["attachments"]}
 
 
 def smtp_authorize(s: Session, payload: SmtpPreflightIn, tenant_id: str) -> SmtpCredential:
@@ -698,11 +747,13 @@ async def provider_worker_loop():
     while True:
         try:
             from .main import DB
+            from .security_smtp_worker import process_one_live_message
             with DB() as s:
                 recover_expired_leases(s)
                 for _ in range(50):
                     if not process_one_sandbox(s):
                         break
+            await process_one_live_message()
             await dispatch_provider_outbox()
         except Exception as exc:
             print(json.dumps({"level": "error", "system": "klyrow-mail-worker", "event": "worker_tick_failed",
@@ -1015,45 +1066,92 @@ def inbound_receive(payload: InboundFixtureIn, ctx=Depends(auth), s: Session = D
     ))
     if not route:
         raise HTTPException(404, "inbound_recipient_not_configured")
-    existing = s.scalar(select(ProviderInbound).where(
-        ProviderInbound.tenant_id == ctx["tenant"],
-        ProviderInbound.provider_event_id == payload.provider_event_id,
-    ))
-    if existing:
-        return {"inbound_id": existing.id, "duplicate": True, "disposition": existing.disposition}
     try:
         raw = base64.b64decode(payload.raw_message_b64, validate=True)
     except ValueError as exc:
         raise HTTPException(422, "invalid_mime_encoding") from exc
-    tenant_policy = policy_for(s, ctx["tenant"])
-    parsed = parse_inbound(raw, tenant_policy.max_message_bytes, tenant_policy.max_attachment_bytes)
-    if payload.provider_spam_score >= tenant_policy.spam_reject_score:
-        parsed["disposition"] = "REJECT"
-    elif payload.provider_spam_score >= tenant_policy.spam_quarantine_score:
-        parsed["disposition"] = "QUARANTINE"
-    duplicate_message = None
-    if parsed["message_id"]:
-        duplicate_message = s.scalar(select(ProviderInbound).where(
-            ProviderInbound.tenant_id == ctx["tenant"], ProviderInbound.route_id == route.id,
-            ProviderInbound.message_id_header == parsed["message_id"],
-        ))
-    if duplicate_message:
-        return {"inbound_id": duplicate_message.id, "duplicate": True, "disposition": duplicate_message.disposition}
-    item = ProviderInbound(id=str(uuid.uuid4()), tenant_id=ctx["tenant"], provider_event_id=payload.provider_event_id,
-        route_id=route.id, message_id_header=parsed["message_id"], sender=parsed["from"], recipient=recipient,
-        subject=parsed["subject"], text_body=parsed["text"], html_body=parsed["html"],
-        attachments_json=json.dumps(parsed["attachments"], separators=(",", ":"), sort_keys=True),
-        disposition=parsed["disposition"])
-    s.add(item)
-    event_id = str(uuid.uuid4())
-    s.add(ProviderEvent(id=event_id, tenant_id=ctx["tenant"], message_id=item.id, kind="inbound.received",
-        payload_json=json.dumps({"event_id": event_id, "event": "inbound.received", "tenant_id": ctx["tenant"],
-            "inbound_id": item.id, "route_id": route.id, "destination_kind": route.destination_kind,
-            "destination_ref": route.destination_ref, "disposition": item.disposition}, separators=(",", ":"), sort_keys=True)))
-    audit_provider(s, ctx, "inbound.received", item.disposition, resource_id=item.id)
-    s.commit()
-    return {"inbound_id": item.id, "duplicate": False, "disposition": item.disposition,
-        "route_id": route.id, "attachments": parsed["attachments"]}
+    return persist_provider_inbound(s=s, tenant_id=ctx["tenant"], route=route,
+        provider_event_id=payload.provider_event_id, recipient=recipient, raw=raw,
+        provider_spam_score=payload.provider_spam_score, actor=ctx["sub"])
+
+
+@status_router.post("/v1/webhooks/postal-inbound", status_code=202)
+async def postal_inbound_http(request: Request, x_postal_signature_256: str = Header(default=""),
+        s: Session = Depends(db)):
+    """Receive Postal's signed RawMessage/BodyAsJSON HTTP endpoint format."""
+    body = await request.body()
+    from .main import verify_postal_signature
+    matched_transport = verify_postal_signature(body, x_postal_signature_256)
+    try:
+        payload = PostalInboundHttpIn.model_validate_json(body)
+    except Exception as exc:
+        raise HTTPException(422, "invalid_postal_inbound_payload") from exc
+    if payload.base64 is not True:
+        raise HTTPException(422, "postal_raw_message_base64_required")
+    try:
+        recipient = validate_email(payload.rcpt_to.strip().lower(), check_deliverability=False).normalized
+    except EmailNotValidError as exc:
+        raise HTTPException(422, "invalid_inbound_recipient") from exc
+    from .postal_transport import resolve_postal_transport
+    try:
+        expected_transport = resolve_postal_transport(recipient.rsplit("@", 1)[-1])
+    except RuntimeError:
+        expected_transport = matched_transport
+    if expected_transport.webhook_public_key_file != matched_transport.webhook_public_key_file:
+        raise HTTPException(401, "postal_transport_signature_mismatch")
+    routes = list(s.scalars(select(InboundRouteConfig).where(
+        InboundRouteConfig.address == recipient, InboundRouteConfig.verified == True,
+        InboundRouteConfig.enabled == True)).all())
+    if not routes:
+        raise HTTPException(404, "inbound_recipient_not_configured")
+    if len(routes) != 1:
+        raise HTTPException(409, "ambiguous_inbound_recipient")
+    try:
+        raw = base64.b64decode("".join(payload.message.split()), validate=True)
+    except ValueError as exc:
+        raise HTTPException(422, "invalid_mime_encoding") from exc
+    parsed_headers = BytesParser(policy=mime_policy.default).parsebytes(raw, headersonly=True)
+    try:
+        spam_score = max(0, min(1000, int(float(parsed_headers.get("X-Postal-Spam-Score", "0")))))
+    except (TypeError, ValueError):
+        spam_score = 0
+    route = routes[0]
+    return persist_provider_inbound(s=s, tenant_id=route.tenant_id, route=route,
+        provider_event_id="postal-inbound:" + str(payload.id), recipient=recipient, raw=raw,
+        provider_spam_score=spam_score, actor="provider:postal-http-endpoint")
+
+
+def inbound_json(item: ProviderInbound, include_content: bool = False) -> dict:
+    result = {"inbound_id": item.id, "provider_event_id": item.provider_event_id,
+        "route_id": item.route_id, "message_id": item.message_id_header, "sender": item.sender,
+        "recipient": item.recipient, "subject": item.subject, "disposition": item.disposition,
+        "attachments": json.loads(item.attachments_json), "created_at": item.created_at}
+    if include_content:
+        result.update({"text": item.text_body, "html": item.html_body})
+    return result
+
+
+@router.get("/inbound/messages")
+def inbound_message_list(disposition: Optional[str] = None, recipient: Optional[str] = None,
+        limit: int = 100, offset: int = 0, ctx=Depends(auth), s: Session = Depends(db)):
+    if disposition and disposition not in {"ACCEPT", "QUARANTINE", "REJECT"}:
+        raise HTTPException(422, "invalid_inbound_disposition")
+    query = select(ProviderInbound).where(ProviderInbound.tenant_id == ctx["tenant"])
+    if disposition:
+        query = query.where(ProviderInbound.disposition == disposition)
+    if recipient:
+        query = query.where(ProviderInbound.recipient == recipient.lower())
+    rows = s.scalars(query.order_by(ProviderInbound.created_at.desc()).offset(max(0, offset)).limit(max(1, min(limit, 200)))).all()
+    return {"items": [inbound_json(item) for item in rows], "limit": max(1, min(limit, 200)), "offset": max(0, offset)}
+
+
+@router.get("/inbound/messages/{inbound_id}")
+def inbound_message_get(inbound_id: str, ctx=Depends(auth), s: Session = Depends(db)):
+    item = s.scalar(select(ProviderInbound).where(ProviderInbound.id == inbound_id,
+        ProviderInbound.tenant_id == ctx["tenant"]))
+    if not item:
+        raise HTTPException(404, "inbound_message_not_found")
+    return inbound_json(item, include_content=True)
 
 
 @router.post("/messages/{message_id}/tracking/{kind}", status_code=201)
@@ -1102,7 +1200,10 @@ def consume_tracking_token(kind: str, token: str, s: Session = Depends(db)):
 def operations_health(ctx=Depends(auth), s: Session = Depends(db)):
     queued = s.scalar(select(func.count(ProviderMessage.id)).where(ProviderMessage.status == "QUEUED")) or 0
     dead = s.scalar(select(func.count(ProviderMessage.id)).where(ProviderMessage.status == "DEAD_LETTER")) or 0
-    return {"status": "ok", "queue_depth": queued, "dead_letter": dead, "safe_mode": True, "live_delivery": False}
+    live_delivery = os.getenv("KLYROW_PROVIDER_LIVE_DELIVERY_ENABLED", "false").lower() == "true"
+    return {"status": "ok" if dead == 0 else "degraded", "queue_depth": queued,
+        "dead_letter": dead, "safe_mode": not live_delivery, "live_delivery": live_delivery,
+        "transport_registry_configured": bool(os.getenv("KLYROW_POSTAL_TRANSPORTS_FILE"))}
 
 
 @router.post("/operations/messages/{message_id}/retry")

@@ -1,9 +1,8 @@
-"""Dedicated Postal delivery worker for Keycloak SECURITY SMTP messages.
+"""Postal delivery worker for governed, non-sandbox provider messages.
 
-The worker is inert unless the two Klyrow security-mail gates are enabled.  It
-claims only non-sandbox ``SECURITY`` messages, uses the existing Postal server
-API credential, preserves the SMTP idempotency identity, and records only
-privacy-safe operational evidence.
+SECURITY mail retains its dedicated gates. Other streams require the separate
+provider live-delivery gate. Transport selection is sender-domain aware, so a
+domain hosted on a second Postal server never receives the default credential.
 """
 
 from __future__ import annotations
@@ -17,14 +16,14 @@ from datetime import timedelta
 from email import policy
 from email.message import Message
 from email.parser import BytesParser
-from pathlib import Path
 from typing import Any
 
 import httpx
 from sqlalchemy import select
 
 from .main import DB
-from .provider import ProviderAudit, ProviderEvent, ProviderMessage, now
+from .postal_transport import postal_headers, resolve_postal_transport
+from .provider import ProviderAudit, ProviderEvent, ProviderMessage, TenantMailPolicy, now
 from .smtp_policy import security_live_delivery_enabled
 
 MAX_ATTEMPTS = 5
@@ -62,33 +61,61 @@ def parse_postal_body(raw: bytes) -> tuple[str, str]:
 
 
 def postal_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Convert either governed SMTP MIME or structured API JSON for Postal."""
+
     encoded = snapshot["payload"].get("raw_b64")
-    if not isinstance(encoded, str) or not encoded:
-        raise ValueError("security SMTP payload is missing raw MIME data")
-    raw = base64.b64decode(encoded, validate=True)
-    plain_body, html_body = parse_postal_body(raw)
+    if isinstance(encoded, str) and encoded:
+        raw = base64.b64decode(encoded, validate=True)
+        plain_body, html_body = parse_postal_body(raw)
+    else:
+        plain_body = snapshot["payload"].get("text") or ""
+        html_body = snapshot["payload"].get("html") or ""
     if not plain_body and not html_body:
-        raise ValueError("security SMTP message has no deliverable text body")
+        raise ValueError("provider message has no deliverable text body")
     payload: dict[str, Any] = {
         "to": [snapshot["recipient"]],
         "from": snapshot["sender"],
         "subject": snapshot["subject"],
         "tag": snapshot["correlation_id"],
-        "stream": "security",
+        "stream": snapshot["stream"].lower(),
     }
     if plain_body:
         payload["plain_body"] = plain_body
     if html_body:
         payload["html_body"] = html_body
+    reply_to = snapshot["payload"].get("reply_to")
+    message_domain = snapshot["sender"].rsplit("@", 1)[-1]
+    payload["headers"] = {
+        "Message-ID": f'<{snapshot["id"]}@{message_domain}>',
+        "X-Klyrow-Message-Id": snapshot["id"],
+        "X-Klyrow-Correlation-Id": snapshot["correlation_id"],
+    }
+    if reply_to:
+        payload["headers"]["Reply-To"] = reply_to
+    tracking_mode = snapshot.get("tracking_mode", "DISABLED")
+    payload["track_opens"] = tracking_mode in {"OPEN", "OPEN_CLICK"}
+    payload["track_clicks"] = tracking_mode in {"CLICK", "OPEN_CLICK"}
     return payload
 
 
+def enabled_live_streams() -> frozenset[str]:
+    streams: set[str] = set()
+    if os.getenv("KLYROW_PROVIDER_LIVE_DELIVERY_ENABLED", "false").lower() == "true":
+        streams.update({"TRANSACTIONAL", "SYSTEM", "MARKETING", "BULK"})
+    if security_live_delivery_enabled():
+        streams.add("SECURITY")
+    return frozenset(streams)
+
+
 def _claim_one() -> dict[str, Any] | None:
+    streams = enabled_live_streams()
+    if not streams:
+        return None
     with DB() as session:
         item = session.scalar(
             select(ProviderMessage)
             .where(
-                ProviderMessage.stream == "SECURITY",
+                ProviderMessage.stream.in_(streams),
                 ProviderMessage.sandbox.is_(False),
                 ProviderMessage.status.in_(["QUEUED", "DEFERRED"]),
                 ProviderMessage.available_at <= now(),
@@ -104,29 +131,22 @@ def _claim_one() -> dict[str, Any] | None:
         item.attempts += 1
         item.lease_expires_at = now() + timedelta(seconds=LEASE_SECONDS)
         item.updated_at = now()
+        tenant_policy = session.get(TenantMailPolicy, item.tenant_id)
         snapshot = {
             "id": item.id,
             "tenant_id": item.tenant_id,
             "sender": item.sender,
             "recipient": item.recipient,
             "subject": item.subject,
+            "stream": item.stream,
             "correlation_id": item.correlation_id,
             "idempotency_key": item.idempotency_key,
             "attempts": item.attempts,
+            "tracking_mode": tenant_policy.tracking_mode if tenant_policy else "DISABLED",
             "payload": json.loads(item.payload_json),
         }
         session.commit()
         return snapshot
-
-
-def _postal_key() -> str:
-    key_file = os.getenv("KLYROW_POSTAL_API_KEY_FILE", "").strip()
-    if not key_file:
-        raise RuntimeError("Postal credential path is not configured")
-    key = Path(key_file).read_text(encoding="utf-8").strip()
-    if not key:
-        raise RuntimeError("Postal credential is unavailable")
-    return key
 
 
 def _mark_submitted(snapshot: dict[str, Any], provider_message_id: str) -> None:
@@ -155,7 +175,7 @@ def _mark_submitted(snapshot: dict[str, Any], provider_message_id: str) -> None:
                         "correlation_id": item.correlation_id,
                         "event": "message.submitted",
                         "provider": "postal",
-                        "stream": "SECURITY",
+                        "stream": item.stream,
                     },
                     separators=(",", ":"),
                     sort_keys=True,
@@ -166,8 +186,8 @@ def _mark_submitted(snapshot: dict[str, Any], provider_message_id: str) -> None:
             ProviderAudit(
                 id=str(uuid.uuid4()),
                 tenant_id=item.tenant_id,
-                actor="worker:klyrow-security-smtp",
-                action="smtp.security.message.submitted",
+                actor="worker:klyrow-provider-delivery",
+                action="provider.message.submitted",
                 outcome="accepted",
                 correlation_id=item.correlation_id,
                 resource_id=item.id,
@@ -193,8 +213,8 @@ def _mark_failed(snapshot: dict[str, Any], error_name: str) -> None:
             ProviderAudit(
                 id=str(uuid.uuid4()),
                 tenant_id=item.tenant_id,
-                actor="worker:klyrow-security-smtp",
-                action="smtp.security.message.delivery_failed",
+                actor="worker:klyrow-provider-delivery",
+                action="provider.message.delivery_failed",
                 outcome="dead_letter" if exhausted else "retry",
                 correlation_id=item.correlation_id,
                 resource_id=item.id,
@@ -203,30 +223,22 @@ def _mark_failed(snapshot: dict[str, Any], error_name: str) -> None:
         session.commit()
 
 
-async def process_one_security_message() -> bool:
-    """Submit one eligible SECURITY message to Postal."""
+async def process_one_live_message() -> bool:
+    """Submit one eligible governed provider message to its Postal server."""
 
-    if not security_live_delivery_enabled():
-        return False
     snapshot = _claim_one()
     if snapshot is None:
         return False
     try:
-        base_url = os.environ["KLYROW_POSTAL_API_URL"].rstrip("/")
-        headers = {
-            "X-Server-API-Key": _postal_key(),
-            "Idempotency-Key": "klyrow-security:" + snapshot["id"],
-        }
-        postal_host = os.getenv("KLYROW_POSTAL_API_HOST_HEADER", "").strip()
-        if postal_host:
-            headers["Host"] = postal_host
+        transport = resolve_postal_transport(snapshot["sender"])
+        headers = postal_headers(transport, "klyrow-provider:" + snapshot["id"])
         async with httpx.AsyncClient(
             timeout=10,
             trust_env=False,
             follow_redirects=False,
         ) as client:
             response = await client.post(
-                base_url + "/api/v1/send/message",
+                transport.api_url + "/api/v1/send/message",
                 headers=headers,
                 json=postal_payload(snapshot),
             )
@@ -243,7 +255,7 @@ async def process_one_security_message() -> bool:
             json.dumps(
                 {
                     "level": "warning",
-                    "system": "klyrow-security-smtp",
+                    "system": "klyrow-provider-delivery",
                     "event": "postal_submission_failed",
                     "message_id": snapshot["id"],
                     "correlation_id": snapshot["correlation_id"],
@@ -256,16 +268,22 @@ async def process_one_security_message() -> bool:
         return False
 
 
+async def process_one_security_message() -> bool:
+    """Backward-compatible worker entry point retained for existing services."""
+
+    return await process_one_live_message()
+
+
 async def security_smtp_delivery_loop() -> None:
     while True:
         try:
-            processed = await process_one_security_message()
+            processed = await process_one_live_message()
         except Exception as exc:  # noqa: BLE001 - keep the worker alive
             print(
                 json.dumps(
                     {
                         "level": "error",
-                        "system": "klyrow-security-smtp",
+                        "system": "klyrow-provider-delivery",
                         "event": "worker_tick_failed",
                         "error": type(exc).__name__,
                     },

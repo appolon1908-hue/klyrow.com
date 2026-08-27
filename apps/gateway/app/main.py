@@ -39,6 +39,7 @@ MAIL=Counter("klyrow_mail_total","Mail lifecycle",["event"])
 LATENCY=Histogram("klyrow_http_request_duration_seconds","Request latency",["path"])
 PROVIDER_QUEUE=Gauge("klyrow_provider_queue_messages","Provider messages by status",["status"])
 PROVIDER_EVENTS=Gauge("klyrow_provider_events","Provider events by state",["state"])
+POSTAL_MIDDLEWARE_EVENTS=Gauge("klyrow_postal_middleware_events","Postal lifecycle events by middleware delivery state",["state"])
 PROVIDER_USAGE=Gauge("klyrow_provider_usage_events","Provider usage events by state",["state"])
 OUTBOX_OLDEST=Gauge("klyrow_email_outbox_oldest_seconds","Age of oldest active email outbox item")
 INTEGRATION_QUEUE=Gauge("klyrow_integration_outbox_items","Integration outbox items",["target","state"])
@@ -112,12 +113,71 @@ def auth_rate(request:Request,action:str):
     limit=int(os.getenv("KLYROW_AUTH_RATE_PER_MINUTE","10"))
     if len(bucket)>=limit:raise HTTPException(429,"rate_limit_exceeded")
     bucket.append(now)
-def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id:Optional[str]=Header(default=None),s:Session=Depends(db)):
+
+def credential_scope_for(request:Request)->Optional[str]:
+    path=request.url.path;read=request.method in {"GET","HEAD","OPTIONS"}
+    if path.startswith("/v1/mail/placement-checks") and not read:return "mail.read"
+    if path.startswith("/v1/mail/") and read:return "mail.read"
+    if path in {"/v1/messages","/v1/email/send","/v1/internal/email/send"} or path.endswith("/preflight"):return "mail.read" if read else "mail.send"
+    if "/inbound/" in path or path.endswith("/inbound/messages") or path.endswith("/inbound/routes"):return "mail.read" if read else "webhook.manage"
+    if "/domains" in path:return "domain.read" if read else "domain.manage"
+    if "/senders" in path:return "mail.read" if read else "sender.manage"
+    if "/templates" in path:return "mail.read" if read else "template.manage"
+    if "/campaign" in path:return "mail.read" if read else "campaign.manage"
+    if "/webhook" in path:return "webhook.manage"
+    if "/analytics" in path:return "analytics.read"
+    if "/billing" in path:return "billing.read" if read else "billing.manage"
+    if read and ("/messages" in path or path.endswith("/reputation") or "/tracking/" in path):return "mail.read"
+    return None
+
+def _address_allowed(request:Request,encoded_allowlist:str)->bool:
+    try:entries=json.loads(encoded_allowlist)
+    except (TypeError,ValueError):return False
+    if not entries:return True
+    address=request.client.host if request.client else ""
+    try:candidate=ipaddress.ip_address(address)
+    except ValueError:return False
+    try:return any(candidate in ipaddress.ip_network(entry,strict=False) for entry in entries)
+    except ValueError:return False
+
+def local_machine_auth(request:Request,raw:str,client_id:str,s:Session)->Optional[dict]:
+    """Authenticate Klyrow-issued scoped credentials before external OIDC."""
+    from .tenancy import ScopedApiKey,ServiceAccount
+    required=credential_scope_for(request)
+    current=datetime.now(timezone.utc)
+    if raw.startswith("kly_live_"):
+        key=s.scalar(select(ScopedApiKey).where(ScopedApiKey.verifier_hash==sha(raw),ScopedApiKey.revoked_at==None))
+        if not key:raise HTTPException(401,"invalid_credentials")
+        expiry=key.expires_at.replace(tzinfo=timezone.utc) if key.expires_at and key.expires_at.tzinfo is None else key.expires_at
+        scopes=set(json.loads(key.scopes_json))
+        if expiry and expiry<=current:raise HTTPException(401,"invalid_credentials")
+        if not required or required not in scopes:raise HTTPException(403,"credential_scope_required")
+        if not _address_allowed(request,key.ip_allowlist_json):raise HTTPException(403,"credential_network_denied")
+        key.last_used_at=current;s.commit()
+        return {"sub":key.id,"tenant":key.tenant_id,"role":"tenant_service","service":True,"api_key":True,"scopes":scopes}
+    if raw.startswith("klys_"):
+        if not client_id:raise HTTPException(401,"service_client_id_required")
+        account=s.scalar(select(ServiceAccount).where(ServiceAccount.client_id==client_id,ServiceAccount.revoked_at==None))
+        if not account:raise HTTPException(401,"invalid_credentials")
+        try:ph.verify(account.secret_hash,raw)
+        except Exception:raise HTTPException(401,"invalid_credentials")
+        expiry=account.expires_at.replace(tzinfo=timezone.utc) if account.expires_at and account.expires_at.tzinfo is None else account.expires_at
+        scopes=set(json.loads(account.scopes_json))
+        if expiry and expiry<=current:raise HTTPException(401,"invalid_credentials")
+        if not required or required not in scopes:raise HTTPException(403,"credential_scope_required")
+        return {"sub":account.id,"tenant":account.tenant_id,"role":"tenant_service","service":True,"service_account":True,"scopes":scopes}
+    return None
+
+def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id:Optional[str]=Header(default=None),x_klyrow_client_id:str=Header(default=""),s:Session=Depends(db)):
     if not authorization.startswith("Bearer "): raise HTTPException(401,"authentication_required")
     raw=authorization[7:]
     try:
+        ctx=local_machine_auth(request,raw,x_klyrow_client_id,s)
         resolver=os.getenv("KLYROW_TENANT_RESOLVER_URL","").strip()
-        if resolver:
+        if ctx is not None:
+            tenant=s.get(Tenant,ctx["tenant"])
+            if not tenant or not tenant.enabled:raise HTTPException(403,"account_suspended")
+        elif resolver:
             if any(name.lower() in {"x-codestra-tenant-id","x-codestra-identity-id","x-codestra-tenant","x-codestra-subject"} for name in request.headers):raise HTTPException(403,"not_found")
             permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send" if request.method not in {"GET","HEAD","OPTIONS"} else "klyrow.read"
             headers={"Authorization":"Bearer "+raw,"X-Codestra-Required-Permission":permission}
@@ -383,16 +443,24 @@ def persist_email_event(s:Session, *, event_id:str, tenant_id:str, message_id:st
     return canonical_status
 
 def verify_postal_signature(body:bytes,signature:str):
-    key_path=os.getenv("KLYROW_POSTAL_WEBHOOK_PUBLIC_KEY","")
-    if not key_path or not signature:raise HTTPException(401,"postal_signature_required")
+    if not signature:raise HTTPException(401,"postal_signature_required")
     try:
-        public_key=serialization.load_pem_public_key(Path(key_path).read_bytes())
-        public_key.verify(base64.b64decode(signature,validate=True),body,padding.PKCS1v15(),hashes.SHA256())
-    except (OSError,ValueError,TypeError,InvalidSignature):raise HTTPException(401,"invalid_postal_signature")
+        decoded=base64.b64decode(signature,validate=True)
+        from .postal_transport import authorized_postal_transports
+        transports=authorized_postal_transports()
+    except (RuntimeError,ValueError,TypeError):raise HTTPException(401,"invalid_postal_signature")
+    for transport in transports:
+        if not transport.webhook_public_key_file:continue
+        try:
+            public_key=serialization.load_pem_public_key(transport.webhook_public_key_file.read_bytes())
+            public_key.verify(decoded,body,padding.PKCS1v15(),hashes.SHA256())
+            return transport
+        except (OSError,ValueError,TypeError,InvalidSignature):continue
+    raise HTTPException(401,"invalid_postal_signature")
 
 @app.post("/v1/webhooks/postal-native",status_code=202)
 async def postal_native_hook(request:Request,x_postal_signature_256:str=Header(default=""),s:Session=Depends(db)):
-    body=await request.body(); verify_postal_signature(body,x_postal_signature_256)
+    body=await request.body(); matched_transport=verify_postal_signature(body,x_postal_signature_256)
     try: raw=json.loads(body)
     except ValueError:raise HTTPException(400,"invalid_json")
     event_id=str(raw.get("uuid") or "")
@@ -405,7 +473,13 @@ async def postal_native_hook(request:Request,x_postal_signature_256:str=Header(d
     event_name=str(raw.get("event") or ""); canonical=POSTAL_EVENTS.get(event_name)
     if not canonical:raise HTTPException(422,"unsupported_postal_event")
     payload=raw.get("payload") or {}; message=payload.get("message") or payload.get("original_message") or {}
-    tenant=os.getenv("KLYROW_POSTAL_TENANT_ID","")
+    sender_domain=str(message.get("from") or "").lower().rsplit("@",1)[-1]
+    if sender_domain:
+        from .postal_transport import resolve_postal_transport
+        try:expected_transport=resolve_postal_transport(sender_domain)
+        except RuntimeError:expected_transport=matched_transport
+        if expected_transport.webhook_public_key_file!=matched_transport.webhook_public_key_file:raise HTTPException(401,"postal_transport_signature_mismatch")
+    tenant=matched_transport.tenant_id or os.getenv("KLYROW_POSTAL_TENANT_ID","")
     if not tenant:raise HTTPException(503,"postal_tenant_not_configured")
     message_id=str(message.get("id") or message.get("message_id") or "")
     correlation=str(payload.get("correlation_id") or message.get("tag") or message.get("message_id") or event_id)
@@ -413,18 +487,19 @@ async def postal_native_hook(request:Request,x_postal_signature_256:str=Header(d
     canonical_status=TERMINAL_MESSAGE_STATUSES.get(canonical,canonical.rsplit(".",1)[-1])
     normalized={"event":canonical,"event_id":event_id,"event_version":"1.0","tenant_id":tenant,"message_id":message_id,"provider_message_id":str(message.get("message_id") or message_id),"stream":"transactional","correlation_id":correlation,"causation_id":correlation,"recipient_reference":"sha256:"+hashlib.sha256(recipient.lower().encode()).hexdigest(),"recipient":recipient,"sender":message.get("from"),"provider":"postal","status":payload.get("status") or canonical.rsplit(".",1)[-1],"canonical_status":canonical_status,"occurred_at":datetime.fromtimestamp(event_timestamp,timezone.utc).isoformat(),"attempt":1,"metadata":{"provider_event":event_name,"provider_message_token":message.get("token")}}
     item=s.get(PostalEvent,event_id)
-    if item and item.state=="delivered":return {"accepted":True,"duplicate":True}
+    if item:return {"accepted":True,"duplicate":True,"middleware_delivery":item.state}
     if not item:
-        item=PostalEvent(id=event_id,event_type=canonical,correlation_id=correlation,message_id=message_id,tenant_id=tenant,payload=json.dumps(normalized,separators=(",",":"),sort_keys=True)); s.add(item)
-    item.attempts=(item.attempts or 0)+1; item.updated_at=datetime.now(timezone.utc); s.commit()
+        item=PostalEvent(id=event_id,event_type=canonical,correlation_id=correlation,message_id=message_id,tenant_id=tenant,payload=json.dumps(normalized,separators=(",",":"),sort_keys=True),state="retry",attempts=0); s.add(item)
+    item.updated_at=datetime.now(timezone.utc); s.commit()
     canonical_status=persist_email_event(s,event_id=event_id,tenant_id=tenant,message_id=message_id,correlation_id=correlation,event_type=canonical,recipient=normalized.get("recipient"),raw_status=normalized.get("status"),payload=item.payload)
     item=s.get(PostalEvent,event_id);item.payload=json.dumps(normalized,separators=(",",":"),sort_keys=True);s.commit()
     delivered=await emit_middleware("klyrow."+canonical,{**normalized,"customer_id":tenant})
     item=s.get(PostalEvent,event_id)
+    item.attempts=(item.attempts or 0)+1;item.updated_at=datetime.now(timezone.utc)
     if delivered:
         item.state="delivered"; item.last_error=None; s.commit(); MAIL.labels(canonical.rsplit(".",1)[-1]).inc(); return {"accepted":True}
     item.state="dlq" if item.attempts>=5 else "retry"; item.last_error="middleware_delivery_failed"; s.commit()
-    raise HTTPException(503,"middleware_delivery_pending")
+    return {"accepted":True,"duplicate":False,"middleware_delivery":item.state}
 
 @app.on_event("startup")
 def startup():
@@ -499,14 +574,10 @@ async def email_outbox_loop():
                 if first_attempt:
                     if gate:gate.claimed_deliveries+=1;gate.updated_at=current
                 item.state="sending";item.attempts+=1;item.next_attempt_at=None;item.updated_at=current;snapshot=(item.id,item.message_id,item.payload);s.commit()
-            key_file=os.getenv("KLYROW_POSTAL_API_KEY_FILE","")
-            key=Path(key_file).read_text(encoding="utf-8").strip() if key_file else ""
-            if not key:raise RuntimeError("postal credential unavailable")
-            headers={"X-Server-API-Key":key,"Idempotency-Key":"klyrow:"+snapshot[1]}
-            postal_host=os.getenv("KLYROW_POSTAL_API_HOST_HEADER","").strip()
-            if postal_host:headers["Host"]=postal_host
+            from .postal_transport import postal_headers,resolve_postal_transport
+            delivery_payload=json.loads(snapshot[2]);transport=resolve_postal_transport(str(delivery_payload.get("from") or ""));headers=postal_headers(transport,"klyrow:"+snapshot[1])
             async with httpx.AsyncClient(timeout=10,trust_env=False,follow_redirects=False) as client:
-                response=await client.post(os.environ["KLYROW_POSTAL_API_URL"]+"/api/v1/send/message",headers=headers,json=json.loads(snapshot[2]));response.raise_for_status();provider_id=str(response.json().get("data",{}).get("message_id") or snapshot[1])
+                response=await client.post(transport.api_url+"/api/v1/send/message",headers=headers,json=delivery_payload);response.raise_for_status();provider_id=str(response.json().get("data",{}).get("message_id") or snapshot[1])
             with DB() as s:
                 item=s.get(EmailOutbox,snapshot[0]);message=s.get(Message,snapshot[1])
                 if item:item.state="delivered";item.provider_message_id=provider_id;item.last_error=None;item.updated_at=datetime.now(timezone.utc)
@@ -571,6 +642,8 @@ def metrics(authorization:str=Header(default="")):
         for state in ("PENDING","RETRY","DELIVERED","DEAD_LETTER"):
             PROVIDER_EVENTS.labels(state).set(s.scalar(select(func.count()).select_from(ProviderEvent).where(ProviderEvent.state==state)) or 0)
             PROVIDER_USAGE.labels(state).set(s.scalar(select(func.count()).select_from(ProviderUsageEvent).where(ProviderUsageEvent.state==state)) or 0)
+        for state in ("pending","retry","delivered","dlq"):
+            POSTAL_MIDDLEWARE_EVENTS.labels(state).set(s.scalar(select(func.count()).select_from(PostalEvent).where(PostalEvent.state==state)) or 0)
         active=s.scalars(select(EmailOutbox).where(EmailOutbox.state.in_(("pending","sending","retry")))).all()
         ages=[]
         for item in active:
@@ -698,7 +771,7 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
     if count>=tenant.quota: raise HTTPException(429,"daily_quota_exceeded")
     mid=str(uuid.uuid4()); status="accepted_test" if SAFE_MODE else "queued"
     result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=x.to.lower(),sender=x.sender.lower(),subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload=json.dumps({"stream":x.stream}))); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageLedger(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind="message."+x.stream,quantity=1,reference=mid))
-    if not SAFE_MODE:s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,payload=json.dumps({"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text,"campaign_id":x.campaign_id,"stream":x.stream},separators=(",",":"),sort_keys=True)))
+    if not SAFE_MODE:s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,payload=json.dumps({"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text,"campaign_id":x.campaign_id,"stream":x.stream,"track_opens":bool(x.tracking.get("opens")),"track_clicks":bool(x.tracking.get("clicks")),"headers":{"Message-ID":f"<{mid}@{domain}>","X-Klyrow-Message-Id":mid}},separators=(",",":"),sort_keys=True)))
     s.commit(); MAIL.labels("queued").inc(); await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{"stream":x.stream}}); return result
 
 @app.post("/v1/email/bulk",status_code=202)
@@ -742,10 +815,10 @@ async def postal_hook(request:Request,x_klyrow_timestamp:str=Header(),x_klyrow_e
     delivery=s.get(PostalEvent,x_klyrow_event_id)
     if not delivery:
         delivery=PostalEvent(id=x_klyrow_event_id,event_type=local_type,correlation_id=correlation,message_id=mid,tenant_id=tenant,payload=json.dumps(normalized,separators=(",",":"),sort_keys=True),state="pending",attempts=0);s.add(delivery)
-    delivery.attempts=(delivery.attempts or 0)+1;delivery.updated_at=datetime.now(timezone.utc);s.commit()
+    delivery.state="retry";delivery.updated_at=datetime.now(timezone.utc);s.commit()
     if await emit_middleware(event_type,normalized):
-        delivery=s.get(PostalEvent,x_klyrow_event_id);delivery.state="delivered";delivery.last_error=None;s.commit();return {"accepted":True,"duplicate":False}
-    delivery=s.get(PostalEvent,x_klyrow_event_id);delivery.state="dlq" if delivery.attempts>=5 else "retry";delivery.last_error="middleware_delivery_failed";s.commit();raise HTTPException(503,"middleware_delivery_pending")
+        delivery=s.get(PostalEvent,x_klyrow_event_id);delivery.attempts=(delivery.attempts or 0)+1;delivery.state="delivered";delivery.last_error=None;delivery.updated_at=datetime.now(timezone.utc);s.commit();return {"accepted":True,"duplicate":False}
+    delivery=s.get(PostalEvent,x_klyrow_event_id);delivery.attempts=(delivery.attempts or 0)+1;delivery.state="dlq" if delivery.attempts>=5 else "retry";delivery.last_error="middleware_delivery_failed";delivery.updated_at=datetime.now(timezone.utc);s.commit();return {"accepted":True,"duplicate":False,"middleware_delivery":delivery.state}
 
 @app.get("/v1/contacts")
 def contacts(ctx=Depends(auth),s:Session=Depends(db)): return s.scalars(select(Contact).where(Contact.tenant_id==ctx["tenant"])).all()
@@ -822,6 +895,8 @@ app.include_router(preferences_router)
 from .provider import provider_worker_loop, reconcile_legacy_registry, router as provider_router, status_router as provider_status_router
 app.include_router(provider_router)
 app.include_router(provider_status_router)
+from .mail_operations import router as mail_operations_router
+app.include_router(mail_operations_router)
 
 @app.on_event("startup")
 def reconcile_provider_registry_on_startup():

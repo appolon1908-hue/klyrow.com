@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "addresses": [
+    {"local_part": "contact", "alias_of": null, "destination_kind": "odoo_crm"},
+    {"local_part": "info", "alias_of": "contact", "destination_kind": "odoo_crm"},
+    {"local_part": "support", "alias_of": null, "destination_kind": "odoo_helpdesk"},
+    {"local_part": "help", "alias_of": "support", "destination_kind": "odoo_helpdesk"},
+    {"local_part": "sales", "alias_of": null, "destination_kind": "odoo_crm"},
+    {"local_part": "privacy", "alias_of": null, "destination_kind": "odoo_privacy"},
+    {"local_part": "security", "alias_of": null, "destination_kind": "security_operations"},
+    {"local_part": "abuse", "alias_of": null, "destination_kind": "security_operations"},
+    {"local_part": "postmaster", "alias_of": null, "destination_kind": "mail_operations"},
+    {"local_part": "billing", "alias_of": null, "destination_kind": "odoo_accounting"},
+    {"local_part": "accounts", "alias_of": "billing", "destination_kind": "odoo_accounting"},
+    {"local_part": "legal", "alias_of": null, "destination_kind": "odoo_legal"},
+    {"local_part": "hr", "alias_of": null, "destination_kind": "odoo_hr"},
+    {"local_part": "careers", "alias_of": "hr", "destination_kind": "odoo_hr"},
+    {"local_part": "noreply", "alias_of": null, "destination_kind": "mail_operations"},
+    {"local_part": "webmaster", "alias_of": null, "destination_kind": "web_operations"}
+  ]
+}

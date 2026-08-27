@@ -7,7 +7,7 @@ export class KlyrowError extends Error {
 }
 
 export class Klyrow {
-  constructor(private token: string, private tenantId?: string, private baseUrl = "https://api.klyrow.com", private transport: Transport = fetch) {
+  constructor(private token: string, private tenantId?: string, private baseUrl = "https://api.klyrow.com", private transport: Transport = fetch, private clientId?: string) {
     if (!token) throw new Error("token is required");
     this.baseUrl = baseUrl.replace(/\/$/, "");
   }
@@ -15,6 +15,7 @@ export class Klyrow {
   async request<T>(method: string, path: string, body?: unknown, idempotencyKey?: string): Promise<T> {
     const headers: Record<string, string> = { Authorization: `Bearer ${this.token}`, Accept: "application/json" };
     if (this.tenantId) headers["X-Klyrow-Tenant-Id"] = this.tenantId;
+    if (this.clientId) headers["X-Klyrow-Client-Id"] = this.clientId;
     if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const response = await this.transport(this.baseUrl + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -31,6 +32,13 @@ export class Klyrow {
   message(messageId: string) { return this.request("GET", `/v1/messages/${encodeURIComponent(messageId)}`); }
   messages(limit = 50, cursor?: string) { return this.request("GET", `/v1/messages?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`); }
   createWebhook(url: string, events: string[]) { return this.request("POST", "/v1/webhook-subscriptions", { url, events }); }
+  mailReadiness() { return this.request("GET", "/v1/mail/readiness"); }
+  roleAddresses() { return this.request("GET", "/v1/mail/role-addresses"); }
+  inboundMessages(limit = 100, offset = 0) { return this.request("GET", `/v1/internal/email/inbound/messages?limit=${limit}&offset=${offset}`); }
+  trackingSummary() { return this.request("GET", "/v1/mail/tracking/summary"); }
+  runGmailPlacement(seedMailboxId: string, messageId: string, rfcMessageId: string) {
+    return this.request("POST", "/v1/mail/placement-checks/run", { seed_mailbox_id: seedMailboxId, message_id: messageId, rfc_message_id: rfcMessageId });
+  }
 }
 
 export async function verifyWebhook(secret: string, timestamp: string, eventId: string, body: Uint8Array, signature: string, now = Math.floor(Date.now() / 1000), toleranceSeconds = 300): Promise<boolean> {

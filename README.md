@@ -31,3 +31,5 @@ Public traffic is terminated by the existing host Nginx. The gateway, Mautic and
 See [deployment report](DEPLOYMENT_REPORT.md), [architecture](docs/ARCHITECTURE.md), and [operations](docs/OPERATIONS.md).
 
 Production sending is intentionally launch-gated. See [DNS and deliverability](docs/DNS_AND_DELIVERABILITY.md), [SMTP](docs/SMTP.md), and [middleware integration](docs/MIDDLEWARE_INTEGRATION.md).
+
+The production mail remediation and its complete page/API map are documented in [remediation 1–10](docs/MAIL_REMEDIATION_1_10.md) and [API/webhooks](docs/API.md). Use `GET /v1/admin/mail/readiness` as the canonical launch status rather than interpreting individual database flags.

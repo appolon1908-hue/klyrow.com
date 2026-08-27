@@ -24,18 +24,13 @@ Do not publish an AAAA for `mail.klyrow.com` until IPv6 outbound routing and PTR
 
 ## CURRENT REVERSE-DNS STATUS
 
-Verified 2026-08-15 20:22 CEST. All three authoritative Hetzner
-reverse nameservers, Cloudflare, and Google return `mail.klyrow.com.` for
-`37.27.128.39`; both authoritative forward nameservers return
-`mail.klyrow.com A 37.27.128.39`. PTR and identity-matched FCrDNS now pass. The
-host-local certificate and STARTTLS work described in `POSTAL_SMTP.md` is
-complete. No result relies on `/etc/hosts`. Bulk delivery remains disabled
-pending an approved canary.
-
-During propagation, some Cloudflare and Google recursive edges intermittently
-returned the previous Hetzner hostname from cache. All authoritative reverse
-nameservers consistently return `mail.klyrow.com.`; recursive caches will
-converge when the prior 86400-second TTL expires.
+Reverse DNS is a live launch prerequisite, not a historical assertion. The
+2026-08-27 production audit observed the provider-generated hostname instead of
+`mail.klyrow.com` for `37.27.128.39`. Provider-domain activation now resolves
+PTR at request time and fails closed until the observed value exactly includes
+`KLYROW_EXPECTED_PTR`. Run `scripts/mail-readiness` and
+`GET /v1/admin/mail/readiness` after changing reverse DNS at the infrastructure
+provider. The repository cannot perform that external account mutation.
 
 ## First-canary authentication correction
 

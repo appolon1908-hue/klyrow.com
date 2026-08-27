@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "default": {
+    "api_url": "http://postal-web:5000",
+    "api_host": "app.klyrow.com",
+    "api_key_file": "/run/secrets/klyrow_postal_api_key",
+    "webhook_public_key_file": "/run/klyrow/postal-webhook-signing-public.pem"
+  },
+  "domains": {
+    "beyvra.com": {
+      "api_url": "http://postal-beyvra-web:5000",
+      "api_host": "postal.beyvra.com",
+      "api_key_file": "/run/klyrow/postal-credentials/beyvra-api-key",
+      "webhook_public_key_file": "/run/klyrow/postal-credentials/beyvra-signing-public.pem"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/lib.sh"; require_env
+[[ "$EUID" -eq 0 ]] || { echo "Run rollback with sudo." >&2; exit 1; }
+release_sha="${1:-}"
+[[ "$release_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Usage: sudo scripts/rollback-release <40-character-release-sha>" >&2; exit 2; }
+docker image inspect "klyrow-gateway:$release_sha" "klyrow-migrate:$release_sha" >/dev/null
+export KLYROW_RELEASE_SHA="$release_sha"
+# Database migrations are forward-only and must remain backward compatible.
+# This operation rolls application containers back without reversing data.
+docker compose config --quiet
+docker compose up -d --no-build --remove-orphans
+scripts/health
+printf '%s\n' "$release_sha" | install -o root -g root -m 0640 /dev/stdin /var/lib/klyrow/releases/current
+echo "Rolled application containers back to $release_sha; database migrations were retained."

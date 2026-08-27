@@ -7,11 +7,17 @@ root="$(cd "$(dirname "$0")/.." && pwd)"; cd "$root"
 }
 [[ ! -e .env ]] || { echo ".env already exists; refusing to overwrite" >&2; exit 1; }
 runtime_secret_dir="${KLYROW_RUNTIME_SECRET_DIR:-/etc/klyrow/secrets}"
+runtime_config_dir="${KLYROW_RUNTIME_CONFIG_DIR:-/etc/klyrow}"
 admin_email="${KLYROW_ADMIN_EMAIL:-admin@klyrow.com}"
 admin_password="${KLYROW_ADMIN_PASSWORD:-$(openssl rand -base64 24 | tr -d '\n')}"
 cp .env.example .env
 secret() { openssl rand -hex "$1"; }
 install -d -o root -g root -m 0700 "$runtime_secret_dir"
+install -d -o root -g 10001 -m 0750 "$runtime_config_dir/postal-credentials"
+install -d -o root -g 10001 -m 0750 "$runtime_config_dir/seed-secrets"
+install -o root -g 10001 -m 0640 config/postal/transports.example.json "$runtime_config_dir/postal-transports.json"
+install -o root -g 10001 -m 0640 /dev/null "$runtime_config_dir/postal-credentials/beyvra-api-key"
+install -o root -g 10001 -m 0640 /dev/null "$runtime_config_dir/postal-credentials/beyvra-signing-public.pem"
 umask 077
 secret 32 | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/session-secret"
 install -o root -g root -m 0600 /dev/null "$runtime_secret_dir/postal-api-key"
@@ -21,6 +27,9 @@ sed -i \
   -e "s|KLYROW_SESSION_SECRET_FILE=.*|KLYROW_SESSION_SECRET_FILE=$runtime_secret_dir/session-secret|" \
   -e "s|KLYROW_POSTAL_API_KEY_FILE=.*|KLYROW_POSTAL_API_KEY_FILE=$runtime_secret_dir/postal-api-key|" \
   -e "s|KLYROW_METRICS_TOKEN_FILE=.*|KLYROW_METRICS_TOKEN_FILE=$runtime_secret_dir/metrics-token|" \
+  -e "s|KLYROW_POSTAL_TRANSPORTS_HOST_FILE=.*|KLYROW_POSTAL_TRANSPORTS_HOST_FILE=$runtime_config_dir/postal-transports.json|" \
+  -e "s|KLYROW_POSTAL_CREDENTIALS_DIR=.*|KLYROW_POSTAL_CREDENTIALS_DIR=$runtime_config_dir/postal-credentials|" \
+  -e "s|KLYROW_SEED_SECRETS_DIR=.*|KLYROW_SEED_SECRETS_DIR=$runtime_config_dir/seed-secrets|" \
   -e "s|KLYROW_DATABASE_URL=postgresql+psycopg://klyrow:CHANGE_ME@postgres:5432/klyrow|KLYROW_DATABASE_URL=postgresql+psycopg://klyrow:$postgres_password@postgres:5432/klyrow|" \
   -e "s|KLYROW_ADMIN_EMAIL=admin@klyrow.com|KLYROW_ADMIN_EMAIL=$admin_email|" \
   -e "s|KLYROW_ADMIN_PASSWORD=CHANGE_ME_20_CHARS|KLYROW_ADMIN_PASSWORD=$admin_password|" \

@@ -4,8 +4,12 @@ source "$(dirname "$0")/lib.sh"; require_env
 scripts/migrate-runtime-secrets
 git diff --quiet && git diff --cached --quiet || { echo "Refusing update with local changes" >&2; exit 1; }
 git pull --ff-only
+export KLYROW_RELEASE_SHA="$(git rev-parse --verify HEAD)"
 docker compose pull
-docker compose build gateway
+docker compose build gateway gateway-migrate
 scripts/migrate
 docker compose up -d --remove-orphans
 scripts/health
+install -d -o root -g root -m 0750 /var/lib/klyrow/releases
+printf '%s\n' "$KLYROW_RELEASE_SHA" | install -o root -g root -m 0640 /dev/stdin /var/lib/klyrow/releases/current
+echo "Updated to immutable release $KLYROW_RELEASE_SHA"

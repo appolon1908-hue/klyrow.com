@@ -20,7 +20,7 @@ def test_schema_migration_is_a_required_gateway_dependency():
     compose = (ROOT / "docker-compose.yml").read_text()
     runner = (ROOT / "scripts/migrate").read_text()
     assert "gateway-migrate: {condition: service_completed_successfully}" in compose
-    assert "2026082202_production_canary_claim_ledger.sql" in compose
+    assert "2026082701_mail_operations_remediation.sql" in compose
     assert "docker/migrate.Dockerfile" in compose
     assert "pg_advisory_xact_lock" in runner
     assert "applied migration checksum mismatch" in runner
@@ -57,7 +57,7 @@ def test_outbox_recovers_abandoned_sending_leases():
     source = (ROOT / "apps/gateway/app/main.py").read_text()
     assert 'EmailOutbox.state=="sending"' in source
     assert "EmailOutbox.updated_at<stale" in source
-    assert '"Idempotency-Key":"klyrow:"+snapshot[1]' in source
+    assert 'postal_headers(transport,"klyrow:"+snapshot[1])' in source
 
 
 def test_outbox_retries_back_off_and_terminal_failure_updates_message():

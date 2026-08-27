@@ -2,6 +2,7 @@ name: klyrow
 services:
   gateway:
     build: ./apps/gateway
+    image: klyrow-gateway:${KLYROW_RELEASE_SHA:-local}
     env_file: '${KLYROW_ENV_FILE:-.env}'
     environment:
       KLYROW_EMAIL_EVENT_URL: https://middleware-email-events.internal.codestra.agency:18080/internal/provider-events/klyrow
@@ -11,13 +12,19 @@ services:
       KLYROW_ENV: production
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
       KLYROW_POSTAL_API_KEY_FILE: /run/secrets/klyrow_postal_api_key
+      KLYROW_POSTAL_TRANSPORTS_FILE: /run/klyrow/postal-transports.json
+      KLYROW_SEED_SECRET_DIR: /run/klyrow/seed-secrets
+      KLYROW_PROVIDER_LIVE_DELIVERY_ENABLED: "${KLYROW_PROVIDER_LIVE_DELIVERY_ENABLED:-false}"
+      KLYROW_OUTBOUND_IP: "${KLYROW_OUTBOUND_IP:-}"
+      KLYROW_EXPECTED_PTR: "${KLYROW_EXPECTED_PTR:-mail.klyrow.com}"
+      KLYROW_RELEASE_SHA: "${KLYROW_RELEASE_SHA:-unknown}"
       KLYROW_METRICS_TOKEN_FILE: /run/secrets/klyrow_metrics_token
       KLYROW_DKIM_KEY_DIR: /var/lib/klyrow/dkim
       KLYROW_CANARY_ALLOWED_DOMAIN: ${KLYROW_CANARY_ALLOWED_DOMAIN:-}
       KLYROW_CANARY_ALLOWED_SENDER: ${KLYROW_CANARY_ALLOWED_SENDER:-}
       KLYROW_CANARY_ALLOWED_RECIPIENT: ${KLYROW_CANARY_ALLOWED_RECIPIENT:-}
       KLYROW_CANARY_MAX_DELIVERIES: ${KLYROW_CANARY_MAX_DELIVERIES:-0}
-      KLYROW_REQUIRED_SCHEMA_VERSION: 2026082202_production_canary_claim_ledger.sql
+      KLYROW_REQUIRED_SCHEMA_VERSION: 2026082701_mail_operations_remediation.sql
       KLYROW_BULK_DELIVERY_ENABLED: "false"
       KLYROW_CAMPAIGN_DELIVERY_ENABLED: "false"
       KLYROW_CAMPAIGN_EXECUTION_MODE: "${KLYROW_CAMPAIGN_EXECUTION_MODE:-CAMPAIGN_EXECUTION_DISABLED}"
@@ -37,6 +44,9 @@ services:
     secrets: [klyrow_session_secret, klyrow_postal_api_key, klyrow_metrics_token]
     volumes:
       - ./secrets/postal/webhook-signing-public.pem:/run/klyrow/postal-webhook-signing-public.pem:ro
+      - ${KLYROW_POSTAL_TRANSPORTS_HOST_FILE:-/etc/klyrow/postal-transports.json}:/run/klyrow/postal-transports.json:ro
+      - ${KLYROW_POSTAL_CREDENTIALS_DIR:-/etc/klyrow/postal-credentials}:/run/klyrow/postal-credentials:ro
+      - ${KLYROW_SEED_SECRETS_DIR:-/etc/klyrow/seed-secrets}:/run/klyrow/seed-secrets:ro
       - /etc/codestra/mtls/server-a-event-client:/run/codestra-mtls/server-a:ro
       - dkim_keys:/var/lib/klyrow/dkim
     depends_on:
@@ -58,6 +68,7 @@ services:
       retries: 5
   worker:
     build: ./apps/gateway
+    image: klyrow-gateway:${KLYROW_RELEASE_SHA:-local}
     env_file: '${KLYROW_ENV_FILE:-.env}'
     environment:
       KLYROW_ENV: production
@@ -65,6 +76,8 @@ services:
       KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
       KLYROW_POSTAL_API_KEY_FILE: /run/secrets/klyrow_postal_api_key
+      KLYROW_POSTAL_TRANSPORTS_FILE: /run/klyrow/postal-transports.json
+      KLYROW_PROVIDER_LIVE_DELIVERY_ENABLED: "${KLYROW_PROVIDER_LIVE_DELIVERY_ENABLED:-false}"
       KLYROW_POSTAL_API_HOST_HEADER: ${KLYROW_POSTAL_API_HOST_HEADER:-app.klyrow.com}
       KLYROW_EMAIL_EVENT_URL: https://middleware-email-events.internal.codestra.agency:18080/internal/provider-events/klyrow
       KLYROW_SERVER_A_CA_FILE: /run/codestra-mtls/server-a/root-ca.crt
@@ -85,6 +98,8 @@ services:
     secrets: [klyrow_session_secret, klyrow_postal_api_key]
     volumes:
       - /etc/codestra/mtls/server-a-event-client:/run/codestra-mtls/server-a:ro
+      - ${KLYROW_POSTAL_TRANSPORTS_HOST_FILE:-/etc/klyrow/postal-transports.json}:/run/klyrow/postal-transports.json:ro
+      - ${KLYROW_POSTAL_CREDENTIALS_DIR:-/etc/klyrow/postal-credentials}:/run/klyrow/postal-credentials:ro
     depends_on:
       postgres: {condition: service_healthy}
       gateway-migrate: {condition: service_completed_successfully}
@@ -101,6 +116,7 @@ services:
       retries: 5
   scheduler:
     build: ./apps/gateway
+    image: klyrow-gateway:${KLYROW_RELEASE_SHA:-local}
     environment:
       KLYROW_WORKER_ROLE: scheduler
       KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
@@ -123,6 +139,7 @@ services:
       retries: 5
   billing-api:
     build: ./apps/gateway
+    image: klyrow-gateway:${KLYROW_RELEASE_SHA:-local}
     env_file: '${KLYROW_ENV_FILE:-.env}'
     environment:
       KLYROW_ENV: production
@@ -149,6 +166,7 @@ services:
       retries: 5
   billing-worker:
     build: ./apps/gateway
+    image: klyrow-gateway:${KLYROW_RELEASE_SHA:-local}
     environment:
       KLYROW_WORKER_ROLE: billing
       KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
@@ -171,6 +189,7 @@ services:
       retries: 5
   smtp-relay:
     build: ./apps/gateway
+    image: klyrow-gateway:${KLYROW_RELEASE_SHA:-local}
     environment:
       KLYROW_DATABASE_URL: ${KLYROW_DATABASE_URL:?required}
       KLYROW_SMTP_PORT: "8025"
@@ -219,6 +238,7 @@ services:
     build:
       context: .
       dockerfile: docker/migrate.Dockerfile
+    image: klyrow-migrate:${KLYROW_RELEASE_SHA:-local}
     environment:
       KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
     networks: [backend]
