@@ -9,6 +9,12 @@ COPY apps/web/ ./
 RUN pnpm build
 
 FROM nginxinc/nginx-unprivileged:1.28-alpine
+# The upstream image is intentionally unprivileged at runtime, but its moving
+# Alpine base can contain packages with fixes already available in the same
+# repository. Apply those security updates while building the immutable image,
+# then drop back to the upstream non-root UID before serving traffic.
+USER root
+RUN apk upgrade --no-cache
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /build/dist /usr/share/nginx/html
 USER 101
