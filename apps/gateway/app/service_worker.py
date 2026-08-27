@@ -3,7 +3,8 @@ import asyncio, json, os, signal, uuid
 from datetime import timedelta
 from sqlalchemy import select
 
-from .main import DB, email_outbox_loop, postal_retry_loop
+from .main import DB, postal_retry_loop
+from .postal_provisioning import provisioning_tick, tenant_email_outbox_loop
 from .provider import dispatch_provider_outbox, process_one_sandbox, recover_expired_leases
 from .billing import BillingEvent, BillingWorkItem, now
 
@@ -43,6 +44,8 @@ async def loop():
                     for _ in range(50):
                         if not process_one_sandbox(s):break
                 await dispatch_provider_outbox()
+            elif ROLE=="provisioning":
+                await provisioning_tick()
             elif ROLE=="billing":billing_tick()
             elif ROLE=="scheduler":
                 with DB() as s:s.execute(select(1))
@@ -58,7 +61,7 @@ async def main():
     for sig in (signal.SIGTERM,signal.SIGINT):loop_obj.add_signal_handler(sig,stop)
     server=await asyncio.start_server(health,"0.0.0.0",int(os.getenv("KLYROW_WORKER_HEALTH_PORT","8080")))
     tasks=[asyncio.create_task(loop())]
-    if ROLE=="mail":tasks.extend([asyncio.create_task(postal_retry_loop()),asyncio.create_task(email_outbox_loop())])
+    if ROLE=="mail":tasks.extend([asyncio.create_task(postal_retry_loop()),asyncio.create_task(tenant_email_outbox_loop())])
     await event.wait()
     for task in tasks:task.cancel()
     server.close();await server.wait_closed()
