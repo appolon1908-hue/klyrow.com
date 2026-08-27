@@ -1,4 +1,9 @@
 services:
+  gateway:
+    environment:
+      KLYROW_REQUIRED_SCHEMA_VERSION: 2026082703_postal_tenant_provisioning.sql
+      KLYROW_ALLOW_LEGACY_GLOBAL_POSTAL_KEY: "false"
+
   postal-provisioner:
     build:
       context: .
@@ -51,8 +56,9 @@ services:
   worker:
     environment:
       KLYROW_PROVIDER_CREDENTIAL_KEY_FILE: /run/secrets/klyrow_provider_credential_key
+      KLYROW_POSTAL_API_KEY_FILE: ""
       KLYROW_ALLOW_LEGACY_GLOBAL_POSTAL_KEY: "false"
-    secrets: [klyrow_session_secret, klyrow_postal_api_key, klyrow_provider_credential_key]
+    secrets: [klyrow_session_secret, klyrow_provider_credential_key]
 
 secrets:
   klyrow_provider_credential_key:
