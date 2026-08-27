@@ -1,23 +1,13 @@
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from apps.gateway.app.platform import app
 
 
 ROOT = Path(__file__).parents[1]
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
-
-
-def _route_paths():
-    """Return concrete Starlette route order without depending on `.methods`.
-
-    Starlette 1.6/FastAPI 0.141 changed route internals for included routers, so
-    `.methods` is not a stable contract-inspection surface. Path order itself is
-    still authoritative for first-match SPA safety.
-    """
-    return [
-        (index, getattr(route, "path", getattr(route, "path_format", "")))
-        for index, route in enumerate(app.router.routes)
-    ]
+client = TestClient(app, base_url="https://app.klyrow.test")
 
 
 def _openapi_methods():
@@ -68,12 +58,20 @@ def test_browser_api_contract_has_expected_methods():
     assert expected <= actual
 
 
-def test_spa_fallback_is_after_every_browser_api_route():
-    rows = _route_paths()
-    fallback = next(index for index, path in rows if path == "/app/{path:path}")
-    api_indexes = [index for index, path in rows if path.startswith("/app/api/")]
-    assert api_indexes
-    assert all(index < fallback for index in api_indexes)
+def test_spa_fallback_does_not_shadow_browser_api_routes():
+    # Runtime matching is the contract that matters. These endpoints all require
+    # a browser session, so an anonymous request must reach the API auth boundary
+    # (401) instead of the SPA shell (503 application_ui_not_built in CI).
+    for path in (
+        "/app/api/dashboard",
+        "/app/api/domains",
+        "/app/api/senders",
+        "/app/api/provisioning/postal",
+    ):
+        response = client.get(path)
+        assert response.status_code == 401, (path, response.status_code, response.text)
+        assert response.headers.get("content-type", "").startswith("application/json")
+        assert response.json().get("detail") != "application_ui_not_built"
 
 
 def test_frontend_only_calls_registered_browser_api_paths():
