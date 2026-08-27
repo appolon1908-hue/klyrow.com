@@ -8,13 +8,13 @@ RUN pnpm install --frozen-lockfile
 COPY apps/web/ ./
 RUN pnpm build
 
-FROM nginxinc/nginx-unprivileged:1.28.3-alpine3.23
-# Pin the patched stable Nginx release rather than the moving 1.28-alpine tag.
+FROM nginxinc/nginx-unprivileged:1.30.4-alpine3.24
+# Pin an exact published patched Nginx runtime rather than a moving minor tag.
 # Apply any remaining Alpine security updates while building the immutable
-# image, assert the expected Nginx patch level, then return to non-root UID 101.
+# image, assert the expected patch level, then return to non-root UID 101.
 USER root
 RUN apk upgrade --no-cache \
-    && nginx -v 2>&1 | grep -q 'nginx/1.28.3'
+    && nginx -v 2>&1 | grep -q 'nginx/1.30.4'
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /build/dist /usr/share/nginx/html
 USER 101
