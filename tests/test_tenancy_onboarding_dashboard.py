@@ -47,7 +47,7 @@ def _browser_login_cookie():
 
 
 def test_dashboard_is_tenant_scoped_and_mutations_require_csrf():
-    raw,tenant_id=_browser_login_cookie();client.cookies.set(auth_bff.SESSION_COOKIE,raw,secure=True,path="/")
+    raw,tenant_id=_browser_login_cookie();client.cookies.set(auth_bff.SESSION_COOKIE,raw,path="/")
     with DB() as s:
         other=Tenant(id="other",name="Other",quota=10);s.add(other);s.add(Message(id="other-message",tenant_id="other",recipient="x@example.com",sender="a@example.com",subject="secret-other-tenant",status="queued"));s.add(Message(id="own-message",tenant_id=tenant_id,recipient="owner@example.com",sender="sender@example.com",subject="own",status="queued"));s.commit()
     response=client.get("/app/api/dashboard");assert response.status_code==200,response.text
@@ -57,7 +57,7 @@ def test_dashboard_is_tenant_scoped_and_mutations_require_csrf():
 
 
 def test_owner_cannot_access_platform_admin_dashboard():
-    response=client.get("/app/api/admin/dashboard");assert response.status_code==403
+    response=client.get("/app/api/admin/dashboard");assert response.status_code==403,response.text
 
 
 def test_product_routes_use_built_spa_contract():
