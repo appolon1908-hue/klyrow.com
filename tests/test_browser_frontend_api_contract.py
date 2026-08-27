@@ -4,16 +4,30 @@ from apps.gateway.app.platform import app
 
 
 ROOT = Path(__file__).parents[1]
+HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
 
 
-def _routes():
-    rows = []
-    for index, route in enumerate(app.router.routes):
-        path = getattr(route, "path", None)
-        methods = set(getattr(route, "methods", None) or [])
-        if path and methods:
-            rows.append((index, path, methods))
-    return rows
+def _route_paths():
+    """Return concrete Starlette route order without depending on `.methods`.
+
+    Starlette 1.6/FastAPI 0.141 changed route internals for included routers, so
+    `.methods` is not a stable contract-inspection surface. Path order itself is
+    still authoritative for first-match SPA safety.
+    """
+    return [
+        (index, getattr(route, "path", getattr(route, "path_format", "")))
+        for index, route in enumerate(app.router.routes)
+    ]
+
+
+def _openapi_methods():
+    schema = app.openapi()
+    return {
+        (path, method.upper())
+        for path, operations in schema.get("paths", {}).items()
+        for method in operations
+        if method.lower() in HTTP_METHODS
+    }
 
 
 def test_browser_api_contract_has_expected_methods():
@@ -50,14 +64,14 @@ def test_browser_api_contract_has_expected_methods():
         ("/app/api/admin/provisioning/postal", "GET"),
         ("/app/api/admin/provisioning/postal/{tenant_id}/retry", "POST"),
     }
-    actual = {(path, method) for _, path, methods in _routes() for method in methods}
+    actual = _openapi_methods()
     assert expected <= actual
 
 
 def test_spa_fallback_is_after_every_browser_api_route():
-    rows = _routes()
-    fallback = next(index for index, path, _ in rows if path == "/app/{path:path}")
-    api_indexes = [index for index, path, _ in rows if path.startswith("/app/api/")]
+    rows = _route_paths()
+    fallback = next(index for index, path in rows if path == "/app/{path:path}")
+    api_indexes = [index for index, path in rows if path.startswith("/app/api/")]
     assert api_indexes
     assert all(index < fallback for index in api_indexes)
 
