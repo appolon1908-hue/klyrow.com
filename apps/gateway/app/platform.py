@@ -9,16 +9,27 @@ from fastapi.responses import FileResponse
 from .main import AUTH_WEB_DIST, app
 from . import auth_bff
 from .auth_bff import router as auth_bff_router
-from .browser_auth_actions import install_auth_extensions, router as browser_auth_actions_router
+from .browser_auth_actions import (
+    install_auth_extensions,
+    router as browser_auth_actions_router,
+)
 from .tenancy_onboarding import router as tenancy_onboarding_router
+from .invitation_flow import (
+    install_invitation_extensions,
+    router as invitation_flow_router,
+)
 from .browser_email_setup import router as browser_email_setup_router
-from .postal_provisioning import resolve_identity_context_with_provisioning, router as postal_provisioning_router
+from .postal_provisioning import (
+    resolve_identity_context_with_provisioning,
+    router as postal_provisioning_router,
+)
 
 SHELL_PATHS = {"/app", "/onboarding", "/app/{path:path}"}
 
-# Replace the historical rotating-CSRF session route before any router routes are
+# Replace historical browser-account/session routes before any router routes are
 # copied into the production application.
 install_auth_extensions()
+install_invitation_extensions()
 
 # The historical onboarding router contains SPA shell routes before its API
 # routes. Strip those routes from the source router *before* include_router()
@@ -32,7 +43,8 @@ for route in list(tenancy_onboarding_router.routes):
 # main.py HTML endpoint otherwise wins first-match routing.
 for route in list(app.router.routes):
     if getattr(route, "path", "") in SHELL_PATHS or (
-        getattr(route, "path", "") == "/admin" and getattr(route, "name", "") == "admin_portal"
+        getattr(route, "path", "") == "/admin"
+        and getattr(route, "name", "") == "admin_portal"
     ):
         app.router.routes.remove(route)
 
@@ -48,6 +60,7 @@ if not getattr(app.state, "klyrow_browser_api_routes_registered", False):
         auth_bff_router,
         browser_auth_actions_router,
         tenancy_onboarding_router,
+        invitation_flow_router,
         browser_email_setup_router,
         postal_provisioning_router,
     ):
@@ -65,7 +78,9 @@ def _ui_index():
     index = AUTH_WEB_DIST / "index.html"
     if not index.exists():
         raise HTTPException(503, "application_ui_not_built")
-    return FileResponse(index, media_type="text/html", headers={"Cache-Control": "no-store"})
+    return FileResponse(
+        index, media_type="text/html", headers={"Cache-Control": "no-store"}
+    )
 
 
 # Remove platform-owned shell routes too if this module is explicitly reloaded.
