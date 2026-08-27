@@ -11,13 +11,14 @@ from sqlalchemy import select
 
 from .billing import BillingEvent, BillingWorkItem, now
 from .main import DB, email_outbox_loop, postal_retry_loop
-from .postal_provisioning import provisioning_tick, tenant_email_outbox_loop
+from .postal_provisioning import provisioning_tick
 from .provider import (
     dispatch_provider_outbox,
     process_one_sandbox,
     recover_expired_leases,
 )
 from .security_smtp_worker import security_smtp_delivery_loop
+from .tenant_postal_delivery import tenant_email_outbox_loop
 
 ROLE = os.getenv("KLYROW_WORKER_ROLE", "mail")
 RUNNING = True
@@ -39,8 +40,9 @@ def selected_email_outbox_loop():
     """Preserve legacy delivery for the base Compose deployment.
 
     The tenant-scoped loop requires the provider-credential key, Postal bridge,
-    and provisioning worker. The optional provisioning Compose contract sets
-    KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED=true only when all three exist.
+    provisioning worker, and signed callback attribution route. The optional
+    provisioning Compose contract enables the loop only when those pieces are
+    deployed together.
     """
 
     if tenant_postal_provisioning_enabled():
@@ -116,8 +118,6 @@ def billing_tick(max_attempts=8):
         item.attempts += 1
         item.lease_expires_at = now() + timedelta(seconds=60)
         session.commit()
-        # Commercial mutations are committed atomically by the API. The worker
-        # durably acknowledges their immutable event and is safe to replay.
         item = session.get(BillingWorkItem, item.id)
         item.state = "COMPLETED"
         item.completed_at = now()

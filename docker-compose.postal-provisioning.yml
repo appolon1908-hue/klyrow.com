@@ -2,6 +2,7 @@ services:
   gateway:
     environment:
       KLYROW_REQUIRED_SCHEMA_VERSION: 2026082703_postal_tenant_provisioning.sql
+      KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED: "true"
       KLYROW_ALLOW_LEGACY_GLOBAL_POSTAL_KEY: "false"
 
   postal-provisioner:
