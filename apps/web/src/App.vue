@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { maskEmail, passwordScore, routeFromLocation, type AuthView } from './auth'
+import { maskEmail, passwordScore, routeFromLocation, serverError, type AuthView } from './auth'
+import { AuthActionError, requestAuthAction, safeAuthRedirect } from './authActions'
 import { messages, type Locale, type MessageKey } from './i18n'
 
 const locale = ref<Locale>((new URLSearchParams(location.search).get('lang') === 'es' || navigator.language.startsWith('es')) ? 'es' : 'en')
@@ -43,20 +44,53 @@ function validate(kind: 'login'|'signup'|'forgot'|'reset'|'invite') {
     if (score.value < 5) errors.value.password = t('weakPassword'); if (password.value !== confirm.value) errors.value.confirm = t('mismatch')
     if (!terms.value) errors.value.terms = t('acceptTerms')
   }
-  if (kind === 'reset') { if (score.value < 5) errors.value.password = t('weakPassword'); if (password.value !== confirm.value) errors.value.confirm = t('mismatch') }
   if (kind === 'invite' && !invite.value.trim()) errors.value.invite = t('required')
   if (Object.keys(errors.value).length) { nextTick(() => document.querySelector<HTMLElement>('[aria-invalid="true"]')?.focus()); return false }
   return true
 }
-function submit(kind: 'login'|'signup'|'forgot'|'reset'|'invite') {
-  if (!validate(kind)) return
-  if (kind === 'forgot') return go('reset-sent')
-  if (kind === 'reset') return go('reset-success')
-  if (kind === 'invite') { notice.value = invite.value.toLowerCase() === 'expired' ? t('inviteInvalid') : t('inviteValid'); return }
-  // Identity credentials are submitted only to Keycloak. Mission 02 will implement these same-origin initiation endpoints.
-  busy.value = true; location.assign(`${kind === 'signup' ? '/auth/signup' : '/auth/login'}?return_to=${encodeURIComponent(kind === 'signup' ? '/onboarding' : '/app')}`)
+async function executeAction(path: string, payload: Record<string, unknown> = {}) {
+  busy.value = true
+  formError.value = ''
+  notice.value = ''
+  try {
+    const result = await requestAuthAction(path, payload)
+    if (!result.redirect_to) throw new AuthActionError(503, 'authentication_redirect_missing')
+    location.assign(safeAuthRedirect(result.redirect_to))
+  } catch (error) {
+    const status = error instanceof AuthActionError ? error.status : 503
+    formError.value = t(serverError(status) as MessageKey)
+    busy.value = false
+  }
 }
-function resend() { busy.value = true; window.setTimeout(() => { busy.value = false; notice.value = t('resent') }, 300) }
+async function submit(kind: 'login'|'signup'|'forgot'|'reset'|'invite') {
+  if (!validate(kind)) return
+  if (kind === 'forgot') return executeAction('/auth/actions/recover', { email: email.value })
+  if (kind === 'reset') return executeAction('/auth/actions/update-password')
+  if (kind === 'invite') {
+    busy.value = true
+    formError.value = ''
+    notice.value = ''
+    try {
+      const result = await requestAuthAction('/auth/actions/invitation', { token: invite.value.trim() })
+      if (!result.valid || !result.redirect_to) {
+        notice.value = t('inviteInvalid')
+        busy.value = false
+        return
+      }
+      notice.value = t('inviteValid')
+      location.assign(safeAuthRedirect(result.redirect_to))
+    } catch (error) {
+      const status = error instanceof AuthActionError ? error.status : 503
+      formError.value = t(serverError(status) as MessageKey)
+      busy.value = false
+    }
+    return
+  }
+  // Identity credentials are submitted only to Keycloak through same-origin initiation endpoints.
+  busy.value = true
+  location.assign(`${kind === 'signup' ? '/auth/signup' : '/auth/login'}?return_to=${encodeURIComponent(kind === 'signup' ? '/onboarding' : '/app')}`)
+}
+function resend() { return executeAction('/auth/actions/verify-email') }
 function google() { location.assign(`/auth/google?return_to=${encodeURIComponent(view.value === 'signup' ? '/onboarding' : '/app')}`) }
 watch(view, async () => { await nextTick(); heading.value?.focus() })
 onMounted(() => { document.documentElement.lang = locale.value; addEventListener('popstate', () => view.value = routeFromLocation(location.pathname, location.search)) })
@@ -94,9 +128,9 @@ onMounted(() => { document.documentElement.lang = locale.value; addEventListener
           <p class="switch">{{ t(view === 'signup' ? 'existing' : 'newUser') }} <a :href="view === 'signup' ? '/login' : '/signup'" @click.prevent="go(view === 'signup' ? 'login' : 'signup')">{{ t(view === 'signup' ? 'signInLink' : 'createLink') }}</a></p>
         </template>
 
-        <form v-else-if="view === 'forgot-password'" novalidate @submit.prevent="submit('forgot')"><div class="field"><label for="recovery-email">{{ t('email') }}</label><input id="recovery-email" v-model="email" type="email" autocomplete="email" :aria-invalid="!!errors.email" aria-describedby="recovery-error"><p id="recovery-error" class="field-error">{{ errors.email }}</p></div><button class="button primary">{{ t('sendReset') }}</button></form>
-        <form v-else-if="view === 'reset-password'" novalidate @submit.prevent="submit('reset')"><div class="field"><label for="new-password">{{ t('password') }}</label><input id="new-password" v-model="password" type="password" autocomplete="new-password" :aria-invalid="!!errors.password" aria-describedby="new-guide new-error"><p id="new-guide" class="hint">{{ t('passwordGuide') }}</p><p id="new-error" class="field-error">{{ errors.password }}</p></div><div class="field"><label for="new-confirm">{{ t('confirm') }}</label><input id="new-confirm" v-model="confirm" type="password" autocomplete="new-password" :aria-invalid="!!errors.confirm" aria-describedby="new-confirm-error"><p id="new-confirm-error" class="field-error">{{ errors.confirm }}</p></div><button class="button primary">{{ t('updatePassword') }}</button></form>
-        <form v-else-if="view === 'invite'" novalidate @submit.prevent="submit('invite')"><div class="field"><label for="invite">{{ t('inviteCode') }}</label><input id="invite" v-model="invite" autocomplete="off" :aria-invalid="!!errors.invite" aria-describedby="invite-error"><p id="invite-error" class="field-error">{{ errors.invite }}</p></div><button class="button primary">{{ t('validateInvite') }}</button></form>
+        <form v-else-if="view === 'forgot-password'" novalidate @submit.prevent="submit('forgot')"><div class="field"><label for="recovery-email">{{ t('email') }}</label><input id="recovery-email" v-model="email" type="email" autocomplete="email" :aria-invalid="!!errors.email" aria-describedby="recovery-error"><p id="recovery-error" class="field-error">{{ errors.email }}</p></div><button class="button primary" :disabled="busy" type="submit"><span v-if="busy" class="spinner" aria-hidden="true"></span>{{ busy ? t('loading') : t('sendReset') }}</button></form>
+        <form v-else-if="view === 'reset-password'" novalidate @submit.prevent="submit('reset')"><p class="hint">{{ t('security') }}</p><button class="button primary" :disabled="busy" type="submit"><span v-if="busy" class="spinner" aria-hidden="true"></span>{{ busy ? t('loading') : t('updatePassword') }}</button></form>
+        <form v-else-if="view === 'invite'" novalidate @submit.prevent="submit('invite')"><div class="field"><label for="invite">{{ t('inviteCode') }}</label><input id="invite" v-model="invite" autocomplete="off" :aria-invalid="!!errors.invite" aria-describedby="invite-error"><p id="invite-error" class="field-error">{{ errors.invite }}</p></div><button class="button primary" :disabled="busy" type="submit"><span v-if="busy" class="spinner" aria-hidden="true"></span>{{ busy ? t('loading') : t('validateInvite') }}</button></form>
         <div v-else class="state-actions">
           <button v-if="view === 'verify-email' || view === 'verification-expired'" class="button primary" :disabled="busy" @click="resend">{{ busy ? t('loading') : t('resend') }}</button>
           <a v-if="view === 'verify-email'" class="button secondary" href="/signup" @click.prevent="go('signup')">{{ t('different') }}</a>
