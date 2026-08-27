@@ -1,9 +1,10 @@
-"""Safe browser account actions and stable per-session CSRF authority."""
+"""Safe browser account actions and hardened browser-session authority."""
 from __future__ import annotations
 
 import base64
 import hashlib
 import hmac
+import os
 from datetime import timezone
 from typing import Optional
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
@@ -32,6 +33,22 @@ class RecoveryRequest(BaseModel):
 
 class InvitationValidationRequest(BaseModel):
     token: str = Field(min_length=16, max_length=512)
+
+
+def _as_utc(value):
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def browser_session_idle_seconds() -> int:
+    """Return a bounded idle timeout that can never exceed the absolute TTL."""
+
+    try:
+        configured = int(os.getenv("KLYROW_BROWSER_SESSION_IDLE_SECONDS", "1800"))
+    except ValueError as exc:
+        raise RuntimeError(
+            "KLYROW_BROWSER_SESSION_IDLE_SECONDS must be an integer"
+        ) from exc
+    return max(300, min(configured, auth_bff._session_ttl()))
 
 
 def stable_csrf_token(session_id: str) -> str:
@@ -71,8 +88,19 @@ def _active_principal(
 def _get_browser_session_with_principal_validation(
     request: Request, session: Session, touch: bool = True
 ) -> BrowserSession:
-    item = _ORIGINAL_GET_BROWSER_SESSION(request, session, touch=touch)
+    # Do not touch last_seen_at until the prior value has passed the idle check.
+    item = _ORIGINAL_GET_BROWSER_SESSION(request, session, touch=False)
+    current_time = auth_bff.now()
+    if (
+        current_time - _as_utc(item.last_seen_at)
+    ).total_seconds() > browser_session_idle_seconds():
+        item.revoked_at = current_time
+        session.commit()
+        raise HTTPException(401, "session_idle_timeout")
     _active_principal(session, item)
+    if touch:
+        item.last_seen_at = current_time
+        session.commit()
     return item
 
 
@@ -80,10 +108,9 @@ def _new_session_with_stable_csrf(*args, **kwargs):
     session: Session = args[0] if args else kwargs["s"]
     identity = args[2] if len(args) > 2 else kwargs["identity"]
     user = args[3] if len(args) > 3 else kwargs["user"]
+    rotated_from_id = args[6] if len(args) > 6 else kwargs.get("rotated_from_id")
 
-    # Re-read both records immediately before issuing or rotating a browser
-    # session. This closes the refresh race where an administrator disables a
-    # principal while Keycloak is completing a token exchange.
+    # Re-read both records immediately before issuing or rotating a session.
     identity_item = session.get(OidcIdentity, identity.id)
     user_item = session.get(User, user.id)
     if identity_item is not None:
@@ -98,9 +125,20 @@ def _new_session_with_stable_csrf(*args, **kwargs):
     ):
         raise HTTPException(401, "principal_disabled")
 
+    absolute_deadline = None
+    if rotated_from_id:
+        parent = session.get(BrowserSession, rotated_from_id)
+        if parent is None:
+            raise HTTPException(401, "session_rotation_source_missing")
+        absolute_deadline = _as_utc(parent.expires_at)
+        if absolute_deadline <= auth_bff.now():
+            raise HTTPException(401, "session_expired")
+
     item, raw, _csrf = _ORIGINAL_NEW_SESSION(*args, **kwargs)
     csrf = stable_csrf_token(item.id)
     item.csrf_hash = sha(csrf)
+    if absolute_deadline is not None:
+        item.expires_at = min(_as_utc(item.expires_at), absolute_deadline)
     session.commit()
     return item, raw, csrf
 
@@ -136,12 +174,25 @@ def install_auth_extensions() -> None:
     global _INSTALLED
     if _INSTALLED:
         return
+    replacement_paths = {
+        "/auth/session",
+        "/auth/callback",
+        "/auth/sessions",
+        "/auth/sessions/{session_id}",
+        "/auth/logout-all",
+    }
     for route in list(auth_bff.router.routes):
-        if getattr(route, "path", "") in {"/auth/session", "/auth/callback"}:
+        if getattr(route, "path", "") in replacement_paths:
             auth_bff.router.routes.remove(route)
     auth_bff._get_browser_session = _get_browser_session_with_principal_validation
     auth_bff._new_session = _new_session_with_stable_csrf
     _INSTALLED = True
+
+
+def current_browser_session(
+    request: Request, session: Session = Depends(db)
+) -> BrowserSession:
+    return auth_bff._get_browser_session(request, session)
 
 
 @router.get("/auth/callback")
@@ -160,16 +211,11 @@ def oidc_callback(
     )
     if not transaction or transaction.used_at:
         raise HTTPException(410, "oidc_state_invalid_or_used")
-    expiry = transaction.expires_at
-    if expiry.tzinfo is None:
-        expiry = expiry.replace(tzinfo=timezone.utc)
-    if expiry <= auth_bff.now():
+    if _as_utc(transaction.expires_at) <= auth_bff.now():
         raise HTTPException(410, "oidc_state_expired")
     transaction.used_at = auth_bff.now()
     session.commit()
 
-    # Never turn a cancelled/omitted application-initiated action into a success
-    # page. Keycloak documents kc_action_status as the completion signal.
     if error or not code or (
         transaction.mode in _ACTION_MODES and kc_action_status != "success"
     ):
@@ -227,14 +273,74 @@ def session_status(request: Request, session: Session = Depends(db)):
     )
 
 
+@router.get("/auth/sessions")
+def list_user_sessions(
+    current: BrowserSession = Depends(current_browser_session),
+    session: Session = Depends(db),
+):
+    rows = session.scalars(
+        select(BrowserSession)
+        .where(BrowserSession.user_id == current.user_id)
+        .order_by(BrowserSession.created_at.desc())
+    ).all()
+    return [
+        {
+            "id": row.id,
+            "current": row.id == current.id,
+            "identity_id": row.identity_id,
+            "created_at": row.created_at,
+            "last_seen_at": row.last_seen_at,
+            "expires_at": row.expires_at,
+            "revoked_at": row.revoked_at,
+            "user_agent_hash": row.user_agent_hash,
+            "ip_hash": row.ip_hash,
+        }
+        for row in rows
+    ]
+
+
+@router.delete("/auth/sessions/{session_id}", status_code=204)
+def revoke_user_session(
+    session_id: str,
+    current: BrowserSession = Depends(auth_bff.csrf_guard),
+    session: Session = Depends(db),
+):
+    item = session.get(BrowserSession, session_id)
+    if not item or item.user_id != current.user_id:
+        raise HTTPException(404, "session_not_found")
+    item.revoked_at = auth_bff.now()
+    session.commit()
+
+
+@router.post("/auth/logout-all")
+def logout_all_user_sessions(
+    current: BrowserSession = Depends(auth_bff.csrf_guard),
+    session: Session = Depends(db),
+):
+    rows = session.scalars(
+        select(BrowserSession).where(
+            BrowserSession.user_id == current.user_id,
+            BrowserSession.revoked_at.is_(None),
+        )
+    ).all()
+    revoked_at = auth_bff.now()
+    for item in rows:
+        item.revoked_at = revoked_at
+    session.commit()
+    response = JSONResponse(
+        {"logged_out": True, "revoked_sessions": len(rows)},
+        headers={"Cache-Control": "no-store"},
+    )
+    auth_bff._clear_session_cookie(response)
+    return response
+
+
 @router.post("/auth/actions/recover", status_code=202)
 def begin_recovery(
     payload: RecoveryRequest,
     request: Request,
     session: Session = Depends(db),
 ):
-    # Validate shape, but never look up the address. Keycloak owns account
-    # discovery and emits the same response whether an account exists or not.
     del payload
     auth_rate(request, "browser-recovery")
     return {
@@ -291,10 +397,7 @@ def validate_invitation(
     )
     valid = False
     if item and not item.revoked_at and not item.accepted_at:
-        expiry = item.expires_at
-        if expiry.tzinfo is None:
-            expiry = expiry.replace(tzinfo=timezone.utc)
-        valid = expiry > auth_bff.now()
+        valid = _as_utc(item.expires_at) > auth_bff.now()
     if not valid:
         return {"valid": False, "redirect_to": None}
 

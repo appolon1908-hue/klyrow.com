@@ -19,6 +19,10 @@ from .invitation_flow import (
     router as invitation_flow_router,
 )
 from .browser_email_setup import router as browser_email_setup_router
+from .postal_callback_attribution import (
+    install_postal_callback_extension,
+    router as postal_callback_router,
+)
 from .postal_provisioning import (
     resolve_identity_context_with_provisioning,
     router as postal_provisioning_router,
@@ -26,21 +30,19 @@ from .postal_provisioning import (
 
 SHELL_PATHS = {"/app", "/onboarding", "/app/{path:path}"}
 
-# Replace historical browser-account/session routes before any router routes are
-# copied into the production application.
+# Replace historical account/session/invitation/callback routes before route
+# objects are copied into the production application.
 install_auth_extensions()
 install_invitation_extensions()
+install_postal_callback_extension()
 
 # The historical onboarding router contains SPA shell routes before its API
-# routes. Strip those routes from the source router *before* include_router()
-# clones anything onto the production application.
+# routes. Strip those routes from the source router before registration.
 for route in list(tenancy_onboarding_router.routes):
     if getattr(route, "path", "") in SHELL_PATHS:
         tenancy_onboarding_router.routes.remove(route)
 
 # Remove legacy/product shell routes that may already exist on the core app.
-# `/admin` is intentionally replaced by the Vue admin shell below; the legacy
-# main.py HTML endpoint otherwise wins first-match routing.
 for route in list(app.router.routes):
     if getattr(route, "path", "") in SHELL_PATHS or (
         getattr(route, "path", "") == "/admin"
@@ -48,12 +50,13 @@ for route in list(app.router.routes):
     ):
         app.router.routes.remove(route)
 
-# Register browser APIs once. FastAPI 0.141 represents include_router() calls as
-# nested _IncludedRouter entries, which hides their concrete paths from
-# app.routes and breaks release-time route inventory checks. These routers have
-# no prefixes or router-level dependencies, so registering their APIRoute
-# objects directly preserves their metadata and runtime behavior while keeping
-# the production route table inspectable.
+if not getattr(app.state, "klyrow_postal_callback_route_registered", False):
+    app.router.routes.extend(postal_callback_router.routes)
+    app.state.klyrow_postal_callback_route_registered = True
+
+# Register browser APIs once. These routers have no prefixes or router-level
+# dependencies, so direct APIRoute registration keeps the runtime route table
+# inspectable while preserving the original handlers and dependencies.
 if not getattr(app.state, "klyrow_browser_api_routes_registered", False):
     auth_bff._identity_context = resolve_identity_context_with_provisioning
     for browser_router in (
@@ -69,8 +72,7 @@ if not getattr(app.state, "klyrow_browser_api_routes_registered", False):
 else:
     auth_bff._identity_context = resolve_identity_context_with_provisioning
 
-# The core app may have generated OpenAPI before browser composition. FastAPI
-# caches that schema, so invalidate it whenever this composition module loads.
+# The core app may have generated OpenAPI before browser composition.
 app.openapi_schema = None
 
 
