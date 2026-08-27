@@ -17,16 +17,18 @@ SHELL_PATHS = {"/app", "/onboarding", "/app/{path:path}"}
 
 # The historical onboarding router contains SPA shell routes before its API
 # routes. Strip those routes from the source router *before* include_router()
-# clones anything onto the production application. This is intentionally done
-# at composition time so older stacked branches remain compatible.
+# clones anything onto the production application.
 for route in list(tenancy_onboarding_router.routes):
     if getattr(route, "path", "") in SHELL_PATHS:
         tenancy_onboarding_router.routes.remove(route)
 
-# Also remove any shell routes that may have been registered by a previous
-# composition/import. This makes composition idempotent under test reloads.
+# Remove legacy/product shell routes that may already exist on the core app.
+# `/admin` is intentionally replaced by the Vue admin shell below; the legacy
+# main.py HTML endpoint otherwise wins first-match routing.
 for route in list(app.router.routes):
-    if getattr(route, "path", "") in SHELL_PATHS:
+    if getattr(route, "path", "") in SHELL_PATHS or (
+        getattr(route, "path", "") == "/admin" and getattr(route, "name", "") == "admin_portal"
+    ):
         app.router.routes.remove(route)
 
 # Register browser APIs once. Re-importing this module must not duplicate route
