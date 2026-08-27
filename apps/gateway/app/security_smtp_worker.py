@@ -1,15 +1,14 @@
 """Dedicated Postal delivery worker for Keycloak SECURITY SMTP messages.
 
-The worker is inert unless the two Klyrow security-mail gates are enabled.  It
-claims only non-sandbox ``SECURITY`` messages, uses the existing Postal server
-API credential, preserves the SMTP idempotency identity, and records only
-privacy-safe operational evidence.
+The worker is inert for outbound delivery unless the two Klyrow security-mail
+gates are enabled. SECURITY MIME is encrypted while queued and scrubbed from
+Klyrow persistence after provider submission or any terminal outcome. Only
+privacy-safe operational evidence remains after the retry window.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import os
 import uuid
@@ -24,7 +23,12 @@ import httpx
 from sqlalchemy import select
 
 from .main import DB
-from .provider import ProviderAudit, ProviderEvent, ProviderMessage, now
+from .provider import ProviderAudit, ProviderEvent, ProviderMessage, SandboxCapture, now
+from .security_payload import (
+    decrypt_security_payload,
+    max_payload_age_seconds,
+    scrubbed_security_payload,
+)
 from .smtp_policy import security_live_delivery_enabled
 
 MAX_ATTEMPTS = 5
@@ -62,10 +66,7 @@ def parse_postal_body(raw: bytes) -> tuple[str, str]:
 
 
 def postal_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
-    encoded = snapshot["payload"].get("raw_b64")
-    if not isinstance(encoded, str) or not encoded:
-        raise ValueError("security SMTP payload is missing raw MIME data")
-    raw = base64.b64decode(encoded, validate=True)
+    raw = decrypt_security_payload(snapshot["payload"])
     plain_body, html_body = parse_postal_body(raw)
     if not plain_body and not html_body:
         raise ValueError("security SMTP message has no deliverable text body")
@@ -81,6 +82,81 @@ def postal_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     if html_body:
         payload["html_body"] = html_body
     return payload
+
+
+def _decoded_payload(raw: str | None) -> dict[str, Any]:
+    try:
+        value = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _contains_security_ciphertext(payload: dict[str, Any]) -> bool:
+    return payload.get("stream") == "SECURITY" and bool(payload.get("encrypted_raw"))
+
+
+def _purge_expired_security_payloads() -> int:
+    """Bound SECURITY ciphertext retention across every terminal and retry path.
+
+    Generic sandbox delivery and generic lease recovery do not know how to scrub
+    the SECURITY envelope. This retention pass therefore covers active retries,
+    sandbox DELIVERED rows/captures, and lease-recovery DEAD_LETTER rows. Active
+    messages that outlive the security payload window are failed closed; terminal
+    states keep their delivery outcome while only the sensitive body is purged.
+    """
+
+    cutoff = now() - timedelta(seconds=max_payload_age_seconds())
+    purged = 0
+    active_states = {"QUEUED", "DEFERRED", "PROCESSING"}
+    terminal_states = {"SUBMITTED", "SENT", "DELIVERED", "FAILED", "DEAD_LETTER"}
+    with DB() as session:
+        items = session.scalars(
+            select(ProviderMessage).where(
+                ProviderMessage.stream == "SECURITY",
+                ProviderMessage.status.in_(sorted(active_states | terminal_states)),
+                ProviderMessage.created_at < cutoff,
+            )
+        ).all()
+        for item in items:
+            payload = _decoded_payload(item.payload_json)
+            capture = session.scalar(
+                select(SandboxCapture).where(SandboxCapture.message_id == item.id)
+            )
+            capture_payload = _decoded_payload(capture.content_json) if capture else {}
+            had_sensitive_body = _contains_security_ciphertext(payload)
+            had_sensitive_capture = _contains_security_ciphertext(capture_payload)
+            if not had_sensitive_body and not had_sensitive_capture:
+                continue
+
+            safe_json = scrubbed_security_payload(
+                payload or capture_payload,
+                reason="payload_retention_expired",
+            )
+            if had_sensitive_body:
+                item.payload_json = safe_json
+            if capture and had_sensitive_capture:
+                capture.content_json = safe_json
+
+            if item.status in active_states:
+                item.status = "DEAD_LETTER"
+                item.lease_expires_at = None
+                item.last_error = "security_payload_retention_expired"
+            item.updated_at = now()
+            session.add(
+                ProviderAudit(
+                    id=str(uuid.uuid4()),
+                    tenant_id=item.tenant_id,
+                    actor="worker:klyrow-security-smtp",
+                    action="smtp.security.payload.purged",
+                    outcome=("dead_letter" if item.status == "DEAD_LETTER" else "retained_status"),
+                    correlation_id=item.correlation_id,
+                    resource_id=item.id,
+                )
+            )
+            purged += 1
+        session.commit()
+    return purged
 
 
 def _claim_one() -> dict[str, Any] | None:
@@ -136,6 +212,10 @@ def _mark_submitted(snapshot: dict[str, Any], provider_message_id: str) -> None:
             return
         item.status = "SUBMITTED"
         item.provider_message_id = provider_message_id
+        item.payload_json = scrubbed_security_payload(
+            snapshot["payload"],
+            reason="provider_submitted",
+        )
         item.lease_expires_at = None
         item.last_error = None
         item.updated_at = now()
@@ -188,6 +268,11 @@ def _mark_failed(snapshot: dict[str, Any], error_name: str) -> None:
         )
         item.lease_expires_at = None
         item.last_error = error_name[:120]
+        if exhausted:
+            item.payload_json = scrubbed_security_payload(
+                snapshot["payload"],
+                reason="delivery_attempts_exhausted",
+            )
         item.updated_at = now()
         session.add(
             ProviderAudit(
@@ -206,6 +291,7 @@ def _mark_failed(snapshot: dict[str, Any], error_name: str) -> None:
 async def process_one_security_message() -> bool:
     """Submit one eligible SECURITY message to Postal."""
 
+    _purge_expired_security_payloads()
     if not security_live_delivery_enabled():
         return False
     snapshot = _claim_one()
