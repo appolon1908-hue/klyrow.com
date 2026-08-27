@@ -86,8 +86,8 @@ def test_disabled_user_is_revoked_on_next_browser_request():
         session.commit()
 
     response = client.get("/auth/session")
-    assert response.status_code == 403
-    assert response.json()["detail"] == "account_disabled"
+    assert response.status_code == 401
+    assert response.json()["detail"] == "principal_disabled"
     _assert_revoked(session_id)
 
 
@@ -102,8 +102,8 @@ def test_disabled_identity_cannot_refresh_or_rotate_session():
         "/auth/refresh",
         headers={"X-Klyrow-CSRF": stable_csrf_token(session_id)},
     )
-    assert response.status_code == 403
-    assert response.json()["detail"] == "account_disabled"
+    assert response.status_code == 401
+    assert response.json()["detail"] == "principal_disabled"
     _assert_revoked(session_id)
 
 

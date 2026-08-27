@@ -63,7 +63,7 @@ def _active_authority(
         or not user
         or not user.enabled
     ):
-        raise HTTPException(403, "account_disabled")
+        raise HTTPException(401, "principal_disabled")
 
     membership = session.scalar(
         select(TenantMember)
@@ -236,7 +236,7 @@ def session_status(request: Request, session: Session = Depends(db)):
     try:
         item = auth_bff._get_browser_session(request, session)
     except HTTPException as exc:
-        if exc.status_code == 401:
+        if exc.status_code == 401 and exc.detail != "principal_disabled":
             return JSONResponse(
                 {"authenticated": False},
                 status_code=200,

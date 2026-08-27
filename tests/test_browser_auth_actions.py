@@ -3,6 +3,7 @@ import uuid
 from datetime import timedelta
 from urllib.parse import parse_qs, urlparse
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -23,25 +24,33 @@ def _client():
     return TestClient(app, base_url="https://app.klyrow.test")
 
 
-def test_session_reads_keep_one_csrf_token_until_session_rotation():
+def _browser_principal_session(*, disable: str | None = None):
     client = _client()
     suffix = uuid.uuid4().hex
-    tenant_id = f"tenant-csrf-{suffix}"
-    user_id = f"user-csrf-{suffix}"
-    identity_id = f"identity-csrf-{suffix}"
-    session_id = f"session-csrf-{suffix}"
+    tenant_id = f"tenant-browser-{suffix}"
+    user_id = f"user-browser-{suffix}"
+    identity_id = f"identity-browser-{suffix}"
+    session_id = f"session-browser-{suffix}"
     raw = "browser_" + uuid.uuid4().hex
+    csrf = stable_csrf_token(session_id)
     with DB() as session:
-        session.add(Tenant(id=tenant_id, name="CSRF Tenant", quota=10))
-        session.add(
-            User(
-                id=user_id,
-                tenant_id=tenant_id,
-                email=f"csrf-{suffix}@example.com",
-                password_hash=ph.hash("not-used"),
-                role="tenant_admin",
-            )
+        user = User(
+            id=user_id,
+            tenant_id=tenant_id,
+            email=f"browser-{suffix}@example.com",
+            password_hash=ph.hash("not-used"),
+            role="tenant_admin",
         )
+        identity = OidcIdentity(
+            id=identity_id,
+            issuer=ISSUER,
+            subject=f"subject-{suffix}",
+            user_id=user_id,
+            default_tenant_id=tenant_id,
+            identity_type="KLYROW_ONLY",
+        )
+        session.add(Tenant(id=tenant_id, name="Browser Tenant", quota=10))
+        session.add(user)
         session.add(
             TenantMember(
                 id=f"member-{suffix}",
@@ -50,30 +59,33 @@ def test_session_reads_keep_one_csrf_token_until_session_rotation():
                 role="OWNER",
             )
         )
-        session.add(
-            OidcIdentity(
-                id=identity_id,
-                issuer=ISSUER,
-                subject=f"subject-{suffix}",
-                user_id=user_id,
-                default_tenant_id=tenant_id,
-                identity_type="KLYROW_ONLY",
-            )
-        )
+        session.add(identity)
         session.add(
             BrowserSession(
                 id=session_id,
                 token_hash=sha(raw),
-                csrf_hash=sha("obsolete-token"),
+                csrf_hash=sha(csrf),
                 identity_id=identity_id,
                 user_id=user_id,
                 tenant_id=tenant_id,
                 role="OWNER",
+                refresh_ciphertext=auth_bff._encrypt("refresh-token"),
+                id_token_ciphertext=auth_bff._encrypt("id-token"),
                 expires_at=auth_bff.now() + timedelta(hours=1),
             )
         )
         session.commit()
+        if disable == "user":
+            user.enabled = False
+        elif disable == "identity":
+            identity.enabled = False
+        session.commit()
     client.cookies.set(SESSION_COOKIE, raw)
+    return client, session_id, csrf
+
+
+def test_session_reads_keep_one_csrf_token_until_session_rotation():
+    client, session_id, _csrf = _browser_principal_session()
     first = client.get("/auth/session")
     second = client.get("/auth/session")
     assert first.status_code == second.status_code == 200
@@ -83,6 +95,18 @@ def test_session_reads_keep_one_csrf_token_until_session_rotation():
         "/auth/logout", headers={"X-Klyrow-CSRF": first.json()["csrf_token"]}
     )
     assert logout.status_code == 200
+
+
+@pytest.mark.parametrize("disabled_record", ["user", "identity"])
+def test_disabled_principals_are_revoked_before_reads_or_refresh(disabled_record):
+    client, session_id, csrf = _browser_principal_session(disable=disabled_record)
+    refresh = client.post("/auth/refresh", headers={"X-Klyrow-CSRF": csrf})
+    assert refresh.status_code == 401
+    assert refresh.json()["detail"] == "principal_disabled"
+    assert client.get("/app/api/context").status_code == 401
+    with DB() as session:
+        item = session.get(BrowserSession, session_id)
+        assert item and item.revoked_at is not None
 
 
 def test_recovery_uses_supported_keycloak_forgot_credentials_flow_without_lookup():
@@ -118,7 +142,6 @@ def test_password_and_verification_actions_use_keycloak_aia():
     assert parse_qs(urlparse(verification.json()["redirect_to"]).query)[
         "kc_action"
     ] == ["VERIFY_EMAIL"]
-
 
 
 def test_cancelled_application_action_never_reaches_success_page():

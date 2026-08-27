@@ -21,23 +21,26 @@ from .security_smtp_worker import security_smtp_delivery_loop
 
 ROLE = os.getenv("KLYROW_WORKER_ROLE", "mail")
 RUNNING = True
+_TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
-def tenant_postal_delivery_enabled() -> bool:
+def tenant_postal_provisioning_enabled() -> bool:
     """Require an explicit opt-in before replacing the released global-key path."""
 
     return (
-        os.getenv("KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED", "false").lower()
-        == "true"
+        os.getenv("KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED", "false")
+        .strip()
+        .lower()
+        in _TRUE_VALUES
     )
 
 
-def selected_mail_delivery_loop():
+def selected_email_outbox_loop():
     """Preserve released delivery unless the complete tenant provisioning stack is on."""
 
     return (
         tenant_email_outbox_loop
-        if tenant_postal_delivery_enabled()
+        if tenant_postal_provisioning_enabled()
         else email_outbox_loop
     )
 
@@ -53,7 +56,7 @@ async def health(reader, writer):
             "service": "klyrow-" + ROLE,
             "role": ROLE,
             "tenant_postal_delivery": (
-                tenant_postal_delivery_enabled() if ROLE == "mail" else None
+                tenant_postal_provisioning_enabled() if ROLE == "mail" else None
             ),
         }
     ).encode()
@@ -178,7 +181,7 @@ async def main():
     )
     tasks = [asyncio.create_task(loop())]
     if ROLE == "mail":
-        delivery_loop = selected_mail_delivery_loop()
+        delivery_loop = selected_email_outbox_loop()
         tasks.extend(
             [
                 asyncio.create_task(postal_retry_loop()),
