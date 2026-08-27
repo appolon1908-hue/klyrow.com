@@ -2,9 +2,12 @@
 
 ## Branch and safety boundary
 
-Work only on `fix/klyrow-auth-security-stabilization`, stacked on the exact current head of PR #36.
+Work only on `fix/klyrow-auth-security-stabilization`, stacked on the exact
+current head of PR #36.
 
-Do not deploy, publish images, mutate a server, change DNS/TLS/Keycloak/Postal, create or rotate credentials, send email, or enable live/external delivery. Preserve these defaults:
+Do not deploy, publish images, mutate a server, change DNS/TLS/Keycloak/Postal,
+create or rotate credentials, send email, or enable live/external delivery.
+Preserve these defaults:
 
 ```text
 KLYROW_SAFE_MODE=true
@@ -18,44 +21,61 @@ PRODUCTION_PROVIDER_ROUTING=false
 MARKETING_DELIVERY=false
 ```
 
-Dedicated SECURITY SMTP implementation remains isolated in its own PRs and is not bundled into this branch.
+Dedicated SECURITY SMTP implementation remains isolated in its own PRs.
 
 ## Mission 1 — browser-session authority
 
-- Revalidate the local `OidcIdentity`, `User`, tenant membership, and tenant on every authenticated browser request.
-- Revoke the opaque browser session immediately when the identity, user, membership, or tenant is disabled.
-- Revalidate again before refresh can rotate a session.
-- Reflect membership-role changes in existing sessions without relying on expiry.
-- Preserve the stable per-session CSRF token and opaque `__Host-klyrow_session` cookie.
-- Add regression tests for disabled user, disabled identity, refresh denial, revocation, and role changes.
+- Revalidate `OidcIdentity`, `User`, membership, and tenant on every
+  authenticated browser request.
+- Revoke the opaque session immediately when an authority record is disabled.
+- Enforce a bounded browser idle timeout before touching `last_seen_at`.
+- Preserve the original absolute session deadline across refresh rotation.
+- Revoke all sessions for the local user across all linked OIDC identities when
+  `/auth/logout-all` is used.
+- Reflect membership-role changes immediately.
+- Preserve stable per-session CSRF and the opaque `__Host-klyrow_session`
+  cookie.
 
-## Mission 2 — backwards-compatible Postal delivery
+## Mission 2 — invitations
 
-- Preserve the released global Postal-credential delivery loop for the standard root Compose deployment.
-- Enable tenant-scoped Postal credential delivery only when `KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED=true`.
-- The Postal provisioning overlay must set the flag explicitly and retain the provisioning worker, provisioner, and provider-credential key.
-- Do not silently inherit the global Postal key once tenant provisioning is explicitly enabled.
-- Add tests for the default and explicitly enabled worker selection.
+- Keep the supported Keycloak OIDC `/forgot-credentials` flow with PKCE, state,
+  nonce, and safe return URLs.
+- Bind an explicitly validated invitation to its one-time OIDC transaction.
+- Fail closed when the selected invitation no longer matches the verified
+  identity email or tenant.
+- Return the invitation capability once to the authorized OWNER/ADMIN creator
+  with `Cache-Control: no-store`; persist only its hash.
+- Do not silently create a new owner workspace when a selected invitation
+  fails.
 
-## Mission 3 — runtime domain inventory
+## Mission 3 — Postal runtime compatibility and callback tenancy
 
-Record the operator-confirmed 14-domain sending inventory in a normalized machine-readable manifest. Add a read-only verifier that compares the manifest with `domain_claims` and requires state `SENDING_ENABLED`.
+- Preserve the released global Postal-credential delivery loop for the root
+  Compose deployment.
+- Enable tenant-scoped Postal credentials only when
+  `KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED=true`.
+- In tenant mode, resolve every signed Postal lifecycle callback from durable
+  local send/provider mappings and a READY tenant mapping.
+- Never use `KLYROW_POSTAL_TENANT_ID` as a fallback in tenant mode.
+- Reject ambiguous or unresolved tenant attribution without writing event,
+  audit, message, or suppression state.
 
-The verifier must:
+## Mission 4 — runtime domain evidence
 
-- use a read-only `SELECT`;
-- report missing, wrong-state, and unexpected sending-enabled domains;
-- make no DNS, Postal, Keycloak, provider, or database mutation;
-- return non-zero on drift.
+Maintain the operator-confirmed 14-domain evidence and the read-only verifier.
+The verifier must report missing, wrong-state, and unexpected sending-enabled
+domains, make no mutation, and return non-zero on drift.
 
-## Mission 4 — architecture and branch cleanup
+## Mission 5 — architecture and branch cleanup
 
-- Preserve Klyrow as the email product/control plane.
-- Keep Postal and Mautic behind Klyrow.
-- Keep Codestra Middleware as the only cross-system write boundary.
-- Do not combine unrelated SECURITY SMTP, Odoo, n8n, Kong, Caddy, or deployment activation work.
+- Klyrow remains the email product/control plane.
+- Postal and Mautic remain internal engines.
+- Codestra Middleware remains the only cross-system write boundary.
+- Keep SECURITY SMTP, Odoo, n8n, Kong, Caddy, DNS/TLS, and deployment
+  activation isolated.
 - Close superseded PRs only after the consolidated implementation is merged.
-- Delete no branch until commit ancestry or an archive tag proves its work is preserved.
+- Delete no branch until ancestry or an archive tag proves its work is
+  preserved.
 
 ## Required validation
 
@@ -71,11 +91,11 @@ pnpm test
 pnpm build
 pnpm test:e2e
 gitleaks
-backend image build
-frontend image build
+backend and frontend image builds
 Trivy HIGH/CRITICAL scans
 CycloneDX SBOM generation
 git diff --check
 ```
 
-Do not mark the PR ready until exact-head CI is green and every applicable review thread is resolved.
+Do not mark the PR ready until exact-head CI is green and every applicable
+review thread is resolved.

@@ -1,12 +1,13 @@
-"""Safe browser account actions and browser-session authority."""
+"""Safe browser account actions and hardened browser-session authority."""
 from __future__ import annotations
 
 import base64
 import hashlib
 import hmac
+import os
 from datetime import timezone
 from typing import Optional
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -43,6 +44,24 @@ def stable_csrf_token(session_id: str) -> str:
         hashlib.sha256,
     ).digest()
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+
+def _aware(value):
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _idle_timeout_seconds() -> int:
+    """Return a bounded inactivity timeout that never exceeds the absolute TTL."""
+
+    try:
+        configured = int(
+            os.getenv("KLYROW_BROWSER_SESSION_IDLE_SECONDS", "1800")
+        )
+    except (TypeError, ValueError):
+        configured = 1800
+    return max(300, min(configured, auth_bff._session_ttl()))
 
 
 def _active_authority(
@@ -85,9 +104,16 @@ def _get_browser_session_with_authority(
     session: Session,
     touch: bool = True,
 ) -> BrowserSession:
-    """Revoke stale sessions when identity, user, membership, or tenant is disabled."""
+    """Enforce absolute, idle, identity, membership and tenant validity."""
 
     item = _ORIGINAL_GET_BROWSER_SESSION(request, session, touch=False)
+    current = auth_bff.now()
+    last_seen = _aware(item.last_seen_at) or _aware(item.created_at) or current
+    if (current - last_seen).total_seconds() > _idle_timeout_seconds():
+        item.revoked_at = current
+        session.commit()
+        raise HTTPException(401, "session_idle_timeout")
+
     try:
         _identity, _user, membership, _tenant = _active_authority(
             session,
@@ -96,7 +122,7 @@ def _get_browser_session_with_authority(
             tenant_id=item.tenant_id,
         )
     except HTTPException:
-        item.revoked_at = auth_bff.now()
+        item.revoked_at = current
         session.commit()
         raise
 
@@ -105,7 +131,7 @@ def _get_browser_session_with_authority(
         item.role = membership.role
         changed = True
     if touch:
-        item.last_seen_at = auth_bff.now()
+        item.last_seen_at = current
         changed = True
     if changed:
         session.commit()
@@ -121,7 +147,20 @@ def _new_session_with_stable_csrf(
     tokens: dict,
     rotated_from_id: Optional[str] = None,
 ):
-    """Create a session only after revalidating the current authority records."""
+    """Create/rotate a session without extending its original absolute deadline."""
+
+    absolute_deadline = None
+    if rotated_from_id:
+        prior = session.get(BrowserSession, rotated_from_id, populate_existing=True)
+        if (
+            not prior
+            or prior.user_id != user.id
+            or prior.identity_id != identity.id
+        ):
+            raise HTTPException(401, "session_rotation_invalid")
+        absolute_deadline = _aware(prior.expires_at)
+        if not absolute_deadline or absolute_deadline <= auth_bff.now():
+            raise HTTPException(401, "session_expired")
 
     identity, user, membership, _tenant = _active_authority(
         session,
@@ -138,6 +177,8 @@ def _new_session_with_stable_csrf(
         tokens,
         rotated_from_id=rotated_from_id,
     )
+    if absolute_deadline and _aware(item.expires_at) > absolute_deadline:
+        item.expires_at = absolute_deadline
     csrf = stable_csrf_token(item.id)
     item.csrf_hash = sha(csrf)
     session.commit()
@@ -157,6 +198,8 @@ def _identity_action_url(
     parsed = urlsplit(url)
     path = parsed.path
     if forgot_credentials:
+        # Keycloak's supported client-initiated Reset Credentials flow replaces
+        # only the terminal OIDC `/auth` segment with `/forgot-credentials`.
         suffix = "/protocol/openid-connect/auth"
         if not path.endswith(suffix):
             raise HTTPException(503, "canonical_oidc_misconfigured")
@@ -168,13 +211,14 @@ def _identity_action_url(
 
 
 def install_auth_extensions() -> None:
-    """Install browser-session hardening and account-action routes exactly once."""
+    """Replace historical routes and session helpers exactly once."""
 
     global _INSTALLED
     if _INSTALLED:
         return
+    replacement_paths = {"/auth/session", "/auth/callback", "/auth/logout-all"}
     for route in list(auth_bff.router.routes):
-        if getattr(route, "path", "") in {"/auth/session", "/auth/callback"}:
+        if getattr(route, "path", "") in replacement_paths:
             auth_bff.router.routes.remove(route)
     auth_bff._get_browser_session = _get_browser_session_with_authority
     auth_bff._new_session = _new_session_with_stable_csrf
@@ -197,28 +241,37 @@ def oidc_callback(
     )
     if not transaction or transaction.used_at:
         raise HTTPException(410, "oidc_state_invalid_or_used")
-    expiry = transaction.expires_at
-    if expiry.tzinfo is None:
-        expiry = expiry.replace(tzinfo=timezone.utc)
-    if expiry <= auth_bff.now():
+    expiry = _aware(transaction.expires_at)
+    if not expiry or expiry <= auth_bff.now():
         raise HTTPException(410, "oidc_state_expired")
     transaction.used_at = auth_bff.now()
     session.commit()
 
-    # Never turn a cancelled/omitted application-initiated action into a success
-    # page. Keycloak documents kc_action_status as the completion signal.
+    # Never turn a cancelled/omitted application-initiated action into success.
     if error or not code or (
         transaction.mode in _ACTION_MODES and kc_action_status != "success"
     ):
         return RedirectResponse(
-            "/service-error", status_code=303, headers={"Cache-Control": "no-store"}
+            "/service-error",
+            status_code=303,
+            headers={"Cache-Control": "no-store"},
         )
 
     verifier = auth_bff._decrypt(transaction.verifier_ciphertext)
     nonce = auth_bff._decrypt(transaction.nonce_ciphertext)
     tokens = auth_bff._exchange_code(code, verifier, request)
     claims = auth_bff._validate_id_token(tokens["id_token"], nonce)
-    identity, user, membership = auth_bff._identity_context(session, claims)
+    if transaction.mode.startswith("invite:"):
+        from .invitation_flow import resolve_selected_identity_context
+        from .postal_provisioning import enqueue_postal_provisioning
+
+        invitation_id = transaction.mode.split(":", 1)[1]
+        identity, user, membership = resolve_selected_identity_context(
+            session, claims, invitation_id
+        )
+        enqueue_postal_provisioning(session, membership.tenant_id)
+    else:
+        identity, user, membership = auth_bff._identity_context(session, claims)
     item, raw, _csrf = auth_bff._new_session(
         session, request, identity, user, membership, tokens
     )
@@ -236,7 +289,10 @@ def session_status(request: Request, session: Session = Depends(db)):
     try:
         item = auth_bff._get_browser_session(request, session)
     except HTTPException as exc:
-        if exc.status_code == 401 and exc.detail != "principal_disabled":
+        if exc.status_code == 401 and exc.detail not in {
+            "principal_disabled",
+            "session_idle_timeout",
+        }:
             return JSONResponse(
                 {"authenticated": False},
                 status_code=200,
@@ -252,6 +308,30 @@ def session_status(request: Request, session: Session = Depends(db)):
         auth_bff._session_body(session, item, csrf),
         headers={"Cache-Control": "no-store"},
     )
+
+
+@router.post("/auth/logout-all")
+def logout_all(
+    request: Request,
+    current: BrowserSession = Depends(auth_bff.csrf_guard),
+    session: Session = Depends(db),
+):
+    rows = session.scalars(
+        select(BrowserSession).where(
+            BrowserSession.user_id == current.user_id,
+            BrowserSession.revoked_at.is_(None),
+        )
+    ).all()
+    revoked_at = auth_bff.now()
+    for item in rows:
+        item.revoked_at = revoked_at
+    session.commit()
+    response = JSONResponse(
+        {"logged_out": True, "revoked_sessions": len(rows)},
+        headers={"Cache-Control": "no-store"},
+    )
+    auth_bff._clear_session_cookie(response)
+    return response
 
 
 @router.post("/auth/actions/recover", status_code=202)
@@ -314,15 +394,30 @@ def validate_invitation(
 ):
     auth_rate(request, "browser-invitation")
     item = session.scalar(
-        select(TenantInvitation).where(TenantInvitation.token_hash == sha(payload.token))
+        select(TenantInvitation).where(
+            TenantInvitation.token_hash == sha(payload.token)
+        )
     )
     valid = False
     if item and not item.revoked_at and not item.accepted_at:
-        expiry = item.expires_at
-        if expiry.tzinfo is None:
-            expiry = expiry.replace(tzinfo=timezone.utc)
-        valid = expiry > auth_bff.now()
-    return {
-        "valid": valid,
-        "redirect_to": "/auth/signup?return_to=%2Fonboarding" if valid else None,
-    }
+        expiry = _aware(item.expires_at)
+        valid = bool(expiry and expiry > auth_bff.now())
+    if not valid:
+        return {"valid": False, "redirect_to": None}
+
+    redirect_to = auth_bff._authorization_url(
+        request, session, "signup", "/onboarding"
+    )
+    state_values = parse_qs(urlsplit(redirect_to).query).get("state", [])
+    if len(state_values) != 1:
+        raise HTTPException(503, "oidc_invitation_state_unavailable")
+    transaction = session.scalar(
+        select(OidcLoginTransaction).where(
+            OidcLoginTransaction.state_hash == sha(state_values[0])
+        )
+    )
+    if transaction is None:
+        raise HTTPException(503, "oidc_invitation_state_unavailable")
+    transaction.mode = "invite:" + item.id
+    session.commit()
+    return {"valid": True, "redirect_to": redirect_to}

@@ -2,17 +2,21 @@
 
 ## Purpose
 
-This repository records the expected runtime inventory of Klyrow domains that are both verified and sending-enabled. The inventory is an operational contract, not a bootstrap migration and not permission to change DNS, Postal, Keycloak, or live-delivery controls.
+This repository records the expected runtime inventory of Klyrow domains that
+are verified and sending-enabled. The inventory is operational evidence, not a
+bootstrap migration, sender authorization list, or permission to change DNS,
+Postal, Keycloak, or live-delivery controls.
 
-The machine-readable source is:
+The machine-readable evidence is:
 
 ```text
-config/runtime/klyrow-sending-domains.json
+evidence/runtime/verified-sending-domains-20260827.json
 ```
 
 ## Expected runtime state
 
-Exactly 14 domains are expected in `domain_claims` with state `SENDING_ENABLED`:
+Exactly 14 domains are expected in `domain_claims` with state
+`SENDING_ENABLED`:
 
 1. `beyvra.com`
 2. `breero.com`
@@ -31,19 +35,27 @@ Exactly 14 domains are expected in `domain_claims` with state `SENDING_ENABLED`:
 
 ## Read-only verification
 
-Run from a reviewed Klyrow checkout with a read-only database URL:
+Run from a reviewed Klyrow checkout with a least-privilege read-only database
+URL:
 
 ```bash
 KLYROW_DATABASE_URL='postgresql+psycopg://READ_ONLY_USER@HOST:5432/klyrow' \
   scripts/ops/verify-klyrow-sending-domains
 ```
 
-The verifier performs one `SELECT` against `domain_claims`. It fails when an expected domain is missing, has a state other than `SENDING_ENABLED`, or when another unreviewed domain is sending-enabled.
+The verifier performs one `SELECT` against `domain_claims`. It fails when an
+expected domain is missing, has a state other than `SENDING_ENABLED`, or when
+another unreviewed domain is sending-enabled.
 
 ## Authority and safety
 
-- Klyrow owns domain onboarding, sender authorization, Postal/Mautic integration, suppression, consent, usage, and delivery lifecycle.
-- Postal and Mautic remain internal provider engines.
-- Cross-system events and mutations go through the Codestra Middleware boundary; this inventory does not authorize direct Odoo or n8n writes.
-- Runtime read-back is required. A Git manifest alone is not evidence that DNS, DKIM, return path, tracking, sender identities, suppression policy, or provider state are healthy.
-- `KLYROW_SAFE_MODE`, production approval, canary, and external-delivery gates remain independent and fail-closed.
+- A verified domain still requires an active sender identity, tenant
+  authorization, stream policy, consent/suppression enforcement, quota, and
+  every applicable delivery gate.
+- Postal and Mautic remain internal engines behind the Klyrow control plane.
+- Cross-system events and mutations go through Codestra Middleware.
+- Runtime read-back is required. A Git evidence file alone does not prove that
+  DNS, DKIM, return path, tracking, sender identities, suppressions, or provider
+  state remain healthy.
+- `KLYROW_SAFE_MODE`, production approval, canary controls, and external
+  delivery gates remain independent and fail-closed.

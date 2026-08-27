@@ -25,7 +25,7 @@ _TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 def tenant_postal_provisioning_enabled() -> bool:
-    """Require an explicit opt-in before replacing the released global-key path."""
+    """Select tenant credentials only when the complete provisioning stack is enabled."""
 
     return (
         os.getenv("KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED", "false")
@@ -36,13 +36,16 @@ def tenant_postal_provisioning_enabled() -> bool:
 
 
 def selected_email_outbox_loop():
-    """Preserve released delivery unless the complete tenant provisioning stack is on."""
+    """Preserve legacy delivery for the base Compose deployment.
 
-    return (
-        tenant_email_outbox_loop
-        if tenant_postal_provisioning_enabled()
-        else email_outbox_loop
-    )
+    The tenant-scoped loop requires the provider-credential key, Postal bridge,
+    and provisioning worker. The optional provisioning Compose contract sets
+    KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED=true only when all three exist.
+    """
+
+    if tenant_postal_provisioning_enabled():
+        return tenant_email_outbox_loop
+    return email_outbox_loop
 
 
 async def health(reader, writer):
@@ -51,14 +54,7 @@ async def health(reader, writer):
     except Exception:
         pass
     body = json.dumps(
-        {
-            "status": "ok",
-            "service": "klyrow-" + ROLE,
-            "role": ROLE,
-            "tenant_postal_delivery": (
-                tenant_postal_provisioning_enabled() if ROLE == "mail" else None
-            ),
-        }
+        {"status": "ok", "service": "klyrow-" + ROLE, "role": ROLE}
     ).encode()
     writer.write(
         b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
@@ -181,11 +177,10 @@ async def main():
     )
     tasks = [asyncio.create_task(loop())]
     if ROLE == "mail":
-        delivery_loop = selected_email_outbox_loop()
         tasks.extend(
             [
                 asyncio.create_task(postal_retry_loop()),
-                asyncio.create_task(delivery_loop()),
+                asyncio.create_task(selected_email_outbox_loop()()),
                 asyncio.create_task(security_smtp_delivery_loop()),
             ]
         )
