@@ -8,4 +8,10 @@ auth_bff._identity_context = resolve_identity_context
 app.include_router(auth_bff_router)
 app.include_router(tenancy_onboarding_router)
 
+# Starlette routes are first-match. Keep the SPA fallback after the /app/api/* routes.
+for route in list(app.router.routes):
+    if getattr(route, "path", "") == "/app/{path:path}":
+        app.router.routes.remove(route)
+        app.router.routes.append(route)
+
 __all__ = ["app"]
