@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 import jwt
@@ -25,11 +25,47 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from .main import Base, SECRET, Tenant, User, db, sha
 from .tenancy import OidcIdentity, TenantMember
 
-router = APIRouter(tags=["Browser authentication"])
 SESSION_COOKIE = "__Host-klyrow_session"
 ISSUER = "https://auth.codestra.co/realms/codestra"
+CANONICAL_APP_ORIGIN = "https://app.klyrow.com"
 _jwks_clients: dict[str, PyJWKClient] = {}
 now = lambda: datetime.now(timezone.utc)
+
+
+def _is_production() -> bool:
+    return os.getenv("KLYROW_ENV", "development").lower() == "production"
+
+
+def _public_origin() -> str:
+    configured = os.getenv("KLYROW_PUBLIC_URL", CANONICAL_APP_ORIGIN).strip().rstrip("/")
+    parsed = urlsplit(configured)
+    valid = (
+        parsed.scheme in ({"https"} if _is_production() else {"http", "https"})
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path in {"", "/"}
+        and not parsed.query
+        and not parsed.fragment
+    )
+    if not valid:
+        raise HTTPException(503, "canonical_app_origin_misconfigured")
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    if _is_production() and origin != CANONICAL_APP_ORIGIN:
+        raise HTTPException(503, "canonical_app_origin_misconfigured")
+    return origin
+
+
+def _canonical_browser_request(request: Request) -> None:
+    """Keep the browser/BFF surface on the one registered public origin."""
+    if not _is_production():
+        return
+    expected_host = urlsplit(_public_origin()).hostname
+    if request.url.hostname != expected_host:
+        raise HTTPException(421, "canonical_app_host_required")
+
+
+router = APIRouter(tags=["Browser authentication"], dependencies=[Depends(_canonical_browser_request)])
 
 
 class OidcLoginTransaction(Base):
@@ -89,9 +125,23 @@ def _client_secret() -> Optional[str]:
 
 def _redirect_uri(request: Request) -> str:
     configured = os.getenv("KLYROW_OIDC_REDIRECT_URI", "").strip()
-    if configured:
-        return configured
-    return str(request.base_url).rstrip("/") + "/auth/callback"
+    if not configured:
+        configured = (_public_origin() if _is_production() else str(request.base_url).rstrip("/")) + "/auth/callback"
+    parsed = urlsplit(configured)
+    valid = (
+        parsed.scheme in ({"https"} if _is_production() else {"http", "https"})
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path == "/auth/callback"
+        and not parsed.query
+        and not parsed.fragment
+    )
+    if not valid:
+        raise HTTPException(503, "oidc_redirect_uri_misconfigured")
+    if _is_production() and configured != CANONICAL_APP_ORIGIN + "/auth/callback":
+        raise HTTPException(503, "oidc_redirect_uri_misconfigured")
+    return configured
 
 
 def _session_ttl() -> int:
@@ -136,6 +186,7 @@ def _pkce_challenge(verifier: str) -> str:
 
 
 def _authorization_url(request: Request, s: Session, mode: str, return_to: Optional[str]) -> str:
+    redirect_uri = _redirect_uri(request)
     state = secrets.token_urlsafe(32)
     nonce = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64)
@@ -154,7 +205,7 @@ def _authorization_url(request: Request, s: Session, mode: str, return_to: Optio
     endpoint = issuer + ("/protocol/openid-connect/registrations" if mode == "signup" else "/protocol/openid-connect/auth")
     params = {
         "client_id": _client_id(),
-        "redirect_uri": _redirect_uri(request),
+        "redirect_uri": redirect_uri,
         "response_type": "code",
         "scope": "openid profile email",
         "state": state,
@@ -489,7 +540,7 @@ def revoke_session(session_id: str, request: Request, current: BrowserSession = 
 def logout(request: Request, current: BrowserSession = Depends(csrf_guard), s: Session = Depends(db)):
     current.revoked_at = now()
     end_session = _canonical_issuer() + "/protocol/openid-connect/logout?" + urlencode(
-        {"client_id": _client_id(), "post_logout_redirect_uri": os.getenv("KLYROW_PUBLIC_URL", "https://app.klyrow.com").rstrip("/") + "/logged-out"}
+        {"client_id": _client_id(), "post_logout_redirect_uri": _public_origin() + "/logged-out"}
     )
     if current.id_token_ciphertext:
         end_session += "&" + urlencode({"id_token_hint": _decrypt(current.id_token_ciphertext)})

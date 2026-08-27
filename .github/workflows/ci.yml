@@ -130,6 +130,55 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
 
+      - name: Verify composed browser edge and canonical callback
+        env:
+          EDGE_NETWORK: klyrow-auth-edge-ci
+          GATEWAY_IMAGE: klyrow-gateway:${{ github.sha }}
+          WEB_IMAGE: klyrow-web:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cleanup() {
+            docker rm -f klyrow-web-edge-ci klyrow-gateway-edge-ci >/dev/null 2>&1 || true
+            docker network rm "$EDGE_NETWORK" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker network create "$EDGE_NETWORK"
+          docker run --rm -d \
+            --network "$EDGE_NETWORK" \
+            --network-alias gateway \
+            --name klyrow-gateway-edge-ci \
+            --tmpfs /tmp \
+            --env KLYROW_ENV=development \
+            --env KLYROW_DATABASE_URL=sqlite:////tmp/klyrow-edge.db \
+            --env KLYROW_SESSION_SECRET=klyrow-auth-edge-ci-session-secret-2026 \
+            --env KLYROW_SAFE_MODE=true \
+            --env KLYROW_EMBEDDED_WORKERS=false \
+            --env LIVE_EMAIL_DELIVERY=false \
+            --env EXTERNAL_EMAIL_DELIVERY=false \
+            --env PRODUCTION_PROVIDER_ROUTING=false \
+            --env KLYROW_PUBLIC_URL=https://app.klyrow.com \
+            --env KLYROW_OIDC_REDIRECT_URI=https://app.klyrow.com/auth/callback \
+            "$GATEWAY_IMAGE"
+          docker run --rm -d \
+            --network "$EDGE_NETWORK" \
+            --name klyrow-web-edge-ci \
+            --publish 127.0.0.1:18014:8080 \
+            "$WEB_IMAGE"
+
+          ready=false
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail --output /dev/null \
+              --header "Host: app.klyrow.com" \
+              http://127.0.0.1:18014/auth/session; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = true
+          KLYROW_EDGE_BASE_URL=http://127.0.0.1:18014 scripts/verify-browser-edge
+
       - name: Scan backend candidate
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
