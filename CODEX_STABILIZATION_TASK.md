@@ -1,70 +1,63 @@
-# Klyrow Authentication and SECURITY-Mail Stabilization Task
+# Klyrow Application Stabilization Task
 
 ## Branch and safety boundary
 
-Work only on `fix/klyrow-auth-security-stabilization`.
+Work only on `fix/klyrow-auth-security-stabilization`, stacked on the exact current head of PR #36.
 
 Do not deploy, publish images, mutate a server, change DNS/TLS/Keycloak/Postal, create or rotate credentials, send email, or enable live/external delivery. Preserve these defaults:
 
 ```text
 KLYROW_SAFE_MODE=true
 KLYROW_PRODUCTION_GATE_APPROVED=false
+KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED=false
 KLYROW_SECURITY_SMTP_ENABLED=false
 KLYROW_SECURITY_SMTP_LIVE_ENABLED=false
-KLYROW_SECURITY_SMTP_PRODUCTION_APPROVED=false
 LIVE_EMAIL_DELIVERY=false
 EXTERNAL_EMAIL_DELIVERY=false
 PRODUCTION_PROVIDER_ROUTING=false
 MARKETING_DELIVERY=false
 ```
 
-## Mission 1 — SECURITY SMTP runtime
+Dedicated SECURITY SMTP implementation remains isolated in its own PRs and is not bundled into this branch.
 
-Integrate the reviewed behavior from `fix/security-smtp-runtime-wiring` without losing the current authentication/BFF, onboarding, dashboard, Postal-provisioning, or worker code.
+## Mission 1 — browser-session authority
 
-Required behavior:
+- Revalidate the local `OidcIdentity`, `User`, tenant membership, and tenant on every authenticated browser request.
+- Revoke the opaque browser session immediately when the identity, user, membership, or tenant is disabled.
+- Revalidate again before refresh can rotate a session.
+- Reflect membership-role changes in existing sessions without relying on expiry.
+- Preserve the stable per-session CSRF token and opaque `__Host-klyrow_session` cookie.
+- Add regression tests for disabled user, disabled identity, refresh denial, revocation, and role changes.
 
-- worker and SMTP relay receive identical SECURITY activation policy;
-- explicit production-approval gate;
-- exact lower-case canary recipient allowlist before production approval;
-- bounded canary maximum from 1 through 10;
-- reject a second recipient in a canary SMTP transaction;
-- reject external recipients outside the exact canary allowlist;
-- read-only preflight verifies tenant, credential, expiry, SECURITY-only stream, exact sender, verified/enabled domain, and tenant policy without reading or printing the SMTP password;
-- non-SECURITY streams remain sandbox-only.
+## Mission 2 — backwards-compatible Postal delivery
 
-## Mission 2 — encrypted SECURITY payload retention
+- Preserve the released global Postal-credential delivery loop for the standard root Compose deployment.
+- Enable tenant-scoped Postal credential delivery only when `KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED=true`.
+- The Postal provisioning overlay must set the flag explicitly and retain the provisioning worker, provisioner, and provider-credential key.
+- Do not silently inherit the global Postal key once tenant provisioning is explicitly enabled.
+- Add tests for the default and explicitly enabled worker selection.
 
-Integrate the encryption design from `feat/keycloak-security-mail-hardening` and resolve every review finding.
+## Mission 3 — runtime domain inventory
 
-Required behavior:
+Record the operator-confirmed 14-domain sending inventory in a normalized machine-readable manifest. Add a read-only verifier that compares the manifest with `domain_claims` and requires state `SENDING_ENABLED`.
 
-- queued SECURITY MIME is encrypted at rest;
-- decryption occurs only in the dedicated SECURITY delivery worker;
-- plaintext/base64 MIME and reset codes never appear in database JSON, logs, audit details, or API responses;
-- successful provider submission purges ciphertext;
-- the standard root `docker-compose.yml` wires the encryption-key file into both `worker` and `smtp-relay`, and defines the root Compose secret;
-- sandbox-delivered SECURITY messages and `sandbox_captures` are scrubbed no later than the bounded retention deadline;
-- terminal/dead-letter SECURITY records are scrubbed, including lease-expiry paths;
-- cleanup is idempotent and preserves delivery/dead-letter status and non-sensitive metadata;
-- add regression tests for Compose wiring, sandbox capture cleanup, delivered cleanup, terminal/dead-letter cleanup, missing key, invalid key, and bounded maximum age.
+The verifier must:
 
-## Mission 3 — resolver availability semantics
+- use a read-only `SELECT`;
+- report missing, wrong-state, and unexpected sending-enabled domains;
+- make no DNS, Postal, Keycloak, provider, or database mutation;
+- return non-zero on drift.
 
-Apply the small resolver correction from PR #30 to the current `apps/gateway/app/main.py` without copying its mixed historical branch.
+## Mission 4 — architecture and branch cleanup
 
-Required behavior:
-
-- `httpx.RequestError` while contacting the authoritative resolver returns HTTP 503 with `authorization_unavailable`;
-- resolver HTTP 5xx returns the same 503;
-- malformed/non-JSON resolver responses return the same 503;
-- a nominally successful response missing `identity_id` or `tenant_id` returns the same 503;
-- preserve 401 for invalid credentials, 404 for deliberately hidden resources, and 403 for authorization denial;
-- add focused regression tests.
+- Preserve Klyrow as the email product/control plane.
+- Keep Postal and Mautic behind Klyrow.
+- Keep Codestra Middleware as the only cross-system write boundary.
+- Do not combine unrelated SECURITY SMTP, Odoo, n8n, Kong, Caddy, or deployment activation work.
+- Close superseded PRs only after the consolidated implementation is merged.
+- Delete no branch until commit ancestry or an archive tag proves its work is preserved.
 
 ## Required validation
-
-Run and report:
 
 ```text
 python scripts/migrate twice against PostgreSQL 17
@@ -85,4 +78,4 @@ CycloneDX SBOM generation
 git diff --check
 ```
 
-Do not mark the PR ready until exact-head CI is green and every review thread is resolved.
+Do not mark the PR ready until exact-head CI is green and every applicable review thread is resolved.

@@ -10,7 +10,7 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from .billing import BillingEvent, BillingWorkItem, now
-from .main import DB, postal_retry_loop
+from .main import DB, email_outbox_loop, postal_retry_loop
 from .postal_provisioning import provisioning_tick, tenant_email_outbox_loop
 from .provider import (
     dispatch_provider_outbox,
@@ -23,13 +23,39 @@ ROLE = os.getenv("KLYROW_WORKER_ROLE", "mail")
 RUNNING = True
 
 
+def tenant_postal_delivery_enabled() -> bool:
+    """Require an explicit opt-in before replacing the released global-key path."""
+
+    return (
+        os.getenv("KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED", "false").lower()
+        == "true"
+    )
+
+
+def selected_mail_delivery_loop():
+    """Preserve released delivery unless the complete tenant provisioning stack is on."""
+
+    return (
+        tenant_email_outbox_loop
+        if tenant_postal_delivery_enabled()
+        else email_outbox_loop
+    )
+
+
 async def health(reader, writer):
     try:
         await reader.read(4096)
     except Exception:
         pass
     body = json.dumps(
-        {"status": "ok", "service": "klyrow-" + ROLE, "role": ROLE}
+        {
+            "status": "ok",
+            "service": "klyrow-" + ROLE,
+            "role": ROLE,
+            "tenant_postal_delivery": (
+                tenant_postal_delivery_enabled() if ROLE == "mail" else None
+            ),
+        }
     ).encode()
     writer.write(
         b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
@@ -152,10 +178,11 @@ async def main():
     )
     tasks = [asyncio.create_task(loop())]
     if ROLE == "mail":
+        delivery_loop = selected_mail_delivery_loop()
         tasks.extend(
             [
                 asyncio.create_task(postal_retry_loop()),
-                asyncio.create_task(tenant_email_outbox_loop()),
+                asyncio.create_task(delivery_loop()),
                 asyncio.create_task(security_smtp_delivery_loop()),
             ]
         )

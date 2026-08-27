@@ -1,4 +1,4 @@
-"""Safe browser account actions and stable per-session CSRF authority."""
+"""Safe browser account actions and browser-session authority."""
 from __future__ import annotations
 
 import base64
@@ -16,11 +16,12 @@ from sqlalchemy.orm import Session
 
 from . import auth_bff
 from .auth_bff import BrowserSession, OidcLoginTransaction
-from .main import SECRET, auth_rate, db, sha
-from .tenancy import TenantInvitation
+from .main import SECRET, Tenant, User, auth_rate, db, sha
+from .tenancy import OidcIdentity, TenantInvitation, TenantMember
 
 router = APIRouter(tags=["Browser account actions"])
 _ORIGINAL_NEW_SESSION = auth_bff._new_session
+_ORIGINAL_GET_BROWSER_SESSION = auth_bff._get_browser_session
 _INSTALLED = False
 _ACTION_MODES = {"update-password", "verify-email"}
 
@@ -44,9 +45,99 @@ def stable_csrf_token(session_id: str) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
 
-def _new_session_with_stable_csrf(*args, **kwargs):
-    item, raw, _csrf = _ORIGINAL_NEW_SESSION(*args, **kwargs)
-    session: Session = args[0] if args else kwargs["s"]
+def _active_authority(
+    session: Session,
+    *,
+    identity_id: str,
+    user_id: str,
+    tenant_id: str,
+) -> tuple[OidcIdentity, User, TenantMember, Tenant]:
+    """Reload every authority record that backs a browser session."""
+
+    identity = session.get(OidcIdentity, identity_id, populate_existing=True)
+    user = session.get(User, user_id, populate_existing=True)
+    if (
+        not identity
+        or not identity.enabled
+        or identity.user_id != user_id
+        or not user
+        or not user.enabled
+    ):
+        raise HTTPException(403, "account_disabled")
+
+    membership = session.scalar(
+        select(TenantMember)
+        .execution_options(populate_existing=True)
+        .where(
+            TenantMember.tenant_id == tenant_id,
+            TenantMember.user_id == user_id,
+            TenantMember.active == True,
+        )
+    )
+    tenant = session.get(Tenant, tenant_id, populate_existing=True)
+    if not membership or not tenant or not tenant.enabled:
+        raise HTTPException(403, "workspace_access_denied")
+    return identity, user, membership, tenant
+
+
+def _get_browser_session_with_authority(
+    request: Request,
+    session: Session,
+    touch: bool = True,
+) -> BrowserSession:
+    """Revoke stale sessions when identity, user, membership, or tenant is disabled."""
+
+    item = _ORIGINAL_GET_BROWSER_SESSION(request, session, touch=False)
+    try:
+        _identity, _user, membership, _tenant = _active_authority(
+            session,
+            identity_id=item.identity_id,
+            user_id=item.user_id,
+            tenant_id=item.tenant_id,
+        )
+    except HTTPException:
+        item.revoked_at = auth_bff.now()
+        session.commit()
+        raise
+
+    changed = False
+    if item.role != membership.role:
+        item.role = membership.role
+        changed = True
+    if touch:
+        item.last_seen_at = auth_bff.now()
+        changed = True
+    if changed:
+        session.commit()
+    return item
+
+
+def _new_session_with_stable_csrf(
+    session: Session,
+    request: Request,
+    identity: OidcIdentity,
+    user: User,
+    membership: TenantMember,
+    tokens: dict,
+    rotated_from_id: Optional[str] = None,
+):
+    """Create a session only after revalidating the current authority records."""
+
+    identity, user, membership, _tenant = _active_authority(
+        session,
+        identity_id=identity.id,
+        user_id=user.id,
+        tenant_id=membership.tenant_id,
+    )
+    item, raw, _csrf = _ORIGINAL_NEW_SESSION(
+        session,
+        request,
+        identity,
+        user,
+        membership,
+        tokens,
+        rotated_from_id=rotated_from_id,
+    )
     csrf = stable_csrf_token(item.id)
     item.csrf_hash = sha(csrf)
     session.commit()
@@ -77,7 +168,7 @@ def _identity_action_url(
 
 
 def install_auth_extensions() -> None:
-    """Replace rotating session/callback routes and session creation exactly once."""
+    """Install browser-session hardening and account-action routes exactly once."""
 
     global _INSTALLED
     if _INSTALLED:
@@ -85,6 +176,7 @@ def install_auth_extensions() -> None:
     for route in list(auth_bff.router.routes):
         if getattr(route, "path", "") in {"/auth/session", "/auth/callback"}:
             auth_bff.router.routes.remove(route)
+    auth_bff._get_browser_session = _get_browser_session_with_authority
     auth_bff._new_session = _new_session_with_stable_csrf
     _INSTALLED = True
 
