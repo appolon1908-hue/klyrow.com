@@ -10,7 +10,7 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from .billing import BillingEvent, BillingWorkItem, now
-from .main import DB, postal_retry_loop
+from .main import DB, email_outbox_loop, postal_retry_loop
 from .postal_provisioning import provisioning_tick, tenant_email_outbox_loop
 from .provider import (
     dispatch_provider_outbox,
@@ -21,6 +21,31 @@ from .security_smtp_worker import security_smtp_delivery_loop
 
 ROLE = os.getenv("KLYROW_WORKER_ROLE", "mail")
 RUNNING = True
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def tenant_postal_provisioning_enabled() -> bool:
+    """Select tenant credentials only when the complete provisioning stack is enabled."""
+
+    return (
+        os.getenv("KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED", "false")
+        .strip()
+        .lower()
+        in _TRUE_VALUES
+    )
+
+
+def selected_email_outbox_loop():
+    """Preserve legacy delivery for the base Compose deployment.
+
+    The tenant-scoped loop requires the provider-credential key, Postal bridge,
+    and provisioning worker. The optional provisioning Compose contract sets
+    KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED=true only when all three exist.
+    """
+
+    if tenant_postal_provisioning_enabled():
+        return tenant_email_outbox_loop
+    return email_outbox_loop
 
 
 async def health(reader, writer):
@@ -155,7 +180,7 @@ async def main():
         tasks.extend(
             [
                 asyncio.create_task(postal_retry_loop()),
-                asyncio.create_task(tenant_email_outbox_loop()),
+                asyncio.create_task(selected_email_outbox_loop()()),
                 asyncio.create_task(security_smtp_delivery_loop()),
             ]
         )
