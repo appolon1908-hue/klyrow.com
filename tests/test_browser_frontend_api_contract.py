@@ -39,6 +39,11 @@ def test_browser_api_contract_has_expected_methods():
         ("/app/api/team", "GET"),
         ("/app/api/team/invitations", "POST"),
         ("/app/api/admin/dashboard", "GET"),
+        ("/app/api/provisioning/postal", "GET"),
+        ("/app/api/provisioning/postal", "POST"),
+        ("/app/api/provisioning/postal/retry", "POST"),
+        ("/app/api/admin/provisioning/postal", "GET"),
+        ("/app/api/admin/provisioning/postal/{tenant_id}/retry", "POST"),
     }
     actual = {(path, method) for _, path, methods in _routes() for method in methods}
     assert expected <= actual
@@ -60,6 +65,7 @@ def test_frontend_only_calls_registered_browser_api_paths():
             "apps/web/src/Dashboard.vue",
             "apps/web/src/Onboarding.vue",
             "apps/web/src/AdminDashboard.vue",
+            "apps/web/src/Provisioning.vue",
         )
     )
     required = {
@@ -71,6 +77,9 @@ def test_frontend_only_calls_registered_browser_api_paths():
         "/app/api/onboarding",
         "/app/api/onboarding/complete",
         "/app/api/admin/dashboard",
+        "/app/api/provisioning/postal",
+        "/app/api/provisioning/postal/retry",
+        "/app/api/admin/provisioning/postal",
     }
     for path in required:
         assert path in source, path
@@ -84,6 +93,7 @@ def test_frontend_has_no_browser_token_storage_contract():
             "apps/web/src/Dashboard.vue",
             "apps/web/src/Onboarding.vue",
             "apps/web/src/AdminDashboard.vue",
+            "apps/web/src/Provisioning.vue",
         )
     )
     forbidden = ("localStorage", "sessionStorage", "refresh_token", "access_token", "id_token")
