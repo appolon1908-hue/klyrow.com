@@ -98,8 +98,16 @@ jobs:
           limit-severities-for-sarif: true
           exit-code: "1"
           ignore-unfixed: true
-      - name: Upload container scan
+      - name: Preserve container scan evidence
         if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: trivy-sarif-${{ github.sha }}
+          path: trivy-results.sarif
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload container scan to GitHub code scanning
+        if: ${{ vars.KLYROW_CODE_SCANNING_ENABLED == 'true' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-results.sarif
