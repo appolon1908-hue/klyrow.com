@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from cryptography.fernet import Fernet
 import pytest
@@ -59,3 +60,26 @@ def test_payload_retention_is_bounded(monkeypatch):
     monkeypatch.setenv("KLYROW_SECURITY_PAYLOAD_MAX_AGE_SECONDS", "86401")
     with pytest.raises(SecurityPayloadError):
         max_payload_age_seconds()
+
+
+def test_standard_launchers_mount_security_payload_secret():
+    root = Path(__file__).resolve().parents[1]
+    override = "deploy/docker-compose.security-mail.yml"
+    for relative in (
+        "scripts/start",
+        "scripts/update",
+        "scripts/deploy",
+        "config/systemd/klyrow-stack.service",
+    ):
+        content = (root / relative).read_text(encoding="utf-8")
+        assert override in content, f"{relative} must include SECURITY mail compose override"
+
+
+def test_security_retention_covers_sandbox_and_lease_terminal_paths():
+    root = Path(__file__).resolve().parents[1]
+    worker = (root / "apps/gateway/app/security_smtp_worker.py").read_text(encoding="utf-8")
+    assert "SandboxCapture" in worker
+    assert '"DELIVERED"' in worker
+    assert '"DEAD_LETTER"' in worker
+    assert "capture.content_json = safe_json" in worker
+    assert "payload_retention_expired" in worker
