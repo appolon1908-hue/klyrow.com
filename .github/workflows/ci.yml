@@ -107,7 +107,8 @@ jobs:
         with:
           persist-credentials: false
       - uses: docker/setup-buildx-action@v3
-      - name: Build immutable candidate
+
+      - name: Build backend candidate
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -117,30 +118,65 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-      - name: Scan candidate image
+
+      - name: Build frontend candidate
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          load: true
+          tags: klyrow-web:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Scan backend candidate
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: klyrow-gateway:${{ github.sha }}
           format: sarif
-          output: trivy-results.sarif
+          output: trivy-gateway.sarif
           severity: CRITICAL,HIGH
           limit-severities-for-sarif: true
           exit-code: "1"
           ignore-unfixed: true
+
+      - name: Scan frontend candidate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: klyrow-web:${{ github.sha }}
+          format: sarif
+          output: trivy-web.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: "1"
+          ignore-unfixed: true
+
       - name: Retain Trivy scan evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: trivy-${{ github.sha }}
-          path: trivy-results.sarif
+          path: |
+            trivy-gateway.sarif
+            trivy-web.sarif
           if-no-files-found: error
           retention-days: 30
-      - name: Generate CycloneDX SBOM
+
+      - name: Generate backend CycloneDX SBOM
         uses: anchore/sbom-action@v0
         with:
           image: klyrow-gateway:${{ github.sha }}
           format: cyclonedx-json
           output-file: klyrow-gateway-${{ github.sha }}.cdx.json
+          upload-artifact: true
+
+      - name: Generate frontend CycloneDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: klyrow-web:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: klyrow-web-${{ github.sha }}.cdx.json
           upload-artifact: true
 
   publish:
@@ -162,7 +198,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@v3
-      - id: push
+
+      - id: push_gateway
+        name: Publish backend image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -174,9 +212,31 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-      - name: Attest published digest
+
+      - id: push_web
+        name: Publish frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/klyrow-web:${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Attest backend digest
         uses: actions/attest-build-provenance@v3
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/klyrow-gateway
-          subject-digest: ${{ steps.push.outputs.digest }}
+          subject-digest: ${{ steps.push_gateway.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest frontend digest
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/klyrow-web
+          subject-digest: ${{ steps.push_web.outputs.digest }}
           push-to-registry: true
