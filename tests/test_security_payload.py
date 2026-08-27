@@ -3,7 +3,7 @@ import json
 from cryptography.fernet import Fernet
 import pytest
 
-from app.security_payload import (
+from apps.gateway.app.security_payload import (
     SecurityPayloadError,
     decrypt_security_payload,
     encrypted_security_payload,
