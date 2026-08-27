@@ -109,7 +109,7 @@ def test_disabled_principals_are_revoked_before_reads_or_refresh(disabled_record
         assert item and item.revoked_at is not None
 
 
-def test_recovery_uses_supported_keycloak_forgot_credentials_flow_without_lookup():
+def test_recovery_uses_supported_keycloak_reset_credentials_flow_without_lookup():
     client = _client()
     response = client.post(
         "/auth/actions/recover", json={"email": "unknown@example.com"}
@@ -156,15 +156,18 @@ def test_cancelled_application_action_never_reaches_success_page():
     assert response.headers["location"] == "/service-error"
 
 
-def test_invitation_is_validated_against_durable_token_state():
+def test_invitation_is_bound_to_the_oidc_transaction():
     client = _client()
     suffix = uuid.uuid4().hex
     raw = "invite_" + uuid.uuid4().hex
+    tenant_id = f"tenant-invite-{suffix}"
+    invitation_id = f"invite-{suffix}"
     with DB() as session:
+        session.add(Tenant(id=tenant_id, name="Invite Tenant", quota=100))
         session.add(
             TenantInvitation(
-                id=f"invite-{suffix}",
-                tenant_id=f"tenant-{suffix}",
+                id=invitation_id,
+                tenant_id=tenant_id,
                 email=f"invitee-{suffix}@example.com",
                 role="READ_ONLY",
                 token_hash=sha(raw),
@@ -178,8 +181,113 @@ def test_invitation_is_validated_against_durable_token_state():
         "/auth/actions/invitation", json={"token": "x" * 32}
     )
     assert valid.status_code == invalid.status_code == 200
-    assert valid.json() == {
-        "valid": True,
-        "redirect_to": "/auth/signup?return_to=%2Fonboarding",
-    }
+    redirect_to = valid.json()["redirect_to"]
+    assert redirect_to.startswith(ISSUER + "/protocol/openid-connect/registrations?")
+    state = parse_qs(urlparse(redirect_to).query)["state"][0]
+    with DB() as session:
+        transaction = session.scalar(
+            select(OidcLoginTransaction).where(
+                OidcLoginTransaction.state_hash == sha(state)
+            )
+        )
+        assert transaction and transaction.mode == "invite:" + invitation_id
     assert invalid.json() == {"valid": False, "redirect_to": None}
+
+
+def test_selected_invitation_wins_when_email_has_multiple_valid_invites(monkeypatch):
+    client = _client()
+    suffix = uuid.uuid4().hex
+    email = f"selected-{suffix}@example.com"
+    raw_a = "invite_a_" + uuid.uuid4().hex
+    raw_b = "invite_b_" + uuid.uuid4().hex
+    tenant_a = f"tenant-a-{suffix}"
+    tenant_b = f"tenant-b-{suffix}"
+    invite_a = f"invite-a-{suffix}"
+    invite_b = f"invite-b-{suffix}"
+    with DB() as session:
+        session.add_all(
+            [
+                Tenant(id=tenant_a, name="Tenant A", quota=100),
+                Tenant(id=tenant_b, name="Tenant B", quota=100),
+                TenantInvitation(
+                    id=invite_a,
+                    tenant_id=tenant_a,
+                    email=email,
+                    role="READ_ONLY",
+                    token_hash=sha(raw_a),
+                    expires_at=auth_bff.now() + timedelta(hours=1),
+                    created_by="test",
+                ),
+                TenantInvitation(
+                    id=invite_b,
+                    tenant_id=tenant_b,
+                    email=email,
+                    role="ADMIN",
+                    token_hash=sha(raw_b),
+                    expires_at=auth_bff.now() + timedelta(hours=1),
+                    created_by="test",
+                ),
+            ]
+        )
+        session.commit()
+
+    start = client.post("/auth/actions/invitation", json={"token": raw_b})
+    state = parse_qs(urlparse(start.json()["redirect_to"]).query)["state"][0]
+    monkeypatch.setattr(
+        auth_bff,
+        "_exchange_code",
+        lambda code, verifier, request: {
+            "id_token": "id-token",
+            "refresh_token": "refresh-token",
+        },
+    )
+    monkeypatch.setattr(
+        auth_bff,
+        "_validate_id_token",
+        lambda raw, expected_nonce=None: {
+            "iss": ISSUER,
+            "sub": f"subject-{suffix}",
+            "aud": "klyrow-portal",
+            "email": email,
+            "email_verified": True,
+        },
+    )
+    callback = client.get(
+        f"/auth/callback?state={state}&code=accepted",
+        follow_redirects=False,
+    )
+    assert callback.status_code == 303
+    assert callback.headers["location"] == "/onboarding"
+    with DB() as session:
+        user = session.scalar(select(User).where(User.email == email))
+        assert user is not None
+        memberships = session.scalars(
+            select(TenantMember).where(TenantMember.user_id == user.id)
+        ).all()
+        assert [(row.tenant_id, row.role) for row in memberships] == [
+            (tenant_b, "ADMIN")
+        ]
+        assert session.get(TenantInvitation, invite_b).accepted_at is not None
+        assert session.get(TenantInvitation, invite_a).accepted_at is None
+
+
+def test_production_invitation_returns_one_time_url_to_authorized_creator():
+    client, _session_id, csrf = _browser_principal_session()
+    response = client.post(
+        "/app/api/team/invitations",
+        headers={"X-Klyrow-CSRF": csrf},
+        json={
+            "email": f"new-invitee-{uuid.uuid4().hex}@example.com",
+            "role": "READ_ONLY",
+            "expires_hours": 24,
+        },
+    )
+    assert response.status_code == 201
+    assert response.headers["cache-control"] == "no-store"
+    body = response.json()
+    assert body["delivery_method"] == "ONE_TIME_URL"
+    assert body["delivery_state"] == "READY_FOR_SECURE_SHARE"
+    token = parse_qs(urlparse(body["invitation_url"]).query)["token"][0]
+    with DB() as session:
+        invitation = session.get(TenantInvitation, body["id"])
+        assert invitation and invitation.token_hash == sha(token)

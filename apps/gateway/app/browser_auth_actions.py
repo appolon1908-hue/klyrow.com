@@ -6,7 +6,7 @@ import hashlib
 import hmac
 from datetime import timezone
 from typing import Optional
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -118,6 +118,8 @@ def _identity_action_url(
     parsed = urlsplit(url)
     path = parsed.path
     if forgot_credentials:
+        # Keycloak's supported client-initiated Reset Credentials flow replaces
+        # only the terminal OIDC `/auth` segment with `/forgot-credentials`.
         suffix = "/protocol/openid-connect/auth"
         if not path.endswith(suffix):
             raise HTTPException(503, "canonical_oidc_misconfigured")
@@ -179,7 +181,17 @@ def oidc_callback(
     nonce = auth_bff._decrypt(transaction.nonce_ciphertext)
     tokens = auth_bff._exchange_code(code, verifier, request)
     claims = auth_bff._validate_id_token(tokens["id_token"], nonce)
-    identity, user, membership = auth_bff._identity_context(session, claims)
+    if transaction.mode.startswith("invite:"):
+        from .invitation_flow import resolve_selected_identity_context
+        from .postal_provisioning import enqueue_postal_provisioning
+
+        invitation_id = transaction.mode.split(":", 1)[1]
+        identity, user, membership = resolve_selected_identity_context(
+            session, claims, invitation_id
+        )
+        enqueue_postal_provisioning(session, membership.tenant_id)
+    else:
+        identity, user, membership = auth_bff._identity_context(session, claims)
     item, raw, _csrf = auth_bff._new_session(
         session, request, identity, user, membership, tokens
     )
@@ -283,7 +295,22 @@ def validate_invitation(
         if expiry.tzinfo is None:
             expiry = expiry.replace(tzinfo=timezone.utc)
         valid = expiry > auth_bff.now()
-    return {
-        "valid": valid,
-        "redirect_to": "/auth/signup?return_to=%2Fonboarding" if valid else None,
-    }
+    if not valid:
+        return {"valid": False, "redirect_to": None}
+
+    redirect_to = auth_bff._authorization_url(
+        request, session, "signup", "/onboarding"
+    )
+    state_values = parse_qs(urlsplit(redirect_to).query).get("state", [])
+    if len(state_values) != 1:
+        raise HTTPException(503, "oidc_invitation_state_unavailable")
+    transaction = session.scalar(
+        select(OidcLoginTransaction).where(
+            OidcLoginTransaction.state_hash == sha(state_values[0])
+        )
+    )
+    if transaction is None:
+        raise HTTPException(503, "oidc_invitation_state_unavailable")
+    transaction.mode = "invite:" + item.id
+    session.commit()
+    return {"valid": True, "redirect_to": redirect_to}
