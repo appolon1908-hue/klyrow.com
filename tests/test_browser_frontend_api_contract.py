@@ -1,7 +1,5 @@
 from pathlib import Path
 
-from fastapi.routing import APIRoute
-
 from apps.gateway.app.platform import app
 
 
@@ -11,8 +9,10 @@ ROOT = Path(__file__).parents[1]
 def _routes():
     rows = []
     for index, route in enumerate(app.router.routes):
-        if isinstance(route, APIRoute):
-            rows.append((index, route.path, set(route.methods or [])))
+        path = getattr(route, "path", None)
+        methods = set(getattr(route, "methods", None) or [])
+        if path and methods:
+            rows.append((index, path, methods))
     return rows
 
 
