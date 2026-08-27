@@ -6,11 +6,13 @@ from .main import AUTH_WEB_DIST, app
 from . import auth_bff
 from .auth_bff import router as auth_bff_router
 from .tenancy_onboarding import router as tenancy_onboarding_router
+from .browser_email_setup import router as browser_email_setup_router
 from .postal_provisioning import resolve_identity_context_with_provisioning, router as postal_provisioning_router
 
 auth_bff._identity_context = resolve_identity_context_with_provisioning
 app.include_router(auth_bff_router)
 app.include_router(tenancy_onboarding_router)
+app.include_router(browser_email_setup_router)
 app.include_router(postal_provisioning_router)
 
 @app.get("/admin", include_in_schema=False)
