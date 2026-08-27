@@ -1,0 +1,61 @@
+services:
+  postal-provisioner:
+    build:
+      context: .
+      dockerfile: docker/postal-provisioner.Dockerfile
+    environment:
+      KLYROW_ADMIN_EMAIL: ${KLYROW_ADMIN_EMAIL:?required}
+      KLYROW_POSTAL_PROVISIONER_TOKEN_FILE: /run/secrets/klyrow_postal_provisioner_token
+    secrets: [klyrow_postal_provisioner_token]
+    volumes: [./secrets/postal:/config:ro]
+    depends_on:
+      postal-db: {condition: service_healthy}
+    networks: [backend]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, ruby, -rsocket, -e, "s=TCPSocket.new('127.0.0.1',9090);s.write(\"GET /healthz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n\");raise unless s.read.include?('200 OK')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  provisioning-worker:
+    build:
+      context: .
+      dockerfile: apps/gateway/Dockerfile
+    env_file: '${KLYROW_ENV_FILE:-.env}'
+    environment:
+      KLYROW_ENV: production
+      KLYROW_WORKER_ROLE: provisioning
+      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
+      KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
+      KLYROW_PROVIDER_CREDENTIAL_KEY_FILE: /run/secrets/klyrow_provider_credential_key
+      KLYROW_POSTAL_PROVISIONER_TOKEN_FILE: /run/secrets/klyrow_postal_provisioner_token
+      KLYROW_POSTAL_PROVISIONER_URL: http://postal-provisioner:9090
+    command: ["python", "-m", "app.service_worker"]
+    secrets: [klyrow_session_secret, klyrow_provider_credential_key, klyrow_postal_provisioner_token]
+    depends_on:
+      postgres: {condition: service_healthy}
+      gateway-migrate: {condition: service_completed_successfully}
+      postal-provisioner: {condition: service_healthy}
+    networks: [backend]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  worker:
+    environment:
+      KLYROW_PROVIDER_CREDENTIAL_KEY_FILE: /run/secrets/klyrow_provider_credential_key
+      KLYROW_ALLOW_LEGACY_GLOBAL_POSTAL_KEY: "false"
+    secrets: [klyrow_session_secret, klyrow_postal_api_key, klyrow_provider_credential_key]
+
+secrets:
+  klyrow_provider_credential_key:
+    file: ./secrets/runtime/provider-credential-key
+  klyrow_postal_provisioner_token:
+    file: ./secrets/runtime/postal-provisioner-token
