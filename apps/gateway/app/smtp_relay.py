@@ -211,8 +211,10 @@ class GovernedRelay:
                 if identity
                 else None
             )
-            if not identity or identity.stream.upper() != stream or not domain:
+            if not identity or not domain:
                 return "550 5.7.1 sender not authorized"
+            if identity.stream.upper() != stream:
+                return "550 5.7.1 stream not authorized"
             if not sandbox and (
                 stream != "SECURITY"
                 or domain.status != "SENDING_ENABLED"
