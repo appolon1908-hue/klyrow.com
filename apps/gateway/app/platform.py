@@ -43,6 +43,10 @@ if not getattr(app.state, "klyrow_browser_api_routes_registered", False):
 else:
     auth_bff._identity_context = resolve_identity_context_with_provisioning
 
+# The core app may have generated OpenAPI before browser composition. FastAPI
+# caches that schema, so invalidate it whenever this composition module loads.
+app.openapi_schema = None
+
 
 def _ui_index():
     index = AUTH_WEB_DIST / "index.html"
