@@ -20,6 +20,11 @@ def _openapi_methods():
     }
 
 
+def test_required_oidc_routes_are_visible_in_runtime_route_inventory():
+    paths = {getattr(route, "path", "") for route in app.routes}
+    assert {"/auth/login", "/auth/callback"} <= paths
+
+
 def test_browser_api_contract_has_expected_methods():
     expected = {
         ("/auth/login", "GET"),
