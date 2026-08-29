@@ -1,5 +1,17 @@
 # Klyrow Production Email Platform
 
+## Repository authority
+
+This repository is the **Klyrow email/SaaS backend and runtime authority**. It owns Postal/Mautic integration, the authenticated Klyrow API, tenant state, email/campaign submission, domain onboarding, suppressions, delivery events, billing foundations, runtime deployment and operational recovery.
+
+`appolon1908-hue/klyrow-Website-` is the separate **public marketing website frontend**. It must not become a second Postal/Mautic backend, email queue, tenant database, provider credential store or authoritative delivery API. Website forms and customer-facing actions cross the governed Codestra Middleware boundary rather than writing directly to Klyrow internals, Odoo or n8n.
+
+```text
+Browser -> klyrow-Website- -> Kong/Middleware -> klyrow.com -> Postal/Mautic
+```
+
+Klyrow is an email/customer-communications platform. Contact-center voice remains VICIdial/Asterisk and SMS remains Telnexa/Jasmin; those are independent provider systems coordinated through Middleware.
+
 Klyrow is a tenant-isolated email operations platform built around Mautic 7.1.3, Postal 3.3.7, and a public FastAPI gateway. It provides authenticated delivery submission, domain onboarding, RBAC, quotas, suppressions, webhook verification, an operator/client portal, metrics, backups, and a safe test mode.
 
 The SaaS layer adds profiles/events, consent/preferences, nested behavioral segmentation, journey graphs and runs, deliverability snapshots, internal-event analytics, onboarding, TOTP MFA/session revocation, OpenAPI/idempotency/correlation, and safe foundations for experiments, AI providers, integrations and billing. See [SaaS P0](docs/SAAS_P0.md) and [API/webhooks](docs/API.md).
