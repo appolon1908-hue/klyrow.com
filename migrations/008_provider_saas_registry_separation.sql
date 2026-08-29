@@ -22,13 +22,6 @@ BEGIN
   END IF;
 END $$;
 
--- 000 creates the tenant credential table under this legacy name on fresh
--- installs, so 004 cannot add the provider relay columns with CREATE IF NOT
--- EXISTS. Complete the provider contract explicitly after the rename above.
-ALTER TABLE smtp_credentials ADD COLUMN IF NOT EXISTS allowed_senders_json text NOT NULL DEFAULT '[]';
-ALTER TABLE smtp_credentials ADD COLUMN IF NOT EXISTS allowed_streams_json text NOT NULL DEFAULT '["TRANSACTIONAL"]';
-ALTER TABLE smtp_credentials ADD COLUMN IF NOT EXISTS status varchar NOT NULL DEFAULT 'ACTIVE';
-
 CREATE TABLE IF NOT EXISTS saas_sender_identities (
   id varchar PRIMARY KEY, tenant_id varchar NOT NULL, domain_claim_id varchar NOT NULL,
   address varchar NOT NULL, display_name varchar NOT NULL, reply_to varchar,
