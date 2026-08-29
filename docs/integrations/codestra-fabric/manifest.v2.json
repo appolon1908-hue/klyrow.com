@@ -1,0 +1,21 @@
+{
+  "schema_version": "2.0",
+  "system": "klyrow-email",
+  "authority": ["workspaces", "sender_domains", "sender_identities", "templates", "streams", "messages", "consent", "suppressions", "postal_mappings", "delivery_state", "usage", "deliverability"],
+  "internal_engines": ["Postal", "Mautic"],
+  "integration_boundary": "MIDDLEWARE_ONLY",
+  "n8n_direct_access": false,
+  "postal_direct_access": false,
+  "mautic_direct_access": false,
+  "service_identity": "klyrow-adapter",
+  "event_delivery": "DURABLE_INBOX_AND_TRANSACTIONAL_OUTBOX",
+  "security_email_synchronous_n8n": false,
+  "success_authority": "KLYROW_POSTAL_RECONCILIATION",
+  "capabilities": {
+    "EMAIL_DELIVERY": false,
+    "EMAIL_CAMPAIGN_SEND": false,
+    "EMAIL_INBOUND_WRITEBACK": false,
+    "ODOO_WRITE": false,
+    "DEAD_LETTER_REPLAY": false
+  }
+}
