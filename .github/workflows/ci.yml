@@ -7,15 +7,35 @@ on:
   workflow_dispatch:
 
 permissions:
-  actions: read
   contents: read
   pull-requests: read
-  packages: write
-  security-events: write
-  attestations: write
-  id-token: write
 
 jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.32.1
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
+
   test:
     runs-on: ubuntu-latest
     services:
@@ -33,6 +53,8 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -69,49 +91,128 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   image:
-    needs: [test, secrets]
+    needs: [frontend, test, secrets]
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: docker/setup-buildx-action@v3
-      - name: Build immutable candidate
+
+      - name: Build backend candidate
         uses: docker/build-push-action@v6
         with:
-          context: apps/gateway
+          context: .
+          file: apps/gateway/Dockerfile
           load: true
           tags: klyrow-gateway:${{ github.sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-      - name: Scan candidate image
+
+      - name: Build frontend candidate
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          load: true
+          tags: klyrow-web:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Verify composed browser edge and canonical callback
+        env:
+          EDGE_NETWORK: klyrow-auth-edge-ci
+          GATEWAY_IMAGE: klyrow-gateway:${{ github.sha }}
+          WEB_IMAGE: klyrow-web:${{ github.sha }}
+        run: |
+          set -euo pipefail
+          cleanup() {
+            docker rm -f klyrow-web-edge-ci klyrow-gateway-edge-ci >/dev/null 2>&1 || true
+            docker network rm "$EDGE_NETWORK" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker network create "$EDGE_NETWORK"
+          docker run --rm -d \
+            --network "$EDGE_NETWORK" \
+            --network-alias gateway \
+            --name klyrow-gateway-edge-ci \
+            --tmpfs /tmp \
+            --env KLYROW_ENV=development \
+            --env KLYROW_DATABASE_URL=sqlite:////tmp/klyrow-edge.db \
+            --env KLYROW_SESSION_SECRET=klyrow-auth-edge-ci-session-secret-2026 \
+            --env KLYROW_SAFE_MODE=true \
+            --env KLYROW_EMBEDDED_WORKERS=false \
+            --env LIVE_EMAIL_DELIVERY=false \
+            --env EXTERNAL_EMAIL_DELIVERY=false \
+            --env PRODUCTION_PROVIDER_ROUTING=false \
+            --env KLYROW_PUBLIC_URL=https://app.klyrow.com \
+            --env KLYROW_OIDC_REDIRECT_URI=https://app.klyrow.com/auth/callback \
+            "$GATEWAY_IMAGE"
+          docker run --rm -d \
+            --network "$EDGE_NETWORK" \
+            --name klyrow-web-edge-ci \
+            --publish 127.0.0.1:18014:8080 \
+            "$WEB_IMAGE"
+
+          ready=false
+          for attempt in $(seq 1 30); do
+            if curl --silent --fail --output /dev/null \
+              --header "Host: app.klyrow.com" \
+              http://127.0.0.1:18014/auth/session; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = true
+          KLYROW_EDGE_BASE_URL=http://127.0.0.1:18014 scripts/verify-browser-edge
+
+      - name: Scan backend candidate
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: klyrow-gateway:${{ github.sha }}
           format: sarif
-          output: trivy-results.sarif
+          output: trivy-gateway.sarif
           severity: CRITICAL,HIGH
           limit-severities-for-sarif: true
           exit-code: "1"
           ignore-unfixed: true
-      - name: Preserve container scan evidence
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+
+      - name: Scan frontend candidate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          name: trivy-sarif-${{ github.sha }}
-          path: trivy-results.sarif
+          image-ref: klyrow-web:${{ github.sha }}
+          format: sarif
+          output: trivy-web.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Retain Trivy scan evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-${{ github.sha }}
+          path: |
+            trivy-gateway.sarif
+            trivy-web.sarif
           if-no-files-found: error
           retention-days: 30
-      - name: Upload container scan to GitHub code scanning
-        if: ${{ vars.KLYROW_CODE_SCANNING_ENABLED == 'true' }}
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy-results.sarif
-      - name: Generate CycloneDX SBOM
+
+      - name: Generate backend CycloneDX SBOM
         uses: anchore/sbom-action@v0
         with:
           image: klyrow-gateway:${{ github.sha }}
@@ -119,22 +220,40 @@ jobs:
           output-file: klyrow-gateway-${{ github.sha }}.cdx.json
           upload-artifact: true
 
+      - name: Generate frontend CycloneDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          image: klyrow-web:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: klyrow-web-${{ github.sha }}.cdx.json
+          upload-artifact: true
+
   publish:
     if: github.event_name == 'workflow_dispatch'
     needs: [image]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
     steps:
       - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@v3
-      - id: push
+
+      - id: push_gateway
+        name: Publish backend image
         uses: docker/build-push-action@v6
         with:
-          context: apps/gateway
+          context: .
+          file: apps/gateway/Dockerfile
           push: true
           tags: ghcr.io/${{ github.repository_owner }}/klyrow-gateway:${{ github.sha }}
           provenance: mode=max
@@ -142,9 +261,31 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-      - name: Attest published digest
+
+      - id: push_web
+        name: Publish frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/klyrow-web:${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Attest backend digest
         uses: actions/attest-build-provenance@v3
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/klyrow-gateway
-          subject-digest: ${{ steps.push.outputs.digest }}
+          subject-digest: ${{ steps.push_gateway.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest frontend digest
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/klyrow-web
+          subject-digest: ${{ steps.push_web.outputs.digest }}
           push-to-registry: true

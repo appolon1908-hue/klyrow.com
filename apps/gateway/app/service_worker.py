@@ -11,15 +11,43 @@ from sqlalchemy import select
 
 from .billing import BillingEvent, BillingWorkItem, now
 from .main import DB, email_outbox_loop, postal_retry_loop
+from .postal_provisioning import provisioning_tick
 from .provider import (
     dispatch_provider_outbox,
     process_one_sandbox,
     recover_expired_leases,
 )
 from .security_smtp_worker import security_smtp_delivery_loop
+from .tenant_postal_delivery import tenant_email_outbox_loop
 
 ROLE = os.getenv("KLYROW_WORKER_ROLE", "mail")
 RUNNING = True
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def tenant_postal_provisioning_enabled() -> bool:
+    """Select tenant credentials only when the complete provisioning stack is enabled."""
+
+    return (
+        os.getenv("KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED", "false")
+        .strip()
+        .lower()
+        in _TRUE_VALUES
+    )
+
+
+def selected_email_outbox_loop():
+    """Preserve legacy delivery for the base Compose deployment.
+
+    The tenant-scoped loop requires the provider-credential key, Postal bridge,
+    provisioning worker, and signed callback attribution route. The optional
+    provisioning Compose contract enables the loop only when those pieces are
+    deployed together.
+    """
+
+    if tenant_postal_provisioning_enabled():
+        return tenant_email_outbox_loop
+    return email_outbox_loop
 
 
 async def health(reader, writer):
@@ -90,8 +118,6 @@ def billing_tick(max_attempts=8):
         item.attempts += 1
         item.lease_expires_at = now() + timedelta(seconds=60)
         session.commit()
-        # Commercial mutations are committed atomically by the API. The worker
-        # durably acknowledges their immutable event and is safe to replay.
         item = session.get(BillingWorkItem, item.id)
         item.state = "COMPLETED"
         item.completed_at = now()
@@ -111,6 +137,8 @@ async def loop():
                         if not process_one_sandbox(session):
                             break
                 await dispatch_provider_outbox()
+            elif ROLE == "provisioning":
+                await provisioning_tick()
             elif ROLE == "billing":
                 billing_tick()
             elif ROLE == "scheduler":
@@ -152,7 +180,7 @@ async def main():
         tasks.extend(
             [
                 asyncio.create_task(postal_retry_loop()),
-                asyncio.create_task(email_outbox_loop()),
+                asyncio.create_task(selected_email_outbox_loop()()),
                 asyncio.create_task(security_smtp_delivery_loop()),
             ]
         )

@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-27",
+  "source": "operator-provided Klyrow SMTP runtime inventory",
+  "status": "VERIFIED_SENDING_ENABLED",
+  "domain_count": 14,
+  "domains": [
+    "beyvra.com",
+    "breero.com",
+    "breero.shop",
+    "codestra.agency",
+    "codestra.cloud",
+    "codestra.co",
+    "codestra.digital",
+    "codestra.media",
+    "klyrow.com",
+    "kyqra.com",
+    "moneybee.loan",
+    "moneybeeloan.com",
+    "nativoenglish.com",
+    "telnexa.co"
+  ],
+  "authorization_effect": "NONE",
+  "safety": {
+    "opens_live_delivery_gate": false,
+    "bypasses_tenant_policy": false,
+    "bypasses_sender_identity": false,
+    "bypasses_consent_or_suppression": false,
+    "bypasses_canary_or_production_approval": false
+  },
+  "notes": [
+    "Read-only operational evidence; this file is not a runtime allowlist.",
+    "A verified domain still requires an active sender identity, tenant authorization, applicable stream policy, and every delivery gate."
+  ]
+}
