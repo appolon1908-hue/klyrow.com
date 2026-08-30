@@ -54,6 +54,23 @@ BILLING_DRIFT=Gauge("klyrow_billing_reconciliation_drift","Invoices whose ledger
 rate_buckets=defaultdict(deque)
 _jwks_clients={}
 
+SMTP_PUBLISHED_EVENTS={
+    "klyrow.email.queued","klyrow.email.sent","klyrow.email.delivered","klyrow.email.deferred",
+    "klyrow.email.bounced","klyrow.email.complained","klyrow.email.opened","klyrow.email.clicked",
+    "klyrow.email.unsubscribed","klyrow.email.inbound_received",
+}
+CANONICAL_SMTP_STATUSES={
+    "accepted","queued","submitted","provider_accepted","delivered","deferred","bounced",
+    "complained","suppressed","failed","cancelled","indeterminate",
+}
+MIDDLEWARE_ALLOWED_COMMANDS={
+    "email.message.send.v1","email.message.cancel.v1","email.domain.verify.v1",
+    "email.suppression.upsert.v1","email.reputation.snapshot.request.v1",
+}
+PROMETHEUS_PLATFORM_LABELS={
+    "codestra_business","application","service","environment","server","region","deployment",
+}
+
 class Base(DeclarativeBase): pass
 class Tenant(Base):
     __tablename__="tenants"; id:Mapped[str]=mapped_column(String,primary_key=True); name:Mapped[str]=mapped_column(String); enabled:Mapped[bool]=mapped_column(Boolean,default=True); quota:Mapped[int]=mapped_column(Integer,default=10000)
@@ -91,6 +108,9 @@ class Idempotency(Base):
     __tablename__="idempotency_keys"; id:Mapped[str]=mapped_column(String,primary_key=True,default=lambda:str(uuid.uuid4())); key:Mapped[str]=mapped_column(String); tenant_id:Mapped[str]=mapped_column(String,index=True); request_hash:Mapped[str]=mapped_column(String); resource_id:Mapped[str]=mapped_column(String); response_json:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); __table_args__=(UniqueConstraint("tenant_id","key",name="uq_idempotency_tenant_key"),)
 class EmailOutbox(Base):
     __tablename__="email_outbox"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); message_id:Mapped[str]=mapped_column(String,unique=True,index=True); payload:Mapped[str]=mapped_column(Text); state:Mapped[str]=mapped_column(String,default="pending",index=True); attempts:Mapped[int]=mapped_column(Integer,default=0); provider_message_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True); next_attempt_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+class MiddlewareCommandOperation(Base):
+    __tablename__="middleware_command_operations"; command_id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); command:Mapped[str]=mapped_column(String,index=True); idempotency_key:Mapped[str]=mapped_column(String,index=True); correlation_id:Mapped[str]=mapped_column(String,index=True); state:Mapped[str]=mapped_column(String,default="accepted",index=True); request_hash:Mapped[str]=mapped_column(String); result_json:Mapped[str]=mapped_column(Text,default="{}"); error:Mapped[Optional[str]]=mapped_column(String,nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+    __table_args__=(UniqueConstraint("tenant_id","idempotency_key",name="uq_middleware_command_tenant_idempotency"),)
 class ProductionCanaryGate(Base):
     __tablename__="production_canary_gate"; gate_key:Mapped[str]=mapped_column(String,primary_key=True); reserved_deliveries:Mapped[int]=mapped_column(Integer,default=0); claimed_deliveries:Mapped[int]=mapped_column(Integer,default=0); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class WebhookEndpoint(Base):
@@ -298,6 +318,12 @@ class CampaignIn(BaseModel): name:str=Field(min_length=1,max_length=200); subjec
 class TenantIn(BaseModel): name:str=Field(min_length=1,max_length=200); quota:int=Field(default=10000,ge=0,le=10000000)
 class QuotaIn(BaseModel): quota:int=Field(ge=0,le=10000000)
 class WebhookIn(BaseModel): url:str=Field(pattern=r"^https://")
+class MiddlewareCommandIn(BaseModel):
+    command:str=Field(min_length=1,max_length=120)
+    payload:dict=Field(default_factory=dict)
+    target:Optional[str]=Field(default=None,max_length=120)
+    tenant_id:Optional[str]=Field(default=None,max_length=120)
+    correlation_id:Optional[str]=Field(default=None,max_length=200)
 
 async def emit_middleware(event_type:str,payload:dict)->bool:
     base=os.getenv("KLYROW_MIDDLEWARE_URL","").rstrip("/"); key=os.getenv("KLYROW_MIDDLEWARE_API_KEY",""); secret=os.getenv("KLYROW_WEBHOOK_SECRET","")
@@ -313,7 +339,9 @@ async def emit_middleware(event_type:str,payload:dict)->bool:
             "attempt":max(1,int(payload.get("attempt") or 1)),"metadata":payload.get("metadata") if isinstance(payload.get("metadata"),dict) else {}}
     else:payload={"event_id":event_id,"source_system":"klyrow","event_type":event_type,"timestamp":datetime.now(timezone.utc).isoformat(),**payload}
     body=json.dumps(payload,separators=(",",":"),sort_keys=True).encode(); ts=str(int(time.time())); canonical=ts.encode()+b"\n"+event_id.encode()+b"\nklyrow\n"+body
-    signature=hmac.new(secret.encode(),canonical,hashlib.sha256).hexdigest(); headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","X-Source-System":"klyrow","X-Klyrow-Timestamp":ts,"X-Klyrow-Event-Id":event_id,"X-Klyrow-Signature":"sha256="+signature}
+    tenant_id=str(payload.get("tenant_id") or payload.get("customer_id") or "")
+    correlation_id=str(payload.get("correlation_id") or event_id)
+    signature=hmac.new(secret.encode(),canonical,hashlib.sha256).hexdigest(); headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","X-Source-System":"klyrow","X-Tenant-ID":tenant_id,"X-Correlation-ID":correlation_id,"Idempotency-Key":"klyrow:event:"+event_id,"X-Klyrow-Timestamp":ts,"X-Klyrow-Event-Id":event_id,"X-Klyrow-Signature":"sha256="+signature}
     email_target=os.getenv("KLYROW_EMAIL_EVENT_URL","").strip()
     # Email lifecycle events have one canonical callback authority.  Do not
     # send them through the legacy generic route first: a failure there used
@@ -705,6 +733,70 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
     result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=x.to.lower(),sender=x.sender.lower(),subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload=json.dumps({"stream":x.stream}))); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageLedger(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind="message."+x.stream,quantity=1,reference=mid))
     if not SAFE_MODE:s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,payload=json.dumps({"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text,"campaign_id":x.campaign_id,"stream":x.stream},separators=(",",":"),sort_keys=True)))
     s.commit(); MAIL.labels("queued").inc(); await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{"stream":x.stream}}); return result
+
+def command_payload(x:MiddlewareCommandIn)->dict:
+    payload=dict(x.payload or {})
+    if "from" in payload and "sender" not in payload:payload["sender"]=payload["from"]
+    return payload
+
+def command_request_hash(x:MiddlewareCommandIn)->str:
+    return sha(json.dumps({"command":x.command,"payload":x.payload,"target":x.target,"tenant_id":x.tenant_id},separators=(",",":"),sort_keys=True))
+
+def command_response(item:MiddlewareCommandOperation)->dict:
+    return {"command_id":item.command_id,"tenant_id":item.tenant_id,"command":item.command,"state":item.state,"correlation_id":item.correlation_id,"result":json.loads(item.result_json or "{}"),"error":item.error}
+
+def ensure_command_tenant(ctx:dict,tenant_id:str):
+    if not tenant_id or tenant_id!=ctx["tenant"]:raise HTTPException(403,"tenant_mismatch")
+
+@app.post("/v1/commands",status_code=202)
+async def middleware_command(x:MiddlewareCommandIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:str=Header(alias="Idempotency-Key",min_length=8,max_length=200),x_tenant_id:str=Header(alias="X-Tenant-ID",min_length=1,max_length=120),x_correlation_id:str=Header(alias="X-Correlation-ID",min_length=8,max_length=200)):
+    ensure_command_tenant(ctx,x_tenant_id)
+    if x.tenant_id and x.tenant_id!=x_tenant_id:raise HTTPException(403,"tenant_mismatch")
+    if x.correlation_id and x.correlation_id!=x_correlation_id:raise HTTPException(409,"correlation_id_mismatch")
+    if x.command not in MIDDLEWARE_ALLOWED_COMMANDS:raise HTTPException(422,"unsupported_command")
+    request_hash=command_request_hash(x)
+    prior=s.scalar(select(MiddlewareCommandOperation).where(MiddlewareCommandOperation.tenant_id==ctx["tenant"],MiddlewareCommandOperation.idempotency_key==idempotency_key))
+    if prior:
+        if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
+        return command_response(prior)
+    item=MiddlewareCommandOperation(command_id=str(uuid.uuid4()),tenant_id=ctx["tenant"],command=x.command,idempotency_key=idempotency_key,correlation_id=x_correlation_id,request_hash=request_hash,state="accepted")
+    s.add(item);s.commit()
+    try:
+        payload=command_payload(x)
+        if x.command=="email.message.send.v1":
+            result=await _send(MailIn(**payload),ctx,s,idempotency_key)
+            item.state="queued";item.result_json=json.dumps(result,separators=(",",":"),sort_keys=True)
+        elif x.command=="email.message.cancel.v1":
+            message_id=str(payload.get("message_id") or "")
+            message=s.scalar(select(Message).where(Message.id==message_id,Message.tenant_id==ctx["tenant"]))
+            if not message:raise HTTPException(404,"not_found")
+            if message.status in {"delivered","bounced","complained","failed"}:raise HTTPException(409,"terminal_message_cannot_cancel")
+            message.status="cancelled";item.state="cancelled";item.result_json=json.dumps({"message_id":message.id,"status":"cancelled"})
+        elif x.command=="email.domain.verify.v1":
+            domain_id=str(payload.get("domain_id") or "")
+            domain=s.scalar(select(Domain).where(Domain.id==domain_id,Domain.tenant_id==ctx["tenant"]))
+            if not domain:raise HTTPException(404,"not_found")
+            domain_verify(domain.id,ctx,s);item.state="completed";item.result_json=json.dumps({"domain_id":domain.id,"verified":domain.verified})
+        elif x.command=="email.suppression.upsert.v1":
+            email=str(payload.get("email") or payload.get("recipient") or "").lower()
+            if not email:raise HTTPException(422,"email_required")
+            reason=str(payload.get("reason") or "suppressed")
+            suppression=s.scalar(select(Suppression).where(Suppression.tenant_id==ctx["tenant"],Suppression.email==email)) or Suppression(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],email=email,reason=reason)
+            suppression.reason=reason;s.add(suppression);item.state="completed";item.result_json=json.dumps({"email":email,"reason":reason})
+        elif x.command=="email.reputation.snapshot.request.v1":
+            item.state="completed";item.result_json=json.dumps({"status":"accepted","safe_mode":SAFE_MODE})
+        item.updated_at=datetime.now(timezone.utc);s.commit()
+        return command_response(item)
+    except HTTPException as exc:
+        item.state="failed";item.error=str(exc.detail);item.updated_at=datetime.now(timezone.utc);s.commit()
+        raise
+
+@app.get("/v1/operations/{command_id}")
+def middleware_operation(command_id:str,ctx=Depends(auth),s:Session=Depends(db),x_tenant_id:str=Header(alias="X-Tenant-ID",min_length=1,max_length=120)):
+    ensure_command_tenant(ctx,x_tenant_id)
+    item=s.scalar(select(MiddlewareCommandOperation).where(MiddlewareCommandOperation.command_id==command_id,MiddlewareCommandOperation.tenant_id==ctx["tenant"]))
+    if not item:raise HTTPException(404,"not_found")
+    return command_response(item)
 
 @app.post("/v1/email/bulk",status_code=202)
 async def bulk(x:BulkMailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):

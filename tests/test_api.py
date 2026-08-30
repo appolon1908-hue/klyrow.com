@@ -36,6 +36,30 @@ def test_safe_send_and_suppression():
     h={**hdr("a"),"Idempotency-Key":"send-1"}; x={"to":"ok@example.net","sender":"sender@a.example.com","subject":"test","html":"<p>test</p>"}; r=client.post("/v1/messages",headers=h,json=x); assert r.status_code==202 and r.json()["safe_mode"]; assert client.post("/v1/messages",headers=h,json=x).json()["id"]==r.json()["id"]
     with DB() as s:s.add(Suppression(id="s",tenant_id="a",email="blocked@example.net",reason="hard_bounce"));s.commit()
     x["to"]="blocked@example.net"; assert client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"send-2"},json=x).status_code==422
+
+def test_middleware_command_submit_readback_and_replay():
+    h={**hdr("a"),"X-Tenant-ID":"a","X-Correlation-ID":"command-correlation-0001","Idempotency-Key":"command-send-0001"}
+    payload={"command":"email.message.send.v1","tenant_id":"a","correlation_id":"command-correlation-0001","payload":{"to":"command@example.net","sender":"sender@a.example.com","subject":"command","html":"<p>command</p>"}}
+    with patch("apps.gateway.app.main.emit_middleware",new=AsyncMock(return_value=True)):
+        first=client.post("/v1/commands",headers=h,json=payload);replay=client.post("/v1/commands",headers=h,json=payload)
+    assert first.status_code==202 and replay.status_code==202
+    assert first.json()["command_id"]==replay.json()["command_id"]
+    assert first.json()["state"]=="queued"
+    command_id=first.json()["command_id"]
+    read=client.get(f"/v1/operations/{command_id}",headers={"Authorization":h["Authorization"],"X-Tenant-ID":"a"})
+    assert read.status_code==200 and read.json()["result"]["status"]=="accepted_test"
+    assert client.post("/v1/commands",headers={**h,"X-Tenant-ID":"b"},json=payload).status_code==403
+
+def test_middleware_command_cancel_and_suppression_upsert():
+    with DB() as s:s.add(Message(id="cancel-command-message",tenant_id="a",recipient="person@example.net",sender="sender@a.example.com",subject="cancel",status="queued"));s.commit()
+    base={**hdr("a"),"X-Tenant-ID":"a","X-Correlation-ID":"command-correlation-0002","Idempotency-Key":"command-cancel-0001"}
+    cancel=client.post("/v1/commands",headers=base,json={"command":"email.message.cancel.v1","payload":{"message_id":"cancel-command-message"}})
+    assert cancel.status_code==202 and cancel.json()["state"]=="cancelled"
+    upsert=client.post("/v1/commands",headers={**base,"X-Correlation-ID":"command-correlation-0003","Idempotency-Key":"command-suppress-0001"},json={"command":"email.suppression.upsert.v1","payload":{"email":"stop@example.net","reason":"manual"}})
+    assert upsert.status_code==202 and upsert.json()["state"]=="completed"
+    with DB() as s:
+        assert s.get(Message,"cancel-command-message").status=="cancelled"
+        assert s.scalar(select(Suppression).where(Suppression.tenant_id=="a",Suppression.email=="stop@example.net")).reason=="manual"
 def test_unapproved_local_part_is_denied():
     x={"to":"ok@example.net","sender":"admin@a.example.com","subject":"test","html":"<p>test</p>"}
     assert client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"unapproved-local"},json=x).status_code==403

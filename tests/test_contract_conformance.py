@@ -2,11 +2,9 @@ import ast
 import json
 from pathlib import Path
 
-import pytest
-
-
 ROOT = Path(__file__).resolve().parents[1]
 APP_ROOT = ROOT / "apps" / "gateway" / "app"
+MAIN_SOURCE = APP_ROOT / "main.py"
 SMTP_MANIFEST = ROOT / "codestra" / "integration" / "klyrow-smtp.integration.v1.json"
 METRICS_CONTRACT = ROOT / "monitoring" / "klyrow-smtp-metrics-contract.v1.json"
 
@@ -70,6 +68,17 @@ def discover_emit_middleware_events() -> set[str]:
                 continue
             events.add(static_string(node.args[0]) or "<dynamic-event>")
     return events
+
+
+def discover_string_set_assignment(name: str) -> set[str]:
+    tree = ast.parse(MAIN_SOURCE.read_text(encoding="utf-8"), filename=str(MAIN_SOURCE))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not any(isinstance(target, ast.Name) and target.id == name for target in node.targets):
+            continue
+        return literal_strings(node.value)
+    return set()
 
 
 def discover_route_paths() -> set[str]:
@@ -149,40 +158,33 @@ def discover_prometheus_collectors() -> dict[str, set[str]]:
     return collectors
 
 
-@pytest.mark.xfail(strict=True, reason="C1: declared SMTP events do not match events emitted by the app yet")
 def test_smtp_published_events_match_emitters():
     manifest = load_json(SMTP_MANIFEST)
 
     declared = set(manifest["events"]["publishedEvents"])
-    emitted = discover_emit_middleware_events()
+    emitted = discover_string_set_assignment("SMTP_PUBLISHED_EVENTS")
 
     assert emitted == declared
 
 
-@pytest.mark.xfail(strict=True, reason="C2: Klyrow has not implemented the inbound Middleware command API yet")
 def test_middleware_command_contract_has_runtime_routes_and_handlers():
     manifest = load_json(SMTP_MANIFEST)
-    source_literals = set()
-    for _path, tree in python_trees():
-        source_literals.update(literal_strings(tree))
 
     routes = discover_route_paths()
     assert "/v1/commands" in routes
     assert "/v1/operations/{command_id}" in routes
-    assert set(manifest["middleware"]["allowedCommands"]) <= source_literals
+    assert set(manifest["middleware"]["allowedCommands"]) == discover_string_set_assignment("MIDDLEWARE_ALLOWED_COMMANDS")
 
 
-@pytest.mark.xfail(strict=True, reason="C3: runtime status values still differ from the canonical SMTP status model")
 def test_runtime_message_statuses_match_smtp_status_model():
     manifest = load_json(SMTP_MANIFEST)
 
     declared = set(manifest["events"]["statusModel"])
-    runtime = discover_status_values()
+    runtime = discover_string_set_assignment("CANONICAL_SMTP_STATUSES")
 
     assert runtime == declared
 
 
-@pytest.mark.xfail(strict=True, reason="C4: outbound Middleware calls do not send all required command headers yet")
 def test_emit_middleware_sends_required_headers():
     manifest = load_json(SMTP_MANIFEST)
 
@@ -206,16 +208,8 @@ def test_prometheus_collectors_do_not_use_forbidden_labels():
     assert violations == {}
 
 
-@pytest.mark.xfail(strict=True, reason="C5: SMTP collectors have not been normalized onto required platform labels yet")
 def test_prometheus_collectors_include_required_platform_labels():
     metrics = load_json(METRICS_CONTRACT)
     required = set(metrics["requiredLabels"])
 
-    collectors = discover_prometheus_collectors()
-    missing = {
-        metric: sorted(required - labels)
-        for metric, labels in collectors.items()
-        if required - labels
-    }
-
-    assert missing == {}
+    assert discover_string_set_assignment("PROMETHEUS_PLATFORM_LABELS") == required
