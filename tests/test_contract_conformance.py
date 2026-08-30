@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+import pytest
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 APPLICATION_ROOT = REPOSITORY_ROOT / "apps" / "gateway" / "app"
@@ -570,3 +572,101 @@ def test_string_discovery_rejects_an_unbound_name_as_open_ended() -> None:
     values, dynamic = _string_values(expression, {}, {})
     assert values == set()
     assert dynamic is True
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="C1: declared SMTP events do not match the closed set emitted by the app",
+)
+def test_declared_events_match_emitted_events() -> None:
+    manifest = load_manifest()
+    declared = set(manifest["events"]["publishedEvents"])
+    discovery = discover_emitted_events()
+
+    assert discovery.dynamic_sites == (), (
+        "unbounded emit_middleware event expressions: "
+        f"{discovery.dynamic_sites}"
+    )
+    assert declared == set(discovery.events), (
+        f"claimed-not-emitted: {declared - discovery.events}; "
+        f"emitted-not-declared: {discovery.events - declared}"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="C2: the declared inbound Middleware command and readback APIs do not exist",
+)
+def test_declared_commands_are_routed_and_readable() -> None:
+    manifest = load_manifest()
+    declared = set(manifest["middleware"]["allowedCommands"])
+    discovery = discover_commands()
+
+    assert discovery.command_endpoint_registered is True
+    assert discovery.readback_endpoint_registered is True
+    assert declared == set(discovery.commands), (
+        f"unrouted commands: {declared - discovery.commands}; "
+        f"undeclared handlers: {discovery.commands - declared}"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="C3: Message.status values differ from the declared SMTP status model",
+)
+def test_declared_status_model_matches_message_code() -> None:
+    manifest = load_manifest()
+    declared = set(manifest["events"]["statusModel"])
+    discovery = discover_message_statuses()
+
+    assert discovery.dynamic_sites == (), (
+        f"open-ended Message.status expressions: {discovery.dynamic_sites}"
+    )
+    assert declared == set(discovery.statuses), (
+        f"claimed-not-used: {declared - discovery.statuses}; "
+        f"used-not-declared: {discovery.statuses - declared}"
+    )
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="C4: emit_middleware omits contract-required routing and idempotency headers",
+)
+def test_required_headers_are_sent_to_middleware() -> None:
+    manifest = load_manifest()
+    required = set(manifest["middleware"]["requiredHeaders"])
+    emitted = set(discover_middleware_headers())
+
+    assert required <= emitted, f"missing Middleware headers: {required - emitted}"
+
+
+def test_no_collector_uses_a_forbidden_label() -> None:
+    manifest = load_manifest()
+    forbidden = set(manifest["observability"]["forbiddenLabels"])
+    violations = {
+        f"{collector.path}:{collector.line}:{collector.name}": sorted(
+            collector.labels & forbidden
+        )
+        for collector in discover_prometheus_collectors()
+        if collector.labels & forbidden
+    }
+
+    assert violations == {}
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="C5: collectors do not yet carry every required bounded platform label",
+)
+def test_collectors_carry_required_platform_labels() -> None:
+    manifest = load_manifest()
+    required = set(manifest["observability"]["requiredLabels"])
+    missing = {
+        f"{collector.path}:{collector.line}:{collector.name}": sorted(
+            required - collector.labels
+        )
+        for collector in discover_prometheus_collectors()
+        if required - collector.labels
+    }
+
+    assert missing == {}
