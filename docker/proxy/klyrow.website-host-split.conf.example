@@ -1,0 +1,87 @@
+# INACTIVE EXAMPLE ONLY.
+# Do not install without live-config audit, reviewed upstream, full nginx validation,
+# protected-service checks, backup and release authorization.
+
+map $http_upgrade $klyrow_connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+upstream klyrow_public_website {
+    server 127.0.0.1:18110;
+    keepalive 32;
+}
+
+upstream klyrow_gateway_existing {
+    server 127.0.0.1:18000;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name www.klyrow.com;
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    return 308 https://klyrow.com$request_uri;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name klyrow.com;
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    return 308 https://klyrow.com$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name www.klyrow.com;
+
+    # Preserve audited Certbot-managed includes and certificate paths.
+    include __AUDITED_CERTBOT_TLS_INCLUDE__;
+
+    return 308 https://klyrow.com$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name klyrow.com;
+
+    include __AUDITED_CERTBOT_TLS_INCLUDE__;
+
+    client_max_body_size 2m;
+
+    location /_nuxt/ {
+        proxy_pass http://klyrow_public_website;
+        include proxy_params;
+        expires 1y;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+    }
+
+    location /api/ {
+        proxy_pass http://klyrow_public_website;
+        include proxy_params;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 30s;
+        proxy_send_timeout 30s;
+        add_header Cache-Control "no-store" always;
+    }
+
+    location / {
+        proxy_pass http://klyrow_public_website;
+        include proxy_params;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $klyrow_connection_upgrade;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 60s;
+        proxy_send_timeout 60s;
+        add_header Cache-Control "no-cache" always;
+    }
+}
+
+# app.klyrow.com, api.klyrow.com, track.klyrow.com and bounce.klyrow.com
+# require separate reviewed server blocks preserving their audited current upstreams.
+# Do not use the public website upstream for those hostnames.
