@@ -6,10 +6,10 @@ from cryptography.hazmat.primitives import hashes,serialization
 from cryptography.hazmat.primitives.asymmetric import padding,rsa
 SERVICE_TOKEN_FILE="/tmp/klyrow-beyvra-test-token"
 Path(SERVICE_TOKEN_FILE).write_text("bounded-beyvra-test-token",encoding="utf-8")
-os.environ.update(KLYROW_DATABASE_URL="sqlite:///./test.db",KLYROW_SESSION_SECRET="test-session-secret-at-least-32-bytes",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple",BEYVRA_EMAIL_SERVICE_TOKEN_FILE=SERVICE_TOKEN_FILE,BEYVRA_EMAIL_TENANT_ID="a",KLYROW_AUTH_RATE_PER_MINUTE="1000")
+os.environ.update(KLYROW_DATABASE_URL="sqlite:///./test.db",KLYROW_SESSION_SECRET="test-session-secret-at-least-32-bytes",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_MIDDLEWARE_API_KEY="middleware-command-test-token",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple",BEYVRA_EMAIL_SERVICE_TOKEN_FILE=SERVICE_TOKEN_FILE,BEYVRA_EMAIL_TENANT_ID="a",KLYROW_AUTH_RATE_PER_MINUTE="1000")
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from apps.gateway.app.main import AllowedSender,Audit,Base,DB,Domain,Event,Message,PostalEvent,Suppression,Tenant,User,app,engine,ph
+from apps.gateway.app.main import AllowedSender,Audit,Base,DB,Domain,EmailOutbox,Event,Message,MiddlewareCommandOperation,PostalEvent,Suppression,Tenant,User,app,engine,ph
 
 def setup_module():
     Base.metadata.drop_all(engine); Base.metadata.create_all(engine)
@@ -20,6 +20,7 @@ def setup_module():
 client=TestClient(app)
 def login(n): return client.post("/v1/auth/login",json={"email":f"{n}@example.com","password":"long-enough-password"}).json()["access_token"]
 def hdr(n): return {"Authorization":"Bearer "+login(n)}
+def middleware_hdr(n,correlation,idempotency): return {"Authorization":"Bearer middleware-command-test-token","X-Klyrow-Tenant-Id":n,"X-Tenant-ID":n,"X-Correlation-ID":correlation,"Idempotency-Key":idempotency}
 def test_unauthorized(): assert client.get("/v1/domains").status_code==401
 def test_logout_revokes_active_session():
     access=login("a");h={"Authorization":"Bearer "+access}
@@ -36,6 +37,45 @@ def test_safe_send_and_suppression():
     h={**hdr("a"),"Idempotency-Key":"send-1"}; x={"to":"ok@example.net","sender":"sender@a.example.com","subject":"test","html":"<p>test</p>"}; r=client.post("/v1/messages",headers=h,json=x); assert r.status_code==202 and r.json()["safe_mode"]; assert client.post("/v1/messages",headers=h,json=x).json()["id"]==r.json()["id"]
     with DB() as s:s.add(Suppression(id="s",tenant_id="a",email="blocked@example.net",reason="hard_bounce"));s.commit()
     x["to"]="blocked@example.net"; assert client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"send-2"},json=x).status_code==422
+
+def test_middleware_command_submit_readback_and_replay():
+    h=middleware_hdr("a","command-correlation-0001","command-send-0001")
+    payload={"command":"email.message.send.v1","tenant_id":"a","correlation_id":"command-correlation-0001","payload":{"to":"command@example.net","sender":"sender@a.example.com","subject":"command","html":"<p>command</p>"}}
+    with patch("apps.gateway.app.main.emit_middleware",new=AsyncMock(return_value=True)):
+        first=client.post("/v1/commands",headers=h,json=payload);replay=client.post("/v1/commands",headers=h,json=payload)
+    assert first.status_code==202 and replay.status_code==202
+    assert first.json()["command_id"]==replay.json()["command_id"]
+    assert first.json()["state"]=="queued"
+    command_id=first.json()["command_id"]
+    read=client.get(f"/v1/operations/{command_id}",headers={"Authorization":h["Authorization"],"X-Klyrow-Tenant-Id":"a","X-Tenant-ID":"a"})
+    assert read.status_code==200 and read.json()["result"]["status"]=="accepted_test"
+    assert client.post("/v1/commands",headers={**h,"X-Tenant-ID":"b"},json=payload).status_code==403
+
+def test_middleware_command_cancel_and_suppression_upsert():
+    with DB() as s:
+        s.add(Message(id="cancel-command-message",tenant_id="a",recipient="person@example.net",sender="sender@a.example.com",subject="cancel",status="queued"))
+        s.add(EmailOutbox(id="cancel-command-outbox",tenant_id="a",message_id="cancel-command-message",payload="{}",state="pending"))
+        s.commit()
+    base=middleware_hdr("a","command-correlation-0002","command-cancel-0001")
+    cancel=client.post("/v1/commands",headers=base,json={"command":"email.message.cancel.v1","payload":{"message_id":"cancel-command-message"}})
+    assert cancel.status_code==202 and cancel.json()["state"]=="cancelled"
+    upsert=client.post("/v1/commands",headers={**base,"X-Correlation-ID":"command-correlation-0003","Idempotency-Key":"command-suppress-0001"},json={"command":"email.suppression.upsert.v1","payload":{"email":"stop@example.net","reason":"manual"}})
+    assert upsert.status_code==202 and upsert.json()["state"]=="completed"
+    with DB() as s:
+        assert s.get(Message,"cancel-command-message").status=="cancelled"
+        assert s.get(EmailOutbox,"cancel-command-outbox").state=="cancelled"
+        assert s.scalar(select(Suppression).where(Suppression.tenant_id=="a",Suppression.email=="stop@example.net")).reason=="manual"
+
+def test_middleware_commands_require_command_scope_and_record_bad_payload():
+    user_headers={**hdr("a"),"X-Tenant-ID":"a","X-Correlation-ID":"command-correlation-0004","Idempotency-Key":"command-scope-denied"}
+    payload={"command":"email.message.send.v1","payload":{"sender":"sender@a.example.com","subject":"missing recipient","html":"<p>bad</p>"}}
+    assert client.post("/v1/commands",headers=user_headers,json=payload).status_code==403
+    service_headers=middleware_hdr("a","command-correlation-0005","command-invalid-payload")
+    response=client.post("/v1/commands",headers=service_headers,json=payload)
+    assert response.status_code==422 and response.json()["detail"]=="invalid_command_payload"
+    with DB() as s:
+        operation=s.scalar(select(MiddlewareCommandOperation).where(MiddlewareCommandOperation.idempotency_key=="command-invalid-payload"))
+        assert operation and operation.state=="failed" and operation.error=="invalid_command_payload"
 def test_unapproved_local_part_is_denied():
     x={"to":"ok@example.net","sender":"admin@a.example.com","subject":"test","html":"<p>test</p>"}
     assert client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"unapproved-local"},json=x).status_code==403

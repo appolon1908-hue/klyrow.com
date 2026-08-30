@@ -1,0 +1,19 @@
+groups:
+  - name: klyrow-email-recording
+    interval: 30s
+    rules:
+      - record: klyrow:http_requests:rate5m
+        expr: sum by (codestra_business, application, service, environment) (rate(klyrow_http_requests_total{application="klyrow.com"}[5m]))
+      - record: klyrow:http_errors:ratio5m
+        expr: |
+          sum by (codestra_business, application, service, environment) (rate(klyrow_http_requests_total{application="klyrow.com",status=~"5.."}[5m]))
+          /
+          clamp_min(sum by (codestra_business, application, service, environment) (rate(klyrow_http_requests_total{application="klyrow.com"}[5m])), 1)
+      - record: klyrow:mail_events:rate15m
+        expr: sum by (codestra_business, application, service, environment, event) (rate(klyrow_mail_total{application="klyrow.com"}[15m]))
+      - record: klyrow:provider_queue:sum
+        expr: sum by (codestra_business, application, service, environment, status) (klyrow_provider_queue_messages{application="klyrow.com"})
+      - record: klyrow:integration_outbox:sum
+        expr: sum by (codestra_business, application, service, environment, target, state) (klyrow_integration_outbox_items{application="klyrow.com"})
+      - record: klyrow:email_outbox_oldest_seconds:max
+        expr: max by (codestra_business, application, service, environment) (klyrow_email_outbox_oldest_seconds{application="klyrow.com"})

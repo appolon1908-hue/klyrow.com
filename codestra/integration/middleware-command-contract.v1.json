@@ -1,0 +1,83 @@
+{
+  "schemaVersion": "1.0",
+  "application": "klyrow.com",
+  "status": "PREPARED_NOT_DEPLOYED",
+  "authority": "Middleware-",
+  "transport": {
+    "baseUrl": "https://api.codestra.co",
+    "commandEndpoint": "/v2/automation/commands",
+    "statusEndpoint": "/v2/automation/commands/{command_id}",
+    "requiredHeaders": [
+      "Authorization",
+      "X-Tenant-ID",
+      "X-Correlation-ID",
+      "Idempotency-Key"
+    ],
+    "forbiddenDirectTargets": [
+      "n8n",
+      "odoo",
+      "postgresql",
+      "redis",
+      "postal-admin-api",
+      "raw-smtp",
+      "smtp-provider",
+      "dns-provider",
+      "secret-store"
+    ]
+  },
+  "callerIdentity": {
+    "clientId": "klyrow-backend",
+    "audience": "middleware-api",
+    "requiredScopes": [
+      "klyrow.middleware.command.write",
+      "klyrow.middleware.status.read"
+    ],
+    "tenantSource": "service-account.tenant_id",
+    "tokenMaxSeconds": 300
+  },
+  "commands": [
+    {
+      "type": "email.message.send.v1",
+      "description": "Submit a governed email request. Middleware decides authorization and calls Klyrow; n8n never talks to SMTP or Postal.",
+      "deliveryDefault": "disabled",
+      "idempotencyKeyRequired": true
+    },
+    {
+      "type": "email.message.status.read.v1",
+      "description": "Read canonical message state through Middleware for n8n/Odoo/customer status sync.",
+      "deliveryDefault": "read_only",
+      "idempotencyKeyRequired": true
+    },
+    {
+      "type": "email.smtp.credential.create.v1",
+      "description": "Create tenant-scoped SMTP credentials through Klyrow policy; secret is returned once and never stored in workflow JSON.",
+      "deliveryDefault": "disabled",
+      "idempotencyKeyRequired": true
+    },
+    {
+      "type": "email.smtp.credential.rotate.v1",
+      "description": "Rotate a tenant-scoped SMTP credential through Middleware and Klyrow.",
+      "deliveryDefault": "disabled",
+      "idempotencyKeyRequired": true
+    },
+    {
+      "type": "email.smtp.credential.revoke.v1",
+      "description": "Revoke a tenant-scoped SMTP credential through Middleware and Klyrow.",
+      "deliveryDefault": "disabled",
+      "idempotencyKeyRequired": true
+    },
+    {
+      "type": "email.delivery.replay.v1",
+      "description": "Request audited replay of failed delivery events without bypassing DLQ policy.",
+      "deliveryDefault": "disabled",
+      "idempotencyKeyRequired": true
+    }
+  ],
+  "invariants": {
+    "n8nIsWriteAuthority": false,
+    "browserReceivesConfidentialCredentials": false,
+    "smtpBypassesMiddlewareForAutomation": false,
+    "workflowJsonMayContainCredentials": false,
+    "liveDeliveryEnabledByDefault": false
+  }
+}

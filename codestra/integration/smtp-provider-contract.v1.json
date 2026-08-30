@@ -1,0 +1,79 @@
+{
+  "schemaVersion": "1.0",
+  "provider": "klyrow-email",
+  "transport": "smtp",
+  "status": "PREPARED_NOT_DEPLOYED",
+  "authority": {
+    "publicProductApi": "SDK-repository Communications API v1",
+    "runtimeWriteAuthority": "Middleware-",
+    "smtpRelay": "Postal",
+    "secretAuthority": "Codestra-OpenBao"
+  },
+  "invariants": {
+    "browserMayHoldSmtpSecrets": false,
+    "n8nMaySendSmtpDirectly": false,
+    "odooMayUseDirectProviderApi": false,
+    "externalProviderWritesBypassMiddleware": false,
+    "safeModeDefault": true,
+    "liveDeliveryDefault": false
+  },
+  "commands": [
+    {
+      "type": "email.message.send.v1",
+      "description": "Submit a governed email message through Middleware to Klyrow/Postal.",
+      "deliveryDefault": "disabled",
+      "idempotencyRequired": true,
+      "readbackRequired": true
+    },
+    {
+      "type": "email.message.cancel.v1",
+      "description": "Cancel a queued governed email message when it has not reached irreversible provider delivery.",
+      "deliveryDefault": "disabled",
+      "idempotencyRequired": true,
+      "readbackRequired": true
+    },
+    {
+      "type": "email.domain.verify.v1",
+      "description": "Request domain verification and DNS/readiness checks before enabling a sender.",
+      "deliveryDefault": "disabled",
+      "idempotencyRequired": true,
+      "readbackRequired": true
+    },
+    {
+      "type": "email.suppression.upsert.v1",
+      "description": "Create or update a tenant-scoped suppression from bounce, complaint, unsubscribe or operator action.",
+      "deliveryDefault": "enabled-after-auth",
+      "idempotencyRequired": true,
+      "readbackRequired": true
+    },
+    {
+      "type": "email.reputation.snapshot.request.v1",
+      "description": "Request a bounded deliverability and reputation snapshot for dashboards.",
+      "deliveryDefault": "disabled",
+      "idempotencyRequired": true,
+      "readbackRequired": true
+    }
+  ],
+  "webhooks": [
+    {
+      "source": "Postal",
+      "target": "Klyrow gateway",
+      "path": "/v1/webhooks/postal-native",
+      "signature": "rsa-sha256 exact body"
+    },
+    {
+      "source": "Klyrow",
+      "target": "Middleware",
+      "path": "/api/v1/klyrow/events",
+      "signature": "hmac-sha256 canonical body"
+    }
+  ],
+  "reconciliation": {
+    "messageLedger": true,
+    "providerEventLedger": true,
+    "middlewareOperationReadback": true,
+    "retryBackoff": "bounded-exponential",
+    "deadLetterState": "dlq",
+    "indeterminateStateIsTerminalUntilReconciled": true
+  }
+}

@@ -1,0 +1,142 @@
+{
+  "schemaVersion": "1.0",
+  "application": "klyrow.com",
+  "codestraBusiness": "klyrow-email",
+  "status": "INTEGRATION_FILES_PREPARED_NOT_DEPLOYED",
+  "publicHostnames": [
+    "app.klyrow.com",
+    "api.klyrow.com",
+    "track.klyrow.com",
+    "mail.klyrow.com"
+  ],
+  "runtime": {
+    "gateway": "apps/gateway",
+    "smtpRelay": "apps/gateway/app/smtp_relay.py",
+    "smtpPolicy": "apps/gateway/app/smtp_policy.py",
+    "securitySmtpWorker": "apps/gateway/app/security_smtp_worker.py",
+    "postalConfig": "config/postal/postal.yml.template"
+  },
+  "identity": {
+    "authority": "Keycloak",
+    "expectedIssuer": "https://auth.codestra.co/realms/codestra",
+    "clientId": "klyrow-backend",
+    "audience": "middleware-api",
+    "requiredScopes": [
+      "klyrow.middleware.command.write",
+      "klyrow.middleware.status.read",
+      "klyrow.email.send",
+      "klyrow.email.status.read"
+    ],
+    "browserSecretsAllowed": false,
+    "tokenMaxSeconds": 300
+  },
+  "gateway": {
+    "edge": "Caddy",
+    "apiGateway": "Kong",
+    "canonicalApiBase": "https://api.codestra.co",
+    "directN8nAccessAllowed": false,
+    "directOdooAccessAllowed": false,
+    "directSmtpProviderAccessFromN8nAllowed": false
+  },
+  "middleware": {
+    "authority": "Middleware-",
+    "automationApi": {
+      "claim": "POST /v2/automation/jobs/claim",
+      "commands": "POST /v2/automation/commands",
+      "commandStatus": "GET /v2/automation/commands/{command_id}",
+      "heartbeat": "POST /v2/automation/jobs/{job_id}/heartbeat",
+      "complete": "POST /v2/automation/jobs/{job_id}/complete",
+      "fail": "POST /v2/automation/jobs/{job_id}/fail",
+      "dlq": "POST /v2/automation/jobs/{job_id}/fail"
+    },
+    "allowedCommands": [
+      "email.message.send.v1",
+      "email.message.status.read.v1",
+      "email.domain.register.v1",
+      "email.domain.verify.v1",
+      "email.sender.create.v1",
+      "email.smtp.credential.create.v1",
+      "email.smtp.credential.rotate.v1",
+      "email.smtp.credential.revoke.v1",
+      "email.suppression.create.v1",
+      "email.delivery.replay.v1"
+    ],
+    "eventsPublishedToMiddleware": [
+      "klyrow.email.queued.v1",
+      "klyrow.email.sent.v1",
+      "klyrow.email.delivered.v1",
+      "klyrow.email.deferred.v1",
+      "klyrow.email.bounced.v1",
+      "klyrow.email.complained.v1",
+      "klyrow.email.opened.v1",
+      "klyrow.email.clicked.v1",
+      "klyrow.email.unsubscribed.v1",
+      "klyrow.smtp.credential.created.v1",
+      "klyrow.smtp.credential.rotated.v1",
+      "klyrow.smtp.credential.revoked.v1"
+    ],
+    "requiredHeaders": [
+      "Authorization",
+      "X-Tenant-ID",
+      "X-Correlation-ID",
+      "Idempotency-Key"
+    ]
+  },
+  "smtp": {
+    "authority": "Klyrow gateway and Postal private relay",
+    "publicLiveDeliveryEnabledByDefault": false,
+    "securitySmtpLiveEnabledByDefault": false,
+    "requiresStartTlsBeforePublicAuth": true,
+    "credentialsStoredAsHashes": true,
+    "credentialSecretReturnedOnce": true,
+    "directSmtpFromN8nAllowed": false,
+    "directSmtpFromBrowserAllowed": false,
+    "directPostalAdminApiFromN8nAllowed": false,
+    "approvedPrivateRelay": "postal-smtp:25",
+    "approvedPublicIdentity": "mail.klyrow.com"
+  },
+  "observability": {
+    "metricsEndpoint": "/metrics",
+    "metricsEnabledByDefault": false,
+    "prometheusJob": "klyrow",
+    "requiredLabels": [
+      "codestra_business",
+      "application",
+      "service",
+      "environment",
+      "server",
+      "region",
+      "deployment"
+    ],
+    "forbiddenLabels": [
+      "tenant_id",
+      "customer_id",
+      "organization_id",
+      "user_id",
+      "email",
+      "phone",
+      "recipient",
+      "sender",
+      "message_id",
+      "trace_id",
+      "request_id",
+      "raw_url",
+      "query_string",
+      "idempotency_key",
+      "smtp_username"
+    ]
+  },
+  "productionGates": {
+    "deploymentChanged": false,
+    "liveEmailDeliveryEnabled": false,
+    "securitySmtpLiveEnabled": false,
+    "metricsTargetEnabled": false,
+    "n8nWorkflowsImported": false,
+    "n8nWorkflowsActive": false,
+    "requiresKeycloakKongMatrix": true,
+    "requiresMiddlewareCanary": true,
+    "requiresCpKlyrowStagingProof": true,
+    "requiresSmtpDnsPtrTlsDkimDmarc": true,
+    "requiresNoUnexpectedDlq": true
+  }
+}
