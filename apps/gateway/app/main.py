@@ -14,7 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import BaseModel, EmailStr, Field, ValidationError, model_validator
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -34,6 +34,12 @@ SAFE_MODE=os.getenv("KLYROW_SAFE_MODE", "true").lower()=="true" or os.getenv("KL
 engine=create_engine(DATABASE_URL, pool_pre_ping=True)
 DB=sessionmaker(engine, expire_on_commit=False)
 ph=PasswordHasher()
+def secret_setting(name:str,file_name:Optional[str]=None)->str:
+    path=os.getenv(file_name or f"{name}_FILE","").strip()
+    if path:
+        try:return Path(path).read_text(encoding="utf-8").strip()
+        except OSError:return ""
+    return os.getenv(name,"").strip()
 app=FastAPI(title="Klyrow API", version="1.0.0", docs_url=None if os.getenv("KLYROW_ENV")=="production" else "/docs")
 AUTH_WEB_DIST=Path(__file__).with_name("auth_web")
 if not AUTH_WEB_DIST.exists():
@@ -144,7 +150,12 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
         resolver=os.getenv("KLYROW_TENANT_RESOLVER_URL","").strip()
         if resolver:
             if any(name.lower() in {"x-codestra-tenant-id","x-codestra-identity-id","x-codestra-tenant","x-codestra-subject"} for name in request.headers):raise HTTPException(403,"not_found")
-            permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send" if request.method not in {"GET","HEAD","OPTIONS"} else "klyrow.read"
+            if request.url.path=="/v1/commands":
+                permission="klyrow.middleware.command.write"
+            elif request.url.path.startswith("/v1/operations/"):
+                permission="klyrow.middleware.operation.read"
+            else:
+                permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send" if request.method not in {"GET","HEAD","OPTIONS"} else "klyrow.read"
             headers={"Authorization":"Bearer "+raw,"X-Codestra-Required-Permission":permission}
             if x_klyrow_tenant_id:headers["X-Klyrow-Tenant-Id"]=x_klyrow_tenant_id
             response=httpx.get(resolver,headers=headers,timeout=5,follow_redirects=False)
@@ -157,7 +168,7 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
             tenant=s.get(Tenant,ctx["tenant"])
             if not tenant or not tenant.enabled:raise HTTPException(403,"tenant_suspended")
         else:
-            middleware_key=os.getenv("KLYROW_MIDDLEWARE_API_KEY","")
+            middleware_key=secret_setting("KLYROW_MIDDLEWARE_API_KEY","KLYROW_MIDDLEWARE_CLIENT_SECRET_FILE")
             if middleware_key and hmac.compare_digest(raw.encode(),middleware_key.encode()):
                 tenant=s.get(Tenant,x_klyrow_tenant_id) if x_klyrow_tenant_id else None
                 if not tenant or not tenant.enabled:raise HTTPException(403,"valid_tenant_required")
@@ -217,6 +228,11 @@ def require(*roles):
         if ctx["role"] not in roles: raise HTTPException(403,"insufficient_role")
         return ctx
     return inner
+
+def require_middleware_command_scope(ctx:dict):
+    scopes=set(ctx.get("scopes") or [])|set(ctx.get("permissions") or [])
+    if ctx.get("sub")=="middleware-service" or "klyrow.middleware.command.write" in scopes:return
+    raise HTTPException(403,"middleware_command_scope_required")
 
 def canary_configuration()->tuple[str,str,str,int]:
     try:maximum=int(os.getenv("KLYROW_CANARY_MAX_DELIVERIES","0"))
@@ -326,7 +342,7 @@ class MiddlewareCommandIn(BaseModel):
     correlation_id:Optional[str]=Field(default=None,max_length=200)
 
 async def emit_middleware(event_type:str,payload:dict)->bool:
-    base=os.getenv("KLYROW_MIDDLEWARE_URL","").rstrip("/"); key=os.getenv("KLYROW_MIDDLEWARE_API_KEY",""); secret=os.getenv("KLYROW_WEBHOOK_SECRET","")
+    base=os.getenv("KLYROW_MIDDLEWARE_URL","").rstrip("/"); key=secret_setting("KLYROW_MIDDLEWARE_API_KEY","KLYROW_MIDDLEWARE_CLIENT_SECRET_FILE"); secret=secret_setting("KLYROW_WEBHOOK_SECRET","KLYROW_WEBHOOK_SECRET_FILE")
     if not base or not key or not secret:return False
     event_id=payload.get("event_id") or str(uuid.uuid4())
     if event_type.startswith(("klyrow.email.", "klyrow.message.")):
@@ -542,8 +558,9 @@ async def email_outbox_loop():
                 response=await client.post(os.environ["KLYROW_POSTAL_API_URL"]+"/api/v1/send/message",headers=headers,json=json.loads(snapshot[2]));response.raise_for_status();provider_id=str(response.json().get("data",{}).get("message_id") or snapshot[1])
             with DB() as s:
                 item=s.get(EmailOutbox,snapshot[0]);message=s.get(Message,snapshot[1])
+                if item and item.state=="cancelled":s.commit();continue
                 if item:item.state="delivered";item.provider_message_id=provider_id;item.last_error=None;item.updated_at=datetime.now(timezone.utc)
-                if message:message.status="accepted"
+                if message and message.status!="cancelled":message.status="accepted"
                 s.commit()
         except Exception as exc:
             with DB() as s:
@@ -751,6 +768,7 @@ def ensure_command_tenant(ctx:dict,tenant_id:str):
 @app.post("/v1/commands",status_code=202)
 async def middleware_command(x:MiddlewareCommandIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:str=Header(alias="Idempotency-Key",min_length=8,max_length=200),x_tenant_id:str=Header(alias="X-Tenant-ID",min_length=1,max_length=120),x_correlation_id:str=Header(alias="X-Correlation-ID",min_length=8,max_length=200)):
     ensure_command_tenant(ctx,x_tenant_id)
+    require_middleware_command_scope(ctx)
     if x.tenant_id and x.tenant_id!=x_tenant_id:raise HTTPException(403,"tenant_mismatch")
     if x.correlation_id and x.correlation_id!=x_correlation_id:raise HTTPException(409,"correlation_id_mismatch")
     if x.command not in MIDDLEWARE_ALLOWED_COMMANDS:raise HTTPException(422,"unsupported_command")
@@ -768,10 +786,13 @@ async def middleware_command(x:MiddlewareCommandIn,ctx=Depends(auth),s:Session=D
             item.state="queued";item.result_json=json.dumps(result,separators=(",",":"),sort_keys=True)
         elif x.command=="email.message.cancel.v1":
             message_id=str(payload.get("message_id") or "")
-            message=s.scalar(select(Message).where(Message.id==message_id,Message.tenant_id==ctx["tenant"]))
+            message=s.scalar(select(Message).where(Message.id==message_id,Message.tenant_id==ctx["tenant"]).with_for_update())
             if not message:raise HTTPException(404,"not_found")
             if message.status in {"delivered","bounced","complained","failed"}:raise HTTPException(409,"terminal_message_cannot_cancel")
-            message.status="cancelled";item.state="cancelled";item.result_json=json.dumps({"message_id":message.id,"status":"cancelled"})
+            outbox=s.scalar(select(EmailOutbox).where(EmailOutbox.message_id==message.id,EmailOutbox.tenant_id==ctx["tenant"]).with_for_update())
+            if outbox and outbox.state in {"pending","retry","sending"}:
+                outbox.state="cancelled";outbox.last_error="cancelled_by_middleware_command";outbox.updated_at=datetime.now(timezone.utc)
+            message.status="cancelled";item.state="cancelled";item.result_json=json.dumps({"message_id":message.id,"status":"cancelled","outbox_state":outbox.state if outbox else None})
         elif x.command=="email.domain.verify.v1":
             domain_id=str(payload.get("domain_id") or "")
             domain=s.scalar(select(Domain).where(Domain.id==domain_id,Domain.tenant_id==ctx["tenant"]))
@@ -790,6 +811,9 @@ async def middleware_command(x:MiddlewareCommandIn,ctx=Depends(auth),s:Session=D
     except HTTPException as exc:
         item.state="failed";item.error=str(exc.detail);item.updated_at=datetime.now(timezone.utc);s.commit()
         raise
+    except ValidationError:
+        item.state="failed";item.error="invalid_command_payload";item.updated_at=datetime.now(timezone.utc);s.commit()
+        raise HTTPException(422,"invalid_command_payload")
 
 @app.get("/v1/operations/{command_id}")
 def middleware_operation(command_id:str,ctx=Depends(auth),s:Session=Depends(db),x_tenant_id:str=Header(alias="X-Tenant-ID",min_length=1,max_length=120)):
@@ -822,7 +846,7 @@ def messages(ctx=Depends(auth),s:Session=Depends(db),status:Optional[str]=None,l
 def events(mid:str,ctx=Depends(auth),s:Session=Depends(db)): return s.scalars(select(Event).where(Event.message_id==mid,Event.tenant_id==ctx["tenant"])).all()
 @app.post("/v1/webhooks/postal",status_code=202)
 async def postal_hook(request:Request,x_klyrow_timestamp:str=Header(),x_klyrow_event_id:str=Header(),x_klyrow_signature:str=Header(),s:Session=Depends(db)):
-    body=await request.body(); secret=os.environ.get("KLYROW_WEBHOOK_SECRET","").encode()
+    body=await request.body(); secret=secret_setting("KLYROW_WEBHOOK_SECRET","KLYROW_WEBHOOK_SECRET_FILE").encode()
     try: ts=int(x_klyrow_timestamp)
     except: raise HTTPException(401,"invalid_timestamp")
     if abs(time.time()-ts)>300: raise HTTPException(401,"expired_signature")
