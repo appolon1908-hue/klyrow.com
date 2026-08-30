@@ -4,7 +4,10 @@ from apps.gateway.app.smtp_policy import (
     SmtpPolicyError,
     effective_sandbox,
     parse_allowed_streams,
+    security_canary_max_deliveries,
+    security_canary_recipients,
     security_live_delivery_enabled,
+    security_recipient_allowed,
     select_credential_stream,
 )
 
@@ -95,10 +98,64 @@ def test_live_security_gate_opens_only_after_all_controls_pass():
     )
 
 
+def test_canary_mode_allows_only_exact_reviewed_recipients():
+    environment = {
+        "KLYROW_SECURITY_SMTP_ENABLED": "true",
+        "KLYROW_SECURITY_SMTP_LIVE_ENABLED": "true",
+        "KLYROW_SECURITY_SMTP_PRODUCTION_APPROVED": "false",
+        "KLYROW_SECURITY_SMTP_CANARY_RECIPIENTS": (
+            "reset-canary@example.com,second-canary@example.com"
+        ),
+        "KLYROW_SECURITY_SMTP_CANARY_MAX_DELIVERIES": "2",
+    }
+    assert security_canary_recipients(environment) == frozenset(
+        {"reset-canary@example.com", "second-canary@example.com"}
+    )
+    assert security_canary_max_deliveries(environment) == 2
+    assert security_recipient_allowed("RESET-CANARY@example.com", environment)
+    assert not security_recipient_allowed("other@example.com", environment)
+
+
+def test_canary_mode_fails_closed_without_recipient_allowlist():
+    environment = {
+        "KLYROW_SECURITY_SMTP_ENABLED": "true",
+        "KLYROW_SECURITY_SMTP_LIVE_ENABLED": "true",
+        "KLYROW_SECURITY_SMTP_PRODUCTION_APPROVED": "false",
+        "KLYROW_SECURITY_SMTP_CANARY_RECIPIENTS": "",
+    }
+    assert security_recipient_allowed("anyone@example.com", environment) is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["0", "11", "not-an-integer"],
+)
+def test_canary_delivery_limit_is_bounded(value):
+    environment = {
+        "KLYROW_SECURITY_SMTP_PRODUCTION_APPROVED": "false",
+        "KLYROW_SECURITY_SMTP_CANARY_MAX_DELIVERIES": value,
+    }
+    with pytest.raises(SmtpPolicyError):
+        security_canary_max_deliveries(environment)
+
+
+def test_production_approval_removes_canary_recipient_and_count_restrictions():
+    environment = {
+        "KLYROW_SECURITY_SMTP_ENABLED": "true",
+        "KLYROW_SECURITY_SMTP_LIVE_ENABLED": "true",
+        "KLYROW_SECURITY_SMTP_PRODUCTION_APPROVED": "true",
+        "KLYROW_SECURITY_SMTP_CANARY_RECIPIENTS": "",
+        "KLYROW_SECURITY_SMTP_CANARY_MAX_DELIVERIES": "not-used",
+    }
+    assert security_canary_max_deliveries(environment) == 0
+    assert security_recipient_allowed("customer@example.com", environment)
+
+
 def test_non_security_smtp_streams_remain_sandbox_only():
     environment = {
         "KLYROW_SECURITY_SMTP_ENABLED": "true",
         "KLYROW_SECURITY_SMTP_LIVE_ENABLED": "true",
+        "KLYROW_SECURITY_SMTP_PRODUCTION_APPROVED": "true",
     }
     assert (
         effective_sandbox(
