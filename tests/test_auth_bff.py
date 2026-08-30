@@ -38,7 +38,35 @@ def test_login_start_persists_pkce_and_never_redirects_off_canonical_issuer():
         tx = s.scalar(__import__("sqlalchemy").select(OidcLoginTransaction).where(OidcLoginTransaction.state_hash == auth_bff.sha(query["state"][0])))
         assert tx is not None and tx.return_url == "/app"
         assert query["nonce"][0] not in tx.nonce_ciphertext
-        assert "code_verifier" not in location
+    assert "code_verifier" not in location
+
+
+def test_production_login_uses_exact_callback_and_rejects_noncanonical_hosts(monkeypatch):
+    monkeypatch.setenv("KLYROW_ENV", "production")
+    monkeypatch.setenv("KLYROW_PUBLIC_URL", "https://app.klyrow.com")
+    monkeypatch.setenv("KLYROW_OIDC_REDIRECT_URI", "https://app.klyrow.com/auth/callback")
+    production_client = TestClient(app, base_url="https://app.klyrow.com")
+
+    response = production_client.get("/auth/login", follow_redirects=False)
+    assert response.status_code == 302
+    query = parse_qs(urlparse(response.headers["location"]).query)
+    assert query["redirect_uri"] == ["https://app.klyrow.com/auth/callback"]
+
+    for host in ("api.klyrow.com", "track.klyrow.com", "track.codestra.co"):
+        rejected = production_client.get("/auth/login", headers={"Host": host}, follow_redirects=False)
+        assert rejected.status_code == 421, (host, rejected.status_code, rejected.text)
+        assert rejected.json()["detail"] == "canonical_app_host_required"
+
+
+def test_production_rejects_noncanonical_callback_configuration(monkeypatch):
+    monkeypatch.setenv("KLYROW_ENV", "production")
+    monkeypatch.setenv("KLYROW_PUBLIC_URL", "https://app.klyrow.com")
+    monkeypatch.setenv("KLYROW_OIDC_REDIRECT_URI", "https://track.codestra.co/auth/callback")
+    production_client = TestClient(app, base_url="https://app.klyrow.com")
+
+    response = production_client.get("/auth/login", follow_redirects=False)
+    assert response.status_code == 503
+    assert response.json()["detail"] == "oidc_redirect_uri_misconfigured"
 
 
 def test_callback_sets_opaque_cookie_session_and_state_is_single_use(monkeypatch):
@@ -66,6 +94,8 @@ def test_session_status_csrf_and_logout(monkeypatch):
     assert client.post("/auth/logout").status_code == 403
     response = client.post("/auth/logout", headers={"X-Klyrow-CSRF": body["csrf_token"]})
     assert response.status_code == 200 and response.json()["logged_out"] is True
+    logout_query = parse_qs(urlparse(response.json()["end_session_url"]).query)
+    assert logout_query["post_logout_redirect_uri"] == ["https://app.klyrow.com/logged-out"]
     assert client.get("/auth/session").json() == {"authenticated": False}
 
 
