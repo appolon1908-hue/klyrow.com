@@ -1,0 +1,34 @@
+name: Validate Codestra SMTP integration files
+
+on:
+  pull_request:
+    paths:
+      - "codestra/integration/**"
+      - "monitoring/klyrow-smtp-metrics-contract.v1.json"
+      - "monitoring/prometheus-target.disabled.yml"
+      - "docs/CODESTRA-SMTP-INTEGRATION-FILES.md"
+      - "scripts/validate-codestra-smtp-integration.mjs"
+      - ".github/workflows/validate-codestra-smtp-integration.yml"
+  push:
+    branches:
+      - "codex/klyrow-smtp-integration-files"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate SMTP integration files
+        run: node scripts/validate-codestra-smtp-integration.mjs

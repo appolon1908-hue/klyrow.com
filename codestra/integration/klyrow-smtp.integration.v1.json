@@ -1,0 +1,154 @@
+{
+  "schemaVersion": "1.0",
+  "application": "klyrow.com",
+  "codestraBusiness": "klyrow-email",
+  "status": "SMTP_INTEGRATION_FILES_PREPARED_NOT_DEPLOYED",
+  "publicHostnames": [
+    "app.klyrow.com",
+    "api.klyrow.com",
+    "mail.klyrow.com"
+  ],
+  "runtime": {
+    "gateway": "apps/gateway",
+    "smtpRelay": "apps/gateway/app/smtp_relay.py",
+    "smtpPolicy": "apps/gateway/app/smtp_policy.py",
+    "securitySmtpWorker": "apps/gateway/app/security_smtp_worker.py",
+    "postalTemplate": "config/postal/postal.yml.template"
+  },
+  "identity": {
+    "authority": "Keycloak",
+    "expectedIssuer": "https://auth.codestra.co/realms/codestra",
+    "clientId": "klyrow-email",
+    "requiredScopes": [
+      "communications.email.write",
+      "communications.email.read",
+      "communications.events.write",
+      "communications.domains.write"
+    ],
+    "browserSecretsAllowed": false,
+    "smtpCredentialsAreUserPasswords": false
+  },
+  "gateway": {
+    "edge": "Caddy",
+    "apiGateway": "Kong",
+    "canonicalApiBase": "https://api.codestra.co",
+    "directProviderWritesAllowed": false
+  },
+  "smtp": {
+    "approvedRelay": "Postal",
+    "publicSubmissionEnabledByDefault": false,
+    "liveDeliveryEnabledByDefault": false,
+    "requiredStartTlsForPublicSubmission": true,
+    "credentialScope": "tenant-domain-sender-stream",
+    "privateComposeSubmission": "postal-smtp:25",
+    "diagnosticLoopbackSubmission": "127.0.0.1:2525",
+    "forbiddenPublicServices": [
+      "postal-web",
+      "postal-admin",
+      "mariadb",
+      "rabbitmq",
+      "docker"
+    ]
+  },
+  "middleware": {
+    "authority": "Middleware-",
+    "commandApi": "POST /v1/commands",
+    "operationReadbackApi": "GET /v1/operations/{command_id}",
+    "allowedCommands": [
+      "email.message.send.v1",
+      "email.message.cancel.v1",
+      "email.domain.verify.v1",
+      "email.suppression.upsert.v1",
+      "email.reputation.snapshot.request.v1"
+    ],
+    "eventIngress": [
+      "POST /api/v1/klyrow/events",
+      "POST /api/v1/klyrow/bounces",
+      "POST /api/v1/klyrow/complaints",
+      "POST /api/v1/klyrow/unsubscribes"
+    ],
+    "requiredHeaders": [
+      "Authorization",
+      "X-Tenant-ID",
+      "X-Correlation-ID",
+      "Idempotency-Key"
+    ],
+    "eventSignature": "hmac-sha256 timestamp + newline + event_id + newline + klyrow + newline + canonical_body"
+  },
+  "events": {
+    "statusModel": [
+      "accepted",
+      "queued",
+      "submitted",
+      "provider_accepted",
+      "delivered",
+      "deferred",
+      "bounced",
+      "complained",
+      "suppressed",
+      "failed",
+      "cancelled",
+      "indeterminate"
+    ],
+    "publishedEvents": [
+      "klyrow.email.queued",
+      "klyrow.email.sent",
+      "klyrow.email.delivered",
+      "klyrow.email.deferred",
+      "klyrow.email.bounced",
+      "klyrow.email.complained",
+      "klyrow.email.opened",
+      "klyrow.email.clicked",
+      "klyrow.email.unsubscribed",
+      "klyrow.email.inbound_received"
+    ],
+    "indeterminateRequiresReconciliation": true
+  },
+  "sdkPackages": {
+    "communications": [
+      "codestra_middleware_sdk"
+    ]
+  },
+  "observability": {
+    "metricsEndpoint": "/metrics",
+    "metricsEnabledByDefault": false,
+    "prometheusJob": "klyrow-smtp",
+    "requiredLabels": [
+      "codestra_business",
+      "application",
+      "service",
+      "environment",
+      "server",
+      "region",
+      "deployment"
+    ],
+    "forbiddenLabels": [
+      "tenant_id",
+      "customer_id",
+      "organization_id",
+      "user_id",
+      "email",
+      "phone",
+      "recipient",
+      "sender",
+      "request_id",
+      "trace_id",
+      "message_id",
+      "event_id",
+      "raw_url",
+      "query_string",
+      "idempotency_key"
+    ]
+  },
+  "productionGates": {
+    "deploymentChanged": false,
+    "liveEmailDeliveryEnabled": false,
+    "publicSmtpEnabled": false,
+    "metricsTargetEnabled": false,
+    "requiresKeycloakKongMatrix": true,
+    "requiresMiddlewareCanary": true,
+    "requiresPostalCanary": true,
+    "requiresDnsPtrStartTlsProof": true,
+    "requiresPrometheusTargetApproval": true
+  }
+}

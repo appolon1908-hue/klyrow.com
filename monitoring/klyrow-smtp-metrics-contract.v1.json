@@ -1,0 +1,85 @@
+{
+  "schemaVersion": "1.0",
+  "application": "klyrow.com",
+  "codestraBusiness": "klyrow-email",
+  "status": "CONTRACT_PREPARED_NOT_SCRAPED",
+  "metricsEnabledByDefault": false,
+  "requiredLabels": [
+    "codestra_business",
+    "application",
+    "service",
+    "environment",
+    "server",
+    "region",
+    "deployment"
+  ],
+  "forbiddenLabels": [
+    "tenant_id",
+    "customer_id",
+    "organization_id",
+    "user_id",
+    "email",
+    "phone",
+    "recipient",
+    "sender",
+    "request_id",
+    "trace_id",
+    "message_id",
+    "event_id",
+    "raw_url",
+    "query_string",
+    "idempotency_key"
+  ],
+  "metricFamilies": [
+    {
+      "name": "http_requests_total",
+      "type": "counter",
+      "purpose": "Gateway request volume by bounded route template, method and status class."
+    },
+    {
+      "name": "http_request_duration_seconds",
+      "type": "histogram",
+      "purpose": "Gateway request latency."
+    },
+    {
+      "name": "klyrow_email_outbox_oldest_seconds",
+      "type": "gauge",
+      "purpose": "Age of the oldest pending email outbox item."
+    },
+    {
+      "name": "klyrow_provider_queue_messages",
+      "type": "gauge",
+      "purpose": "Provider queue counts by normalized status."
+    },
+    {
+      "name": "klyrow_provider_events",
+      "type": "gauge",
+      "purpose": "Provider event outbox state counts."
+    },
+    {
+      "name": "klyrow_webhook_attempts",
+      "type": "counter",
+      "purpose": "Customer webhook attempts by terminal state."
+    },
+    {
+      "name": "klyrow_delivery_ratio",
+      "type": "gauge",
+      "purpose": "Aggregate bounced, complained and delivered ratios."
+    },
+    {
+      "name": "klyrow_domain_dns_invalid",
+      "type": "gauge",
+      "purpose": "Count of domains failing DNS readiness."
+    },
+    {
+      "name": "klyrow_middleware_command_total",
+      "type": "counter",
+      "purpose": "Middleware command submissions and read-back outcomes."
+    },
+    {
+      "name": "klyrow_build_info",
+      "type": "gauge",
+      "purpose": "Build metadata with bounded labels."
+    }
+  ]
+}
