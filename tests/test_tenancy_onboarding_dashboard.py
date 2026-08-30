@@ -1,12 +1,14 @@
 import os
 from datetime import datetime, timezone
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from apps.gateway.app import auth_bff
 from apps.gateway.app.auth_bff import BrowserSession
-from apps.gateway.app.main import Base, DB, Message, Tenant, User, engine, sha
+from apps.gateway.app.main import AUTH_WEB_DIST, Base, DB, Message, Tenant, User, engine, sha
 from apps.gateway.app.platform import app
 from apps.gateway.app.saas import Onboarding
 from apps.gateway.app.tenancy import OidcIdentity, Organization, TenantMember
@@ -56,6 +58,26 @@ def test_dashboard_is_tenant_scoped_and_mutations_require_csrf():
     session=client.get("/auth/session").json();updated=client.patch("/app/api/onboarding",headers={"X-Klyrow-CSRF":session["csrf_token"]},json={"step":2,"use_case":"transactional","checklist":{"profile":True}});assert updated.status_code==200,updated.text;assert updated.json()["checklist"]["profile"] is True
 
 
+def test_read_only_browser_member_cannot_send_mail():
+    raw = "browser-read-only-session"
+    tenant_id = "tenant-read-only"
+    user_id = "user-read-only"
+    identity_id = "identity-read-only"
+    with DB() as s:
+        s.add(Tenant(id=tenant_id, name="Read Only Tenant", quota=10))
+        s.add(User(id=user_id, tenant_id=tenant_id, email="readonly@example.com", password_hash=sha("unused"), role="tenant_admin"))
+        s.add(OidcIdentity(id=identity_id, issuer=issuer, subject="subject-read-only", user_id=user_id, default_tenant_id=tenant_id, identity_type="KLYROW_ONLY"))
+        s.add(TenantMember(id="member-read-only", tenant_id=tenant_id, user_id=user_id, role="READ_ONLY"))
+        s.add(BrowserSession(id="session-read-only", token_hash=sha(raw), csrf_hash=sha("csrf-read-only"), identity_id=identity_id, user_id=user_id, tenant_id=tenant_id, role="READ_ONLY", created_at=datetime.now(timezone.utc), last_seen_at=datetime.now(timezone.utc), expires_at=datetime(2099,1,1,tzinfo=timezone.utc)))
+        s.commit()
+    client.cookies.set(auth_bff.SESSION_COOKIE, raw, path="/")
+    with patch("apps.gateway.app.tenancy_onboarding._send", new=AsyncMock()) as send:
+        response = client.post("/app/api/email/send", headers={"X-Klyrow-CSRF": "csrf-read-only", "Idempotency-Key": "readonly-send"}, json={"to":"person@example.net","sender":"sender@example.com","subject":"blocked","html":"<p>blocked</p>"})
+    assert response.status_code == 403
+    assert response.json()["detail"] == "mail_send_permission_required"
+    assert send.await_count == 0
+
+
 def test_owner_cannot_access_platform_admin_dashboard():
     response=client.get("/app/api/admin/dashboard");assert response.status_code==403,response.text
 
@@ -63,3 +85,5 @@ def test_owner_cannot_access_platform_admin_dashboard():
 def test_product_routes_use_built_spa_contract():
     assert any(getattr(route,"path",None)=="/app" for route in app.routes)
     assert any(getattr(route,"path",None)=="/onboarding" for route in app.routes)
+    asset_mount=next(route for route in app.routes if getattr(route,"path",None)=="/auth-assets")
+    assert Path(asset_mount.app.directory)==AUTH_WEB_DIST

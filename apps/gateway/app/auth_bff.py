@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
 import jwt
@@ -27,6 +27,7 @@ from .tenancy import OidcIdentity, TenantMember
 
 router = APIRouter(tags=["Browser authentication"])
 SESSION_COOKIE = "__Host-klyrow_session"
+FLOW_COOKIE = "__Host-klyrow_oidc_flow"
 ISSUER = "https://auth.codestra.co/realms/codestra"
 _jwks_clients: dict[str, PyJWKClient] = {}
 now = lambda: datetime.now(timezone.utc)
@@ -121,6 +122,43 @@ def _metadata_hash(value: str) -> Optional[str]:
     if not value:
         return None
     return hmac.new(SECRET.encode(), value.encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def _flow_binding(state: str) -> str:
+    return hmac.new(
+        SECRET.encode(),
+        ("klyrow-oidc-flow-v1:" + state).encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _authorization_state(url: str) -> str:
+    values = parse_qs(urlsplit(url).query).get("state", [])
+    if len(values) != 1:
+        raise HTTPException(503, "oidc_state_unavailable")
+    return values[0]
+
+
+def _set_flow_cookie(response, state: str) -> None:
+    response.set_cookie(
+        FLOW_COOKIE,
+        _flow_binding(state),
+        max_age=_flow_ttl(),
+        secure=True,
+        httponly=True,
+        samesite="lax",
+        path="/auth",
+    )
+
+
+def _clear_flow_cookie(response) -> None:
+    response.delete_cookie(FLOW_COOKIE, path="/auth")
+
+
+def _require_flow_cookie(request: Request, state: str) -> None:
+    supplied = request.cookies.get(FLOW_COOKIE, "")
+    if not supplied or not hmac.compare_digest(supplied, _flow_binding(state)):
+        raise HTTPException(403, "oidc_flow_cookie_mismatch")
 
 
 def _safe_return_to(value: Optional[str], default: str = "/app") -> str:
@@ -367,17 +405,26 @@ def _session_body(s: Session, item: BrowserSession, csrf: Optional[str] = None) 
 
 @router.get("/auth/login")
 def login_start(request: Request, return_to: Optional[str] = None, s: Session = Depends(db)):
-    return RedirectResponse(_authorization_url(request, s, "login", return_to), status_code=302)
+    url = _authorization_url(request, s, "login", return_to)
+    response = RedirectResponse(url, status_code=302)
+    _set_flow_cookie(response, _authorization_state(url))
+    return response
 
 
 @router.get("/auth/signup")
 def signup_start(request: Request, return_to: Optional[str] = None, s: Session = Depends(db)):
-    return RedirectResponse(_authorization_url(request, s, "signup", return_to), status_code=302)
+    url = _authorization_url(request, s, "signup", return_to)
+    response = RedirectResponse(url, status_code=302)
+    _set_flow_cookie(response, _authorization_state(url))
+    return response
 
 
 @router.get("/auth/google")
 def google_start(request: Request, return_to: Optional[str] = None, s: Session = Depends(db)):
-    return RedirectResponse(_authorization_url(request, s, "google", return_to), status_code=302)
+    url = _authorization_url(request, s, "google", return_to)
+    response = RedirectResponse(url, status_code=302)
+    _set_flow_cookie(response, _authorization_state(url))
+    return response
 
 
 @router.get("/auth/callback")
@@ -388,6 +435,7 @@ def oidc_callback(request: Request, code: str, state: str, s: Session = Depends(
     expiry = tx.expires_at if tx.expires_at.tzinfo else tx.expires_at.replace(tzinfo=timezone.utc)
     if expiry <= now():
         raise HTTPException(410, "oidc_state_expired")
+    _require_flow_cookie(request, state)
     tx.used_at = now()
     s.commit()
     verifier = _decrypt(tx.verifier_ciphertext)
@@ -398,6 +446,7 @@ def oidc_callback(request: Request, code: str, state: str, s: Session = Depends(
     item, raw, _csrf = _new_session(s, request, identity, user, membership, tokens)
     response = RedirectResponse(_safe_return_to(tx.return_url), status_code=303)
     _set_session_cookie(response, raw)
+    _clear_flow_cookie(response)
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Klyrow-Session-Id"] = item.id
     return response

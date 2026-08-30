@@ -44,7 +44,7 @@ app=FastAPI(title="Klyrow API", version="1.0.0", docs_url=None if os.getenv("KLY
 AUTH_WEB_DIST=Path(__file__).with_name("auth_web")
 if not AUTH_WEB_DIST.exists():
     AUTH_WEB_DIST=Path(__file__).parents[2]/"web"/"dist"
-app.mount("/auth-assets",StaticFiles(directory=AUTH_WEB_DIST/"assets",check_dir=False),name="auth-assets")
+app.mount("/auth-assets",StaticFiles(directory=AUTH_WEB_DIST,check_dir=False),name="auth-assets")
 REQUESTS=Counter("klyrow_http_requests_total","Requests",["path","status"])
 MAIL=Counter("klyrow_mail_total","Mail lifecycle",["event"])
 LATENCY=Histogram("klyrow_http_request_duration_seconds","Request latency",["path"])

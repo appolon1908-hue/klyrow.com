@@ -168,6 +168,13 @@ def _identity_action_url(
     return urlunsplit((parsed.scheme, parsed.netloc, path, urlencode(query), ""))
 
 
+def _action_response(payload: dict, redirect_to: str, status_code: int = 202) -> JSONResponse:
+    response = JSONResponse({**payload, "redirect_to": redirect_to}, status_code=status_code)
+    auth_bff._set_flow_cookie(response, auth_bff._authorization_state(redirect_to))
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 def install_auth_extensions() -> None:
     """Replace historical routes and session helpers exactly once."""
 
@@ -213,6 +220,7 @@ def oidc_callback(
         raise HTTPException(410, "oidc_state_invalid_or_used")
     if _as_utc(transaction.expires_at) <= auth_bff.now():
         raise HTTPException(410, "oidc_state_expired")
+    auth_bff._require_flow_cookie(request, state)
     transaction.used_at = auth_bff.now()
     session.commit()
 
@@ -245,6 +253,7 @@ def oidc_callback(
         auth_bff._safe_return_to(transaction.return_url), status_code=303
     )
     auth_bff._set_session_cookie(response, raw)
+    auth_bff._clear_flow_cookie(response)
     response.headers["Cache-Control"] = "no-store"
     response.headers["X-Klyrow-Session-Id"] = item.id
     return response
@@ -343,46 +352,40 @@ def begin_recovery(
 ):
     del payload
     auth_rate(request, "browser-recovery")
-    return {
-        "status": "accepted",
-        "redirect_to": _identity_action_url(
+    redirect_to = _identity_action_url(
             request,
             session,
             mode="recover",
             return_to="/reset-success",
             forgot_credentials=True,
-        ),
-    }
+        )
+    return _action_response({"status": "accepted"}, redirect_to)
 
 
 @router.post("/auth/actions/update-password", status_code=202)
 def begin_password_update(request: Request, session: Session = Depends(db)):
     auth_rate(request, "browser-password-update")
-    return {
-        "status": "accepted",
-        "redirect_to": _identity_action_url(
+    redirect_to = _identity_action_url(
             request,
             session,
             mode="update-password",
             return_to="/reset-success",
             action="UPDATE_PASSWORD",
-        ),
-    }
+        )
+    return _action_response({"status": "accepted"}, redirect_to)
 
 
 @router.post("/auth/actions/verify-email", status_code=202)
 def begin_email_verification(request: Request, session: Session = Depends(db)):
     auth_rate(request, "browser-email-verification")
-    return {
-        "status": "accepted",
-        "redirect_to": _identity_action_url(
+    redirect_to = _identity_action_url(
             request,
             session,
             mode="verify-email",
             return_to="/verification-success",
             action="VERIFY_EMAIL",
-        ),
-    }
+        )
+    return _action_response({"status": "accepted"}, redirect_to)
 
 
 @router.post("/auth/actions/invitation")
@@ -416,4 +419,4 @@ def validate_invitation(
         raise HTTPException(503, "oidc_invitation_state_unavailable")
     transaction.mode = "invite:" + item.id
     session.commit()
-    return {"valid": True, "redirect_to": redirect_to}
+    return _action_response({"valid": True}, redirect_to, status_code=200)

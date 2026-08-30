@@ -271,6 +271,35 @@ def test_selected_invitation_wins_when_email_has_multiple_valid_invites(monkeypa
         assert session.get(TenantInvitation, invite_a).accepted_at is None
 
 
+def test_selected_invitation_cannot_rewrite_existing_member_role(monkeypatch):
+    client = _client()
+    suffix = uuid.uuid4().hex
+    email = f"existing-member-{suffix}@example.com"
+    raw = "invite_existing_" + uuid.uuid4().hex
+    tenant_id = f"tenant-existing-{suffix}"
+    user_id = f"user-existing-{suffix}"
+    identity_id = f"identity-existing-{suffix}"
+    invitation_id = f"invite-existing-{suffix}"
+    with DB() as session:
+        session.add(Tenant(id=tenant_id, name="Existing Tenant", quota=100))
+        session.add(User(id=user_id, tenant_id=tenant_id, email=email, password_hash=ph.hash("not-used"), role="tenant_admin"))
+        session.add(OidcIdentity(id=identity_id, issuer=ISSUER, subject=f"subject-existing-{suffix}", user_id=user_id, default_tenant_id=tenant_id, identity_type="KLYROW_ONLY"))
+        session.add(TenantMember(id=f"member-existing-{suffix}", tenant_id=tenant_id, user_id=user_id, role="ADMIN"))
+        session.add(TenantInvitation(id=invitation_id, tenant_id=tenant_id, email=email, role="OWNER", token_hash=sha(raw), expires_at=auth_bff.now() + timedelta(hours=1), created_by="test"))
+        session.commit()
+
+    start = client.post("/auth/actions/invitation", json={"token": raw})
+    state = parse_qs(urlparse(start.json()["redirect_to"]).query)["state"][0]
+    monkeypatch.setattr(auth_bff, "_exchange_code", lambda code, verifier, request: {"id_token": "id-token", "refresh_token": "refresh-token"})
+    monkeypatch.setattr(auth_bff, "_validate_id_token", lambda raw_token, expected_nonce=None: {"iss": ISSUER, "sub": f"subject-existing-{suffix}", "aud": "klyrow-portal", "email": email, "email_verified": True})
+    callback = client.get(f"/auth/callback?state={state}&code=accepted", follow_redirects=False)
+    assert callback.status_code == 409
+    assert callback.json()["detail"] == "invitation_existing_member_role_change_denied"
+    with DB() as session:
+        assert session.get(TenantMember, f"member-existing-{suffix}").role == "ADMIN"
+        assert session.get(TenantInvitation, invitation_id).accepted_at is None
+
+
 def test_production_invitation_returns_one_time_url_to_authorized_creator():
     client, _session_id, csrf = _browser_principal_session()
     response = client.post(

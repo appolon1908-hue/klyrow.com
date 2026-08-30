@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlparse
 from fastapi.testclient import TestClient
 
 from apps.gateway.app import auth_bff
-from apps.gateway.app.auth_bff import BrowserSession, OidcLoginTransaction
+from apps.gateway.app.auth_bff import BrowserSession, FLOW_COOKIE, OidcLoginTransaction
 from apps.gateway.app.main import Base, DB, Tenant, User, engine, ph
 from apps.gateway.app.platform import app
 from apps.gateway.app.tenancy import OidcIdentity, TenantMember
@@ -56,6 +56,16 @@ def test_callback_sets_opaque_cookie_session_and_state_is_single_use(monkeypatch
     with DB() as s:
         row = s.scalar(__import__("sqlalchemy").select(BrowserSession))
         assert row and row.refresh_ciphertext and "refresh-token-secret" not in row.refresh_ciphertext
+
+
+def test_callback_requires_browser_bound_flow_cookie(monkeypatch):
+    start = client.get("/auth/login?return_to=/app", follow_redirects=False)
+    state = parse_qs(urlparse(start.headers["location"]).query)["state"][0]
+    client.cookies.delete(FLOW_COOKIE, path="/auth")
+    monkeypatch.setattr(auth_bff, "_exchange_code", lambda code, verifier, request: {"id_token": "id-token-secret"})
+    response = client.get(f"/auth/callback?code=abc&state={state}", follow_redirects=False)
+    assert response.status_code == 403
+    assert response.json()["detail"] == "oidc_flow_cookie_mismatch"
 
 
 def test_session_status_csrf_and_logout(monkeypatch):

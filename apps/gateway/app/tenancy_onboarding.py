@@ -37,10 +37,15 @@ from .main import (
     ph,
 )
 from .saas import Onboarding, UsageLedger
-from .tenancy import Organization, OidcIdentity, TenantInvitation, TenantMember, validate_role
+from .tenancy import ROLE_PERMISSIONS, Organization, OidcIdentity, TenantInvitation, TenantMember, validate_role
 
 router = APIRouter(tags=["Browser workspace"])
 now = lambda: datetime.now(timezone.utc)
+
+
+def _has_permission(role: str, permission: str) -> bool:
+    permissions = ROLE_PERMISSIONS.get(role, set())
+    return "*" in permissions or permission in permissions
 
 
 class IdentityProfile(BaseModel):
@@ -288,6 +293,8 @@ async def browser_send(
     s: Session = Depends(db),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
+    if not _has_permission(ctx.get("role", ""), "mail.send"):
+        raise HTTPException(403, "mail_send_permission_required")
     return await _send(payload, ctx, s, idempotency_key)
 
 

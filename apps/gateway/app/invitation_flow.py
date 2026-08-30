@@ -87,8 +87,7 @@ def _accept_selected_invitation(
             active=True,
         )
     else:
-        membership.role = invitation.role
-        membership.active = True
+        raise HTTPException(409, "invitation_existing_member_role_change_denied")
     invitation.accepted_at = tenancy_onboarding.now()
     identity.default_tenant_id = invitation.tenant_id
     user.tenant_id = invitation.tenant_id
