@@ -5,7 +5,14 @@ non-`main` refs; 70 were present at the deletion boundary. The four additional
 refs were `codex/klyrow-smtp-integration-files`,
 `docs/repository-profile-v1`, `phase-k0/trunk-reconciliation`, and
 `phase-s0/contract-conformance`. They are included below rather than silently
-excluded from the gate.
+excluded from the gate. After the initial snapshot,
+`phase-s0/contract-conformance` advanced by one documentation-only gate-evidence
+commit; that new tip was re-audited and merged before deletion.
+
+The `phase-k0/trunk-reconciliation` row records the remote execution-branch tip
+immediately before the final S0 evidence reconciliation. Commits which update
+this manifest necessarily advance that same branch, so its immutable final head
+is also preserved by PR #50 and the protected-branch squash audit trail.
 
 ## Summary
 
@@ -102,8 +109,8 @@ The legacy provider/inbound selective-port record is
 | `integration/codestra-email-fabric-v2` | `519ad72b31307d8bd34a13eefbf65a15bd6ea3e9` | merged | Tip is an ancestor of the reconciled K0 trunk. |
 | `integration/middleware-email-api-v1` | `519ad72b31307d8bd34a13eefbf65a15bd6ea3e9` | merged | Tip is an ancestor of the reconciled K0 trunk. |
 | `ops/website-provider-host-edge` | `e070758e14aff702b6b45a7a500c2c23fdd445d8` | merged | Tip is an ancestor of the reconciled K0 trunk. |
-| `phase-k0/trunk-reconciliation` | `bedc22f9018b6f85a8c0e62b76544861f4944a6d` | merged | Tip is an ancestor of the reconciled K0 trunk. |
-| `phase-s0/contract-conformance` | `0cd48c6247ac360d94931666caa7934979c4cd9b` | merged | Tip is an ancestor of the reconciled K0 trunk. |
+| `phase-k0/trunk-reconciliation` | `4d381b0b6cefe7b7c1f3e7d992e92b1fe68e58c2` | merged | Pre-finalization execution tip; subsequent commits only reconcile post-snapshot evidence and this manifest. The final head remains preserved by PR #50. |
+| `phase-s0/contract-conformance` | `5693fde3d13c633e63615cda3738532c3a046dff` | merged | The post-snapshot S0 gate-evidence commit was re-audited and merged; this tip is an ancestor of the reconciled K0 trunk. |
 | `planning/corporate-email-saas-1-12` | `8460dad391858a35ea156e6e92823b6553d82260` | merged | Tip is an ancestor of the reconciled K0 trunk. |
 | `release/klyrow-production-readiness` | `ebf54de55d87868818bb518872d0804741e33d52` | merged | Tip is an ancestor of the reconciled K0 trunk. |
 | `test/email-fabric-contracts-v1` | `519ad72b31307d8bd34a13eefbf65a15bd6ea3e9` | merged | Tip is an ancestor of the reconciled K0 trunk. |
