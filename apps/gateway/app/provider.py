@@ -264,6 +264,76 @@ class ProviderMailIn(BaseModel):
         return self
 
 
+class CanonicalContent(BaseModel):
+    subject: Optional[str] = Field(default=None, max_length=998)
+    text: Optional[str] = Field(default=None, max_length=1_000_000)
+    html: Optional[str] = Field(default=None, max_length=1_000_000)
+    templateId: Optional[str] = None
+    templateVersion: Optional[int] = Field(default=None, ge=1)
+    variables: dict = Field(default_factory=dict)
+
+
+class CanonicalEmailIn(BaseModel):
+    channel: str = "email"
+    sender: Optional[EmailStr] = None
+    from_address: Optional[EmailStr] = Field(default=None, alias="from")
+    to: list[str] = Field(min_length=1, max_length=1000)
+    senderIdentityId: Optional[str] = None
+    domainId: Optional[str] = None
+    content: CanonicalContent
+    scheduledAt: Optional[datetime] = None
+    metadata: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_step3_email(self):
+        if self.channel != "email":
+            raise ValueError("only channel=email is supported by this provider")
+        if len(self.to) != 1:
+            raise ValueError("Klyrow Step 3 accepts one recipient per provider request")
+        self.to = [recipient.strip().lower() for recipient in self.to]
+        if not self.content.text and not self.content.html:
+            raise ValueError("Klyrow Step 3 requires rendered text or html content")
+        return self
+
+
+def provider_to_canonical_status(status: str) -> str:
+    value = status.upper()
+    if value in {"CREATED", "QUEUED"}:
+        return "queued"
+    if value in {"PROCESSING", "SUBMITTED", "SENT", "DEFERRED"}:
+        return "dispatched" if value != "DEFERRED" else "indeterminate"
+    if value == "DELIVERED":
+        return "delivered"
+    if value == "SUPPRESSED":
+        return "suppressed"
+    if value in {"BOUNCED_SOFT", "BOUNCED_HARD", "COMPLAINED", "FAILED", "DEAD_LETTER"}:
+        return "failed"
+    return "indeterminate"
+
+
+def canonical_message_response(message: ProviderMessage) -> dict:
+    return {
+        "messageId": message.id,
+        "tenantId": message.tenant_id,
+        "channel": "email",
+        "direction": "outbound",
+        "status": provider_to_canonical_status(message.status),
+        "correlationId": message.correlation_id,
+        "idempotencyKey": message.idempotency_key,
+        "operationId": None,
+        "provider": "klyrow",
+        "providerReference": message.provider_message_id,
+        "failureCode": message.last_error,
+        "failureMessage": message.last_error,
+        "createdAt": message.created_at.isoformat(),
+        "acceptedAt": message.created_at.isoformat(),
+        "dispatchedAt": message.updated_at.isoformat() if message.status in {"PROCESSING", "SUBMITTED", "SENT", "DELIVERED"} else None,
+        "completedAt": message.updated_at.isoformat() if provider_to_canonical_status(message.status) in {"delivered", "failed", "suppressed"} else None,
+        "updatedAt": message.updated_at.isoformat(),
+        "metadata": {"stream": message.stream, "sandbox": message.sandbox},
+    }
+
+
 class DomainRegisterIn(BaseModel):
     domain: str = Field(pattern=r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
 
@@ -601,6 +671,31 @@ def email_send(payload: ProviderMailIn, ctx=Depends(auth), s: Session = Depends(
     return {"message_id": message.id, "status": message.status, "request_id": x_correlation_id, "sandbox": message.sandbox}
 
 
+@router.post("/communications/messages", status_code=202)
+def canonical_email_send(payload: CanonicalEmailIn, ctx=Depends(auth), s: Session = Depends(db), idempotency_key: str = Header(min_length=8, max_length=200), x_correlation_id: str = Header(min_length=8, max_length=128)):
+    if not ctx.get("service"):
+        raise HTTPException(403, "middleware_service_identity_required")
+    sender = payload.sender or payload.from_address
+    if sender is None:
+        raise HTTPException(422, "sender_required")
+    stream = str(payload.metadata.get("stream") or "TRANSACTIONAL").upper()
+    provider_payload = ProviderMailIn(
+        sender=sender,
+        recipient=str(payload.to[0]),
+        subject=payload.content.subject or "",
+        html=payload.content.html,
+        text=payload.content.text,
+        stream=stream,
+        sandbox=True,
+        marketing_consent_granted=payload.metadata.get("consent") == "granted",
+    )
+    result = email_send(provider_payload, ctx, s, idempotency_key, x_correlation_id)
+    message = s.get(ProviderMessage, result["message_id"])
+    if not message:
+        raise HTTPException(500, "provider_message_missing_after_acceptance")
+    return canonical_message_response(message)
+
+
 def process_one_sandbox(s: Session) -> Optional[str]:
     """Atomically claim one eligible sandbox message and persist its result."""
     message = s.scalar(select(ProviderMessage).where(
@@ -731,6 +826,36 @@ def message_get(message_id: str, ctx=Depends(auth), s: Session = Depends(db)):
     return {"message_id": message.id, "provider_message_id": message.provider_message_id, "correlation_id": message.correlation_id, "status": message.status, "stream": message.stream, "sandbox": message.sandbox, "attempts": message.attempts}
 
 
+@router.get("/communications/messages/{messageId}")
+def canonical_message_get(messageId: str, ctx=Depends(auth), s: Session = Depends(db)):
+    if not ctx.get("service"):
+        raise HTTPException(403, "middleware_service_identity_required")
+    message = s.scalar(select(ProviderMessage).where(ProviderMessage.id == messageId, ProviderMessage.tenant_id == ctx["tenant"]))
+    if not message:
+        raise HTTPException(404, "message_not_found")
+    return canonical_message_response(message)
+
+
+@router.get("/communications/messages/{messageId}/events")
+def canonical_message_events(messageId: str, ctx=Depends(auth), s: Session = Depends(db)):
+    if not ctx.get("service"):
+        raise HTTPException(403, "middleware_service_identity_required")
+    message = s.scalar(select(ProviderMessage).where(ProviderMessage.id == messageId, ProviderMessage.tenant_id == ctx["tenant"]))
+    if not message:
+        raise HTTPException(404, "message_not_found")
+    events = list(s.scalars(select(ProviderEvent).where(ProviderEvent.message_id == messageId, ProviderEvent.tenant_id == ctx["tenant"]).order_by(ProviderEvent.created_at)).all())
+    return {"items": [{
+        "eventId": event.id,
+        "messageId": event.message_id,
+        "type": "codestra.communications.message.event.v1",
+        "status": provider_to_canonical_status(event.kind.rsplit(".", 1)[-1]),
+        "occurredAt": event.created_at.isoformat(),
+        "provider": "klyrow",
+        "providerReference": message.provider_message_id,
+        "metadata": json.loads(event.payload_json),
+    } for event in events]}
+
+
 @router.post("/suppressions/check")
 def suppression_check(recipient: EmailStr, ctx=Depends(auth), s: Session = Depends(db)):
     item = s.scalar(select(Suppression).where(Suppression.tenant_id == ctx["tenant"], Suppression.email == str(recipient).lower()))
@@ -754,6 +879,32 @@ def reputation_metrics(ctx=Depends(auth), s: Session = Depends(db)):
         "hard_bounce_rate": counts["BOUNCED_HARD"] / total if total else 0,
         "complaint_rate": counts["COMPLAINED"] / total if total else 0,
         "failure_rate": counts["FAILED"] / total if total else 0}
+
+
+@router.get("/communications/provider-health")
+def canonical_provider_health(ctx=Depends(auth), s: Session = Depends(db)):
+    if not ctx.get("service"):
+        raise HTTPException(403, "middleware_service_identity_required")
+    queued = s.scalar(select(func.count(ProviderMessage.id)).where(ProviderMessage.tenant_id == ctx["tenant"], ProviderMessage.status.in_(["QUEUED", "DEFERRED", "PROCESSING"]))) or 0
+    dead = s.scalar(select(func.count(ProviderMessage.id)).where(ProviderMessage.tenant_id == ctx["tenant"], ProviderMessage.status == "DEAD_LETTER")) or 0
+    status = "disabled" if os.getenv("KLYROW_SAFE_MODE", "true").lower() == "true" else ("degraded" if dead else "healthy")
+    return {"status": status, "checkedAt": now().isoformat(), "providers": [{"provider": "klyrow", "channel": "email", "status": status, "reason": "safe_mode" if status == "disabled" else None, "queueDepth": queued}]}
+
+
+@router.get("/communications/reputation")
+def canonical_reputation(ctx=Depends(auth), s: Session = Depends(db)):
+    if not ctx.get("service"):
+        raise HTTPException(403, "middleware_service_identity_required")
+    raw = reputation_metrics(ctx, s)
+    state_map = {"GOOD": "good", "WATCH": "watch", "LIMITED": "limited", "SUSPENDED": "suspended"}
+    domains = list(s.scalars(select(ProviderDomain).where(ProviderDomain.tenant_id == ctx["tenant"])).all())
+    return {
+        "status": state_map.get(raw["state"], "watch"),
+        "checkedAt": now().isoformat(),
+        "domains": [{"domain": item.domain, "status": state_map.get(raw["state"], "watch")} for item in domains],
+        "providers": [{"provider": "klyrow", "channel": "email", "status": state_map.get(raw["state"], "watch"), "queueDepth": raw["volume"] - raw["delivered"]}],
+        "metrics": raw,
+    }
 
 
 @router.post("/domains/register", status_code=201)
@@ -806,6 +957,43 @@ def domain_dns_check(domain_id: str, ctx=Depends(auth), s: Session = Depends(db)
         resource_id=domain.id)
     s.commit()
     return {"domain": domain.domain, "status": domain.status, **evidence}
+
+
+@router.get("/communications/domains")
+def canonical_domains(ctx=Depends(auth), s: Session = Depends(db)):
+    if not ctx.get("service"):
+        raise HTTPException(403, "middleware_service_identity_required")
+    status_map = {
+        "PENDING": "pending",
+        "DNS_REQUIRED": "dns_required",
+        "VERIFYING": "verifying",
+        "VERIFIED": "verified",
+        "SENDING_ENABLED": "sending_enabled",
+        "SUSPENDED": "suspended",
+        "REMOVED": "removed",
+    }
+    domains = list(s.scalars(select(ProviderDomain).where(ProviderDomain.tenant_id == ctx["tenant"])).all())
+    items = []
+    for domain in domains:
+        active_key = s.scalar(select(DkimKey).where(DkimKey.domain_id == domain.id, DkimKey.status == "ACTIVE").order_by(DkimKey.version.desc()).limit(1))
+        items.append({
+            "domainId": domain.id,
+            "domain": domain.domain,
+            "status": status_map.get(domain.status, "pending"),
+            "checks": {
+                "spf": "unknown",
+                "dkim": "valid" if active_key else "pending",
+                "dmarc": "unknown",
+                "reverseDns": "unknown",
+                "tls": "unknown",
+                "bimi": "not_configured",
+            },
+            "provider": "klyrow",
+            "dkimSelectors": [active_key.selector] if active_key else [],
+            "createdAt": domain.created_at.isoformat(),
+            "updatedAt": (domain.verified_at or domain.created_at).isoformat(),
+        })
+    return {"items": items}
 
 
 @router.post("/senders", status_code=201)
