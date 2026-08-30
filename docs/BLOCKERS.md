@@ -2,6 +2,7 @@
 
 ## [K0-T2] D14 is absent from the pinned baseline
 
+- Status: RESOLVED by owner direction on 2026-08-30T15:07:20+02:00
 - Date: 2026-08-30T15:05:36+02:00  · Class: design / mission-source contradiction
 - Doing: Confirm D14 against the mission's pinned `main@6ff3d51` baseline before changing dependencies or CI.
 - Happened: The exact baseline Git object already pins both dependencies, contains `tests/test_provider.py`, and runs the whole test directory in CI:
@@ -35,3 +36,4 @@
 - Options: 1. Accept the pinned baseline evidence, mark D14 pre-closed, preserve the existing requirement and CI coverage, and resume at K0-T3.  2. Provide the intended baseline/ref where D14 reproduces, then restart K0-T2 against that source; this may invalidate the verified K0-T1 candidate relationship.
 - Recommendation: Option 1. The dependency and full-suite CI protections are already present in both the pinned baseline and the candidate, and the clean 177-test run proves collection works.
 - Blocked downstream: K0-T3 through K0-T7 and phases K1-K9
+- Resolution: The owner selected Option 1. D14 is recorded as pre-closed at the pinned baseline; the existing dependency pins and full-suite CI coverage are preserved without a redundant code change. SMTP S0 now runs before K0-T3 as directed by `SMTP_INTEGRATION_MISSION.md`.

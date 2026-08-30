@@ -9,3 +9,5 @@ No production code, dependency, CI, safety-gate, or runtime configuration was ch
 ```text
 177 passed, 9 warnings in 169.35s
 ```
+
+Resolved by owner direction on 2026-08-30T15:07:20+02:00: accept the pinned-baseline evidence, mark D14 pre-closed, and preserve the existing protections. No corrective code change was required.
