@@ -24,7 +24,14 @@ from .provider import (
     smtp_hasher,
 )
 from .security_payload import encrypted_security_payload
-from .smtp_policy import SmtpPolicyError, effective_sandbox, select_credential_stream
+from .smtp_policy import (
+    SmtpPolicyError,
+    effective_sandbox,
+    security_canary_max_deliveries,
+    security_production_approved,
+    security_recipient_allowed,
+    select_credential_stream,
+)
 
 
 def utcnow():
@@ -124,10 +131,11 @@ class GovernedRelay:
 
     async def handle_RCPT(self, _server, session, envelope, address, _rcpt_options):
         sink_domain = os.getenv("KLYROW_SANDBOX_DOMAIN", "klyrow-sink.test").lower()
+        normalized_address = address.lower()
         with DB() as db:
             credential = db.get(SmtpCredential, session.auth_data)
             try:
-                _stream, sandbox, tenant_policy = _credential_policy(db, credential)
+                stream, sandbox, tenant_policy = _credential_policy(db, credential)
             except SmtpPolicyError:
                 return "550 5.7.1 credential policy denied"
             allowed = (
@@ -138,18 +146,27 @@ class GovernedRelay:
             suppressed = db.scalar(
                 select(Suppression).where(
                     Suppression.tenant_id == credential.tenant_id,
-                    Suppression.email == address.lower(),
+                    Suppression.email == normalized_address,
                 )
             )
         if suppressed:
             return "550 5.7.1 recipient suppressed"
         if (
             sandbox
-            and address.lower() not in allowed
-            and not address.lower().endswith("@" + sink_domain)
+            and normalized_address not in allowed
+            and not normalized_address.endswith("@" + sink_domain)
         ):
             return "550 5.7.1 sandbox recipient not authorized"
-        envelope.rcpt_tos.append(address.lower())
+        if not sandbox and stream == "SECURITY":
+            try:
+                recipient_allowed = security_recipient_allowed(normalized_address)
+            except SmtpPolicyError:
+                return "550 5.7.1 security recipient policy invalid"
+            if not recipient_allowed:
+                return "550 5.7.1 security recipient not authorized"
+            if not security_production_approved() and envelope.rcpt_tos:
+                return "550 5.7.1 security canary allows one recipient"
+        envelope.rcpt_tos.append(normalized_address)
         return "250 2.1.5 recipient accepted"
 
     async def handle_DATA(self, _server, session, envelope):
@@ -252,6 +269,26 @@ class GovernedRelay:
                 )
                 if prior:
                     continue
+                if not sandbox and stream == "SECURITY":
+                    try:
+                        production_approved = security_production_approved()
+                        canary_limit = security_canary_max_deliveries()
+                    except SmtpPolicyError:
+                        return "550 5.7.1 security delivery policy invalid"
+                    if not production_approved:
+                        prior_live_security = (
+                            db.scalar(
+                                select(func.count(ProviderMessage.id)).where(
+                                    ProviderMessage.tenant_id
+                                    == credential.tenant_id,
+                                    ProviderMessage.stream == "SECURITY",
+                                    ProviderMessage.sandbox.is_(False),
+                                )
+                            )
+                            or 0
+                        )
+                        if prior_live_security >= canary_limit:
+                            return "452 4.7.0 security canary delivery limit reached"
                 item = ProviderMessage(
                     id=str(uuid.uuid4()),
                     tenant_id=credential.tenant_id,

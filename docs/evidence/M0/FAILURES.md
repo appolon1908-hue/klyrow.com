@@ -33,3 +33,13 @@ The manually dispatched CI run's secret job scanned the repository's full
 Neither commit nor file is in the M0 diff. The exact-commit Linux test, dependency
 audit, and migration jobs passed. Pull-request CI remains the authoritative gate
 because its gitleaks invocation is scoped by the pull-request event.
+
+## R1/R5 — Docker registry unavailable during current-main verification
+
+The first current-main verification attempt used the repository's Python 3.12
+container target. The local Docker daemon could not pull `python:3.12-bookworm`
+because its registry credentials were rejected (`authentication required -
+incorrect username or password`). No source or test was changed in response.
+Verification moved to an isolated host virtual environment with the repository's
+pinned requirements. The complete merged suite passed with `253 passed, 31
+xfailed` in 454.73 seconds, and the source tree passed gitleaks and `diff --check`.

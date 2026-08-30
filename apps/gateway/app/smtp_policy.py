@@ -1,15 +1,16 @@
 """Fail-closed policy helpers for governed SMTP submissions.
 
 SMTP has no application-level stream field, so a credential must be restricted to
-exactly one approved stream.  Keycloak password-recovery credentials are scoped
-to ``SECURITY`` and remain sandbox-only unless every dedicated activation gate
-is explicitly enabled.
+exactly one approved stream. Keycloak password-recovery credentials are scoped to
+``SECURITY`` and remain sandbox-only unless every dedicated activation gate is
+explicitly enabled.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Mapping
 
 APPROVED_STREAMS = frozenset(
@@ -17,6 +18,7 @@ APPROVED_STREAMS = frozenset(
 )
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off", ""})
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class SmtpPolicyError(ValueError):
@@ -81,6 +83,67 @@ def security_live_delivery_enabled(
     )
 
 
+def security_production_approved(
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    return _boolean("KLYROW_SECURITY_SMTP_PRODUCTION_APPROVED", environment)
+
+
+def security_canary_recipients(
+    environment: Mapping[str, str] | None = None,
+) -> frozenset[str]:
+    """Return the exact lower-case recipient allowlist for pre-production canaries."""
+
+    source = os.environ if environment is None else environment
+    raw = str(source.get("KLYROW_SECURITY_SMTP_CANARY_RECIPIENTS", "")).strip()
+    if not raw:
+        return frozenset()
+    values = [item.strip().lower() for item in raw.split(",") if item.strip()]
+    if len(values) != len(set(values)):
+        raise SmtpPolicyError("SECURITY canary recipients must not contain duplicates")
+    if len(values) > 10:
+        raise SmtpPolicyError("SECURITY canary recipients are limited to ten addresses")
+    if any(not _EMAIL.fullmatch(item) for item in values):
+        raise SmtpPolicyError("SECURITY canary recipient is not a valid email address")
+    return frozenset(values)
+
+
+def security_canary_max_deliveries(
+    environment: Mapping[str, str] | None = None,
+) -> int:
+    """Return a bounded canary delivery allowance; production uses no canary cap."""
+
+    if security_production_approved(environment):
+        return 0
+    source = os.environ if environment is None else environment
+    raw = str(source.get("KLYROW_SECURITY_SMTP_CANARY_MAX_DELIVERIES", "1")).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise SmtpPolicyError(
+            "KLYROW_SECURITY_SMTP_CANARY_MAX_DELIVERIES must be an integer"
+        ) from exc
+    if not 1 <= value <= 10:
+        raise SmtpPolicyError(
+            "KLYROW_SECURITY_SMTP_CANARY_MAX_DELIVERIES must be between 1 and 10"
+        )
+    return value
+
+
+def security_recipient_allowed(
+    recipient: str,
+    environment: Mapping[str, str] | None = None,
+) -> bool:
+    """Authorize an external SECURITY recipient under canary or production policy."""
+
+    if not security_live_delivery_enabled(environment):
+        return False
+    if security_production_approved(environment):
+        return True
+    normalized = recipient.strip().lower()
+    return normalized in security_canary_recipients(environment)
+
+
 def effective_sandbox(
     *,
     stream: str,
@@ -90,7 +153,7 @@ def effective_sandbox(
 ) -> bool:
     """Return whether a submission must stay in the internal sandbox.
 
-    Existing non-security SMTP submission remains sandbox-only.  SECURITY mail
+    Existing non-security SMTP submission remains sandbox-only. SECURITY mail
     may leave the sandbox only when both dedicated environment gates are true
     and the tenant policy has independently enabled sending.
     """

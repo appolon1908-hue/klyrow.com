@@ -5,6 +5,8 @@ from cryptography.fernet import Fernet
 import pytest
 
 from apps.gateway.app.security_payload import (
+    LEGACY_PAYLOAD_VERSION,
+    PAYLOAD_VERSION,
     SecurityPayloadError,
     decrypt_security_payload,
     encrypted_security_payload,
@@ -13,15 +15,16 @@ from apps.gateway.app.security_payload import (
 )
 
 
-def configure_key(tmp_path, monkeypatch):
+def configure_keys(tmp_path, monkeypatch, *keys: bytes):
     key_file = tmp_path / "security-payload-key"
-    key_file.write_bytes(Fernet.generate_key() + b"\n")
+    material = keys or (Fernet.generate_key(),)
+    key_file.write_bytes(b"\n".join(material) + b"\n")
     monkeypatch.setenv("KLYROW_SECURITY_PAYLOAD_KEY_FILE", str(key_file))
-    return key_file
+    return key_file, material
 
 
-def test_security_payload_is_encrypted_and_scrubbed(tmp_path, monkeypatch):
-    configure_key(tmp_path, monkeypatch)
+def test_security_payload_is_encrypted_versioned_and_scrubbed(tmp_path, monkeypatch):
+    configure_keys(tmp_path, monkeypatch)
     raw = b"Subject: Verify\r\n\r\nYour code is 482731"
     payload = encrypted_security_payload(
         raw,
@@ -33,14 +36,72 @@ def test_security_payload_is_encrypted_and_scrubbed(tmp_path, monkeypatch):
     serialized = json.dumps(payload)
     assert "482731" not in serialized
     assert "raw_b64" not in payload
-    assert payload["encryption"] == "fernet-v1"
+    assert payload["encryption"] == PAYLOAD_VERSION
+    assert len(payload["key_id"]) == 16
     assert decrypt_security_payload(payload) == raw
 
     scrubbed = json.loads(scrubbed_security_payload(payload, reason="provider_submitted"))
     assert scrubbed["body_state"] == "PURGED"
     assert scrubbed["purge_reason"] == "provider_submitted"
     assert "encrypted_raw" not in scrubbed
+    assert "key_id" not in scrubbed
     assert "482731" not in json.dumps(scrubbed)
+
+
+def test_key_rotation_keeps_old_ciphertext_decryptable(tmp_path, monkeypatch):
+    old_key = Fernet.generate_key()
+    new_key = Fernet.generate_key()
+    configure_keys(tmp_path, monkeypatch, old_key)
+    raw = b"Subject: Reset\r\n\r\nSensitive security link"
+    old_payload = encrypted_security_payload(
+        raw,
+        raw_sha256="old-digest",
+        message_id="old-message",
+        stream="SECURITY",
+    )
+
+    configure_keys(tmp_path, monkeypatch, new_key, old_key)
+    new_payload = encrypted_security_payload(
+        raw,
+        raw_sha256="new-digest",
+        message_id="new-message",
+        stream="SECURITY",
+    )
+
+    assert old_payload["key_id"] != new_payload["key_id"]
+    assert decrypt_security_payload(old_payload) == raw
+    assert decrypt_security_payload(new_payload) == raw
+
+
+def test_legacy_fernet_v1_payload_survives_rotation_window(tmp_path, monkeypatch):
+    old_key = Fernet.generate_key()
+    new_key = Fernet.generate_key()
+    configure_keys(tmp_path, monkeypatch, new_key, old_key)
+    raw = b"legacy sensitive message"
+    legacy = {
+        "raw_sha256": "legacy",
+        "encrypted_raw": Fernet(old_key).encrypt(raw).decode("ascii"),
+        "encryption": LEGACY_PAYLOAD_VERSION,
+        "message_id": "legacy-message",
+        "size": len(raw),
+        "stream": "SECURITY",
+    }
+    assert decrypt_security_payload(legacy) == raw
+
+
+def test_removing_old_key_fails_closed_for_old_ciphertext(tmp_path, monkeypatch):
+    old_key = Fernet.generate_key()
+    new_key = Fernet.generate_key()
+    configure_keys(tmp_path, monkeypatch, old_key)
+    payload = encrypted_security_payload(
+        b"secret",
+        raw_sha256="digest",
+        message_id="message",
+        stream="SECURITY",
+    )
+    configure_keys(tmp_path, monkeypatch, new_key)
+    with pytest.raises(SecurityPayloadError, match="decryption key is unavailable"):
+        decrypt_security_payload(payload)
 
 
 def test_security_payload_key_is_required(monkeypatch):

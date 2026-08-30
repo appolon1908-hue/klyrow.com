@@ -11,7 +11,8 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
 from pydantic import BaseModel, EmailStr, Field, model_validator
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select, text
@@ -34,6 +35,10 @@ engine=create_engine(DATABASE_URL, pool_pre_ping=True)
 DB=sessionmaker(engine, expire_on_commit=False)
 ph=PasswordHasher()
 app=FastAPI(title="Klyrow API", version="1.0.0", docs_url=None if os.getenv("KLYROW_ENV")=="production" else "/docs")
+AUTH_WEB_DIST=Path(__file__).with_name("auth_web")
+if not AUTH_WEB_DIST.exists():
+    AUTH_WEB_DIST=Path(__file__).parents[2]/"web"/"dist"
+app.mount("/auth-assets",StaticFiles(directory=AUTH_WEB_DIST,check_dir=False),name="auth-assets")
 REQUESTS=Counter("klyrow_http_requests_total","Requests",["path","status"])
 MAIL=Counter("klyrow_mail_total","Mail lifecycle",["event"])
 LATENCY=Histogram("klyrow_http_request_duration_seconds","Request latency",["path"])
@@ -122,12 +127,18 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
             permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send" if request.method not in {"GET","HEAD","OPTIONS"} else "klyrow.read"
             headers={"Authorization":"Bearer "+raw,"X-Codestra-Required-Permission":permission}
             if x_klyrow_tenant_id:headers["X-Klyrow-Tenant-Id"]=x_klyrow_tenant_id
-            response=httpx.get(resolver,headers=headers,timeout=5,follow_redirects=False)
+            try:
+                response=httpx.get(resolver,headers=headers,timeout=5,follow_redirects=False)
+            except httpx.RequestError:
+                raise HTTPException(503,"authorization_unavailable")
             if response.status_code==401:raise HTTPException(401,"invalid_credentials")
             if response.status_code==404:raise HTTPException(404,"not_found")
+            if response.status_code>=500:raise HTTPException(503,"authorization_unavailable")
             if response.status_code!=200:raise HTTPException(403,"not_found")
-            resolved=response.json()
+            try:resolved=response.json()
+            except (TypeError,ValueError):raise HTTPException(503,"authorization_unavailable")
             if not resolved.get("authorized") or resolved.get("permission")!=permission:raise HTTPException(403,"not_found")
+            if not resolved.get("identity_id") or not resolved.get("tenant_id"):raise HTTPException(503,"authorization_unavailable")
             ctx={"sub":resolved["identity_id"],"tenant":resolved["tenant_id"],"role":resolved.get("role","tenant_user"),"service":True,"permissions":[permission]}
             tenant=s.get(Tenant,ctx["tenant"])
             if not tenant or not tenant.enabled:raise HTTPException(403,"tenant_suspended")
@@ -792,8 +803,28 @@ def admin_quota(tid:str,x:QuotaIn,ctx=Depends(require("platform_admin")),s:Sessi
     item=s.get(Tenant,tid)
     if not item:raise HTTPException(404,"not_found")
     item.quota=x.quota; audit(s,ctx,"tenant.quota_changed"); s.commit(); return {"id":tid,"quota":item.quota}
-@app.get("/",response_class=HTMLResponse)
+@app.get("/",include_in_schema=False)
+def auth_home(): return RedirectResponse("/login",status_code=302)
+@app.get("/portal",response_class=HTMLResponse,include_in_schema=False)
 def portal(): return Path(__file__).with_name("portal.html").read_text()
+@app.get("/login",include_in_schema=False)
+@app.get("/signup",include_in_schema=False)
+@app.get("/verify-email",include_in_schema=False)
+@app.get("/verification-expired",include_in_schema=False)
+@app.get("/verification-success",include_in_schema=False)
+@app.get("/forgot-password",include_in_schema=False)
+@app.get("/reset-sent",include_in_schema=False)
+@app.get("/reset-password",include_in_schema=False)
+@app.get("/reset-expired",include_in_schema=False)
+@app.get("/reset-success",include_in_schema=False)
+@app.get("/invite",include_in_schema=False)
+@app.get("/logged-out",include_in_schema=False)
+@app.get("/service-error",include_in_schema=False)
+@app.get("/account-disabled",include_in_schema=False)
+def auth_page():
+    index=AUTH_WEB_DIST/"index.html"
+    if not index.exists(): raise HTTPException(503,"authentication_ui_not_built")
+    return FileResponse(index,media_type="text/html",headers={"Cache-Control":"no-store"})
 @app.get("/assets/portal.js",include_in_schema=False)
 def portal_js():return FileResponse(Path(__file__).with_name("portal.js"),media_type="application/javascript")
 @app.get("/admin",response_class=HTMLResponse,include_in_schema=False)

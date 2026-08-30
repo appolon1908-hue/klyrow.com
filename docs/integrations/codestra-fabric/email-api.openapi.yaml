@@ -1,0 +1,124 @@
+openapi: 3.1.0
+info:
+  title: Klyrow Email API for Codestra Middleware
+  version: 2.0.0
+paths:
+  /v1/email/domains:
+    get:
+      operationId: listEmailDomains
+      security: [{oauth2: [email.domain.read]}]
+      responses: {'200': {description: Tenant-scoped domains}}
+    post:
+      operationId: createEmailDomain
+      security: [{oauth2: [email.domain.write]}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: {'202': {$ref: '#/components/responses/OperationAccepted'}}
+  /v1/email/domains/{domain_id}/verify:
+    post:
+      operationId: verifyEmailDomain
+      security: [{oauth2: [email.domain.verify]}]
+      parameters:
+        - {name: domain_id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses: {'202': {$ref: '#/components/responses/OperationAccepted'}}
+  /v1/email/sender-identities:
+    get:
+      operationId: listSenderIdentities
+      security: [{oauth2: [email.sender.read]}]
+      responses: {'200': {description: Tenant-scoped senders}}
+    post:
+      operationId: createSenderIdentity
+      security: [{oauth2: [email.sender.write]}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: {'202': {$ref: '#/components/responses/OperationAccepted'}}
+  /v1/email/templates:
+    get:
+      operationId: listEmailTemplates
+      security: [{oauth2: [email.template.read]}]
+      responses: {'200': {description: Approved and draft templates}}
+    post:
+      operationId: createEmailTemplate
+      security: [{oauth2: [email.template.write]}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: {'202': {$ref: '#/components/responses/OperationAccepted'}}
+  /v1/email/templates/{template_id}/preview:
+    post:
+      operationId: previewEmailTemplate
+      security: [{oauth2: [email.template.preview]}]
+      parameters: [{name: template_id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {'200': {description: No-send render preview}}
+  /v1/email/messages:
+    post:
+      operationId: submitEmailMessage
+      security: [{oauth2: [email.message.send]}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: {'202': {$ref: '#/components/responses/OperationAccepted'}, '409': {description: Idempotency conflict}}
+  /v1/email/messages/{message_id}:
+    get:
+      operationId: getEmailMessage
+      security: [{oauth2: [email.message.read]}]
+      parameters: [{name: message_id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {'200': {description: Reconciled message state}}
+  /v1/email/campaigns/{campaign_id}/preflight:
+    post:
+      operationId: preflightEmailCampaign
+      security: [{oauth2: [email.campaign.preflight]}]
+      parameters: [{name: campaign_id, in: path, required: true, schema: {type: string, format: uuid}}]
+      responses: {'200': {description: No-send readiness result}}
+  /v1/email/suppressions:
+    get:
+      operationId: listEmailSuppressions
+      security: [{oauth2: [email.suppression.read]}]
+      responses: {'200': {description: Tenant-scoped suppression projection}}
+    post:
+      operationId: createEmailSuppression
+      security: [{oauth2: [email.suppression.write]}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      responses: {'202': {$ref: '#/components/responses/OperationAccepted'}}
+  /v1/email/events:
+    get:
+      operationId: listEmailEvents
+      security: [{oauth2: [email.event.read]}]
+      responses: {'200': {description: Normalized lifecycle events}}
+  /v1/email/analytics/deliverability:
+    get:
+      operationId: getDeliverabilityAnalytics
+      security: [{oauth2: [email.analytics.read]}]
+      responses: {'200': {description: Tenant-scoped metrics}}
+  /v1/webhooks/email/postal:
+    post:
+      operationId: receivePostalWebhook
+      security: []
+      responses: {'202': {description: Durable callback acceptance after provider verification}}
+components:
+  securitySchemes:
+    oauth2:
+      type: oauth2
+      flows:
+        clientCredentials:
+          tokenUrl: https://auth.codestra.co/realms/codestra/protocol/openid-connect/token
+          scopes:
+            email.domain.read: Read domains
+            email.domain.write: Request domain onboarding
+            email.domain.verify: Request verification check
+            email.sender.read: Read sender identities
+            email.sender.write: Request sender changes
+            email.template.read: Read templates
+            email.template.write: Request template changes
+            email.template.preview: Render without sending
+            email.message.send: Request an approved send
+            email.message.read: Read message state
+            email.campaign.preflight: Run no-send campaign preflight
+            email.suppression.read: Read suppressions
+            email.suppression.write: Request suppression
+            email.event.read: Read lifecycle events
+            email.analytics.read: Read deliverability analytics
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, minLength: 8, maxLength: 180}
+  responses:
+    OperationAccepted:
+      description: Durable asynchronous operation accepted

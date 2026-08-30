@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+base_url=${KLYROW_EDGE_BASE_URL:-http://127.0.0.1:18004}
+canonical_host=app.klyrow.com
+
+status() {
+  curl --silent --show-error --max-time 8 --output /dev/null --write-out '%{http_code}' \
+    --header "Host: $1" "$base_url$2"
+}
+
+expect_status() {
+  local host_name=$1 path=$2 expected=$3 actual
+  actual=$(status "$host_name" "$path")
+  if [[ "$actual" != "$expected" ]]; then
+    printf 'FAIL host=%s path=%s expected=%s actual=%s\n' "$host_name" "$path" "$expected" "$actual" >&2
+    exit 1
+  fi
+  printf 'PASS host=%s path=%s status=%s\n' "$host_name" "$path" "$actual"
+}
+
+expect_status "$canonical_host" / 200
+expect_status "$canonical_host" /auth/session 200
+
+session_body=$(curl --silent --show-error --max-time 8 --header "Host: $canonical_host" "$base_url/auth/session")
+if [[ "$session_body" != *'"authenticated"'* ]]; then
+  printf 'FAIL canonical auth session did not reach the BFF\n' >&2
+  exit 1
+fi
+
+for rejected_host in api.klyrow.com track.klyrow.com track.codestra.co; do
+  expect_status "$rejected_host" / 421
+done
+
+login_headers=$(curl --silent --show-error --max-time 8 --dump-header - --output /dev/null \
+  --header "Host: $canonical_host" "$base_url/auth/login")
+login_status=$(printf '%s\n' "$login_headers" | awk 'NR == 1 {print $2}')
+login_location=$(printf '%s\n' "$login_headers" | tr -d '\r' | awk -F ': ' 'tolower($1) == "location" {print $2; exit}')
+if [[ "$login_status" != 302 ]] || [[ "$login_location" != *'redirect_uri=https%3A%2F%2Fapp.klyrow.com%2Fauth%2Fcallback'* ]]; then
+  printf 'FAIL canonical OIDC initiation status=%s location=%s\n' "$login_status" "$login_location" >&2
+  exit 1
+fi
+printf 'PASS canonical OIDC callback is pinned to https://app.klyrow.com/auth/callback\n'

@@ -53,6 +53,15 @@ def test_upgrade_migrates_legacy_environment_secrets_before_compose():
     assert 'removed = set(specs)' in migration
 
 
+def test_standard_launchers_include_and_build_the_browser_web_service():
+    for relative_path in ("scripts/start", "scripts/deploy", "scripts/update"):
+        source = (ROOT / relative_path).read_text()
+        assert "-f docker-compose.web.yml" in source
+    for relative_path in ("scripts/deploy", "scripts/update"):
+        source = (ROOT / relative_path).read_text()
+        assert '"${COMPOSE[@]}" build gateway web' in source
+
+
 def test_outbox_recovers_abandoned_sending_leases():
     source = (ROOT / "apps/gateway/app/main.py").read_text()
     assert 'EmailOutbox.state=="sending"' in source

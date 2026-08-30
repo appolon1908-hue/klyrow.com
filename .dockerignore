@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+!.env.example
+**/__pycache__
+**/.pytest_cache
+**/node_modules
+apps/web/dist
+apps/web/test-results
+apps/web/playwright-report
+backups
+secrets
+postal-data
+*.pem
+*.key

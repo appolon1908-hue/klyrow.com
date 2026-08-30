@@ -17,22 +17,26 @@ from fastapi import HTTPException
 from sqlalchemy import UniqueConstraint
 
 from apps.gateway.app import main, provider, security_smtp_worker, smtp_relay
-from apps.gateway.app.main import AllowedSender, Base, DB, Domain, Suppression, Tenant, engine
+from apps.gateway.app.main import Base, DB, Suppression, Tenant, engine
 from apps.gateway.app.provider import (
     ProviderDomain,
-    ProviderMailIn,
     ProviderMessage,
     SenderIdentity,
     SmtpCredential,
     TenantMailPolicy,
     parse_inbound,
-    preflight,
 )
 from apps.gateway.app.security_payload import (
     decrypt_security_payload,
     encrypted_security_payload,
 )
 from apps.gateway.app.smtp_policy import effective_sandbox
+from tests.mail_path_clients import (
+    CONTEXT,
+    EXTERNAL,
+    MailPathClients,
+    seed_mail_paths,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -195,7 +199,21 @@ def test_p12_suppressed_recipient_is_rejected_at_smtp_rcpt():
     assert envelope.rcpt_tos == []
 
 
-def test_p13_sandbox_delivery_is_confined_to_allowlist_or_sink():
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param(
+            "api",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason="M1: P13 API accepts arbitrary recipients in global safe mode",
+            ),
+        ),
+        "smtp",
+        "provider",
+    ],
+)
+def test_p13_sandbox_delivery_is_confined_to_allowlist_or_sink(path):
     assert main.SAFE_MODE is True
     assert effective_sandbox(
         stream="TRANSACTIONAL",
@@ -203,31 +221,18 @@ def test_p13_sandbox_delivery_is_confined_to_allowlist_or_sink():
         tenant_sending_disabled=False,
         environment={},
     ) is True
-    _reset_schema()
-    with DB() as session:
-        session.add(Tenant(id="p13", name="P13", quota=10))
-        session.add(Domain(id="p13-domain", tenant_id="p13", domain="p13.example", token="token", verified=True))
-        session.add(AllowedSender(id="p13-sender", tenant_id="p13", address="sender@p13.example", role="mail", enabled=True))
-        session.add(
-            TenantMailPolicy(
-                tenant_id="p13",
-                sandbox_mode=True,
-                sending_disabled=True,
-                allowed_test_recipients_json="[]",
-            )
+    main.rate_buckets.clear()
+    seed_mail_paths()
+    main.app.dependency_overrides[main.auth] = lambda: CONTEXT
+    try:
+        result = MailPathClients().submit(
+            path,
+            recipient=EXTERNAL,
+            key="p13-sandbox-" + path,
         )
-        with pytest.raises(HTTPException, match="sandbox_recipient_not_allowed"):
-            preflight(
-                ProviderMailIn(
-                    sender="sender@p13.example",
-                    recipient="external@example.net",
-                    subject="sandbox",
-                    text="body",
-                    sandbox=True,
-                ),
-                {"tenant": "p13", "sub": "test"},
-                session,
-            )
+    finally:
+        main.app.dependency_overrides.pop(main.auth, None)
+    assert result.accepted is False
 
 
 def test_p14_security_payload_is_encrypted_and_purged_on_terminal_paths(tmp_path, monkeypatch):
