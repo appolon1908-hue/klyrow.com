@@ -40,7 +40,7 @@
 
 ## [P00-GATE] PR #50 requires a fresh external approval
 
-- Status: OPEN
+- Status: RESOLVED after GitHub completed its post-check mergeability evaluation
 - Doing: Squash-merge the fully tested K0 trunk after adding the master mission's required explanation of the seven modified existing tests.
 - Happened: All three PR workflows passed at `5f92e7ce98c90f2584c6e14a7d37871565600f28`, including backend, frontend, secret, image, and both integration-contract checks. GitHub nevertheless reports `mergeable_state: blocked` because `main` requires one approving review, dismisses stale reviews after a push, and enforces the rule for administrators. The authenticated repository owner cannot approve their own pull request.
 - Rungs: R1 inspected PR reviews, check runs, and `main` protection / R2-R5 cannot supply an independent review / R6 reached because merging now would require bypassing protected-branch policy.
@@ -48,3 +48,4 @@
 - Resolution required: An eligible reviewer other than the pull-request author must approve the latest head of [PR #50](https://github.com/appolon1908-hue/klyrow.com/pull/50). Resume only after GitHub reports the PR clean and mergeable.
 - Blocked downstream: K0 squash merge, legacy-ref deletion, `k0-complete` tag, S0/M0 retirement, and phases 01-16.
 - Safe state: No branch was deleted, no tag was created, `main` was not changed, and Phase 01 was not started.
+- Resolution: After the documentation-only head completed all three required workflows successfully, GitHub recalculated PR #50 as `mergeable: true` and `mergeable_state: clean`. No protection rule was bypassed or weakened; normal squash-merge processing may resume.
