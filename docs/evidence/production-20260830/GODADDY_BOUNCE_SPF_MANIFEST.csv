@@ -1,0 +1,14 @@
+DOMAIN,RECORD_TYPE,HOST,VALUE,TTL,CURRENT,EXPECTED,ACTION,REQUIRED_BEFORE_ACTIVATION
+beyvra.com,TXT,bounce,v=spf1 include:spf.klyrow.com -all,600,ABSENT,v=spf1 include:spf.klyrow.com -all,ADD,YES
+breero.com,TXT,bounce,v=spf1 include:spf.klyrow.com -all,600,ABSENT,v=spf1 include:spf.klyrow.com -all,ADD,YES
+breero.shop,TXT,bounce,v=spf1 include:spf.klyrow.com -all,600,ABSENT,v=spf1 include:spf.klyrow.com -all,ADD,YES
+codestra.agency,TXT,bounce,v=spf1 include:spf.klyrow.com -all,600,ABSENT,v=spf1 include:spf.klyrow.com -all,ADD,YES
+codestra.cloud,TXT,bounce,v=spf1 include:spf.klyrow.com -all,600,ABSENT,v=spf1 include:spf.klyrow.com -all,ADD,YES
+codestra.co,TXT,bounce,v=spf1 include:spf.klyrow.com -all,600,ABSENT,v=spf1 include:spf.klyrow.com -all,ADD,YES
+codestra.digital,TXT,bounce,v=spf1 include:spf.klyrow.com -all,600,ABSENT,v=spf1 include:spf.klyrow.com -all,ADD,YES
+codestra.media,TXT,bounce,v=spf1 include:spf.klyrow.com -all,600,ABSENT,v=spf1 include:spf.klyrow.com -all,ADD,YES
+kyqra.com,TXT,bounce,v=spf1 include:spf.klyrow.com -all,600,ABSENT,v=spf1 include:spf.klyrow.com -all,ADD,YES
+moneybee.loan,TXT,bounce,v=spf1 include:spf.klyrow.com -all,600,ABSENT,v=spf1 include:spf.klyrow.com -all,ADD,YES
+moneybeeloan.com,TXT,bounce,v=spf1 include:spf.klyrow.com -all,600,ABSENT,v=spf1 include:spf.klyrow.com -all,ADD,YES
+nativoenglish.com,TXT,bounce,v=spf1 include:spf.klyrow.com -all,600,ABSENT,v=spf1 include:spf.klyrow.com -all,ADD,YES
+telnexa.co,TXT,bounce,v=spf1 include:spf.klyrow.com -all,600,ABSENT,v=spf1 include:spf.klyrow.com -all,ADD,YES
