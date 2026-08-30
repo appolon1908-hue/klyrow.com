@@ -1,0 +1,70 @@
+{
+  "schemaVersion": "1.0",
+  "application": "klyrow.com",
+  "codestraBusiness": "klyrow-email",
+  "status": "CONTRACT_PREPARED_NOT_SCRAPED",
+  "metricsEnabledByDefault": false,
+  "requiredLabels": [
+    "codestra_business",
+    "application",
+    "service",
+    "environment",
+    "server",
+    "region",
+    "deployment"
+  ],
+  "forbiddenLabels": [
+    "tenant_id",
+    "customer_id",
+    "organization_id",
+    "user_id",
+    "email",
+    "phone",
+    "recipient",
+    "sender",
+    "message_id",
+    "trace_id",
+    "request_id",
+    "raw_url",
+    "query_string",
+    "idempotency_key",
+    "smtp_username"
+  ],
+  "metricFamilies": [
+    {
+      "name": "klyrow_http_requests_total",
+      "type": "counter",
+      "purpose": "Gateway request volume by bounded path template and status."
+    },
+    {
+      "name": "klyrow_http_request_duration_seconds",
+      "type": "histogram",
+      "purpose": "Gateway request latency by bounded path template."
+    },
+    {
+      "name": "klyrow_mail_total",
+      "type": "counter",
+      "purpose": "Email lifecycle events by normalized event name."
+    },
+    {
+      "name": "klyrow_provider_queue_messages",
+      "type": "gauge",
+      "purpose": "Provider queue depth by state."
+    },
+    {
+      "name": "klyrow_integration_outbox_items",
+      "type": "gauge",
+      "purpose": "Middleware and webhook outbox backlog by target and state."
+    },
+    {
+      "name": "klyrow_email_outbox_oldest_seconds",
+      "type": "gauge",
+      "purpose": "Age of oldest active email outbox item."
+    },
+    {
+      "name": "klyrow_domain_dns_invalid",
+      "type": "gauge",
+      "purpose": "Count of domains failing deliverability DNS checks."
+    }
+  ]
+}

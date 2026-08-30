@@ -1,0 +1,20 @@
+# Disabled-by-default Prometheus target for Klyrow.
+# Move this into the Prometheus target inventory only after route, auth and network approval.
+
+- job_name: klyrow
+  metrics_path: /metrics
+  scheme: https
+  honor_labels: false
+  static_configs:
+    - targets: []
+      labels:
+        codestra_business: klyrow-email
+        application: klyrow.com
+        service: klyrow-gateway
+        environment: pending
+        server: pending
+        region: pending
+        deployment: pending
+  relabel_configs:
+    - action: labeldrop
+      regex: "(tenant_id|customer_id|organization_id|user_id|email|phone|recipient|sender|message_id|trace_id|request_id|raw_url|query_string|idempotency_key|smtp_username)"
