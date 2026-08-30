@@ -13,7 +13,7 @@ excluded from the gate.
 - Trunk candidate: `feat/klyrow-postal-provisioning@e5b8791d0d9c652b084943c5b5fb765b2b32e811`
 - Candidate verification: 177 tests passed in a fresh Linux-style environment;
   see [CANDIDATE_VERIFICATION.md](CANDIDATE_VERIFICATION.md).
-- Final collected inventory before the clean-checkout gate: 223 tests.
+- Final collected inventory before the clean-checkout gate: 226 tests.
 - 73/15 cluster: all seven refs had the identical tip
   `519ad72b31307d8bd34a13eefbf65a15bd6ea3e9`; merged once and recorded for
   every alias.

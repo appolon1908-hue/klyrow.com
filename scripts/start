@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/lib.sh"; require_env
 [[ -e secrets/postal/postal.yml ]] || scripts/render-postal-config
-COMPOSE=(docker compose -f docker-compose.yml -f deploy/docker-compose.security-mail.yml)
+COMPOSE=(docker compose -f docker-compose.yml -f deploy/docker-compose.security-mail.yml -f docker-compose.web.yml)
 "${COMPOSE[@]}" config --quiet
 "${COMPOSE[@]}" up -d --build

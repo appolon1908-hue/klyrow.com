@@ -25,6 +25,24 @@ def test_required_oidc_routes_are_visible_in_runtime_route_inventory():
     assert {"/auth/login", "/auth/callback"} <= paths
 
 
+def test_browser_session_routes_resolve_only_to_cookie_session_handlers():
+    expected = {
+        "/auth/sessions": "list_user_sessions",
+        "/auth/sessions/{session_id}": "revoke_user_session",
+    }
+    resolved = {}
+    for route in app.routes:
+        path = getattr(route, "path", "")
+        if path not in expected:
+            continue
+        endpoint = getattr(route, "endpoint", None)
+        assert endpoint.__module__ == "apps.gateway.app.browser_auth_actions"
+        assert endpoint.__name__ == expected[path]
+        assert path not in resolved
+        resolved[path] = endpoint.__name__
+    assert resolved == expected
+
+
 def test_browser_api_contract_has_expected_methods():
     expected = {
         ("/auth/login", "GET"),
