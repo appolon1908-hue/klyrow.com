@@ -27,7 +27,6 @@ from .postal_provisioning import (
     resolve_identity_context_with_provisioning,
     router as postal_provisioning_router,
 )
-
 SHELL_PATHS = {"/app", "/onboarding", "/app/{path:path}"}
 
 # Replace historical account/session/invitation/callback routes before route
@@ -59,7 +58,7 @@ if not getattr(app.state, "klyrow_postal_callback_route_registered", False):
 # inspectable while preserving the original handlers and dependencies.
 if not getattr(app.state, "klyrow_browser_api_routes_registered", False):
     auth_bff._identity_context = resolve_identity_context_with_provisioning
-    for browser_router in (
+    for platform_router in (
         auth_bff_router,
         browser_auth_actions_router,
         tenancy_onboarding_router,
@@ -67,7 +66,7 @@ if not getattr(app.state, "klyrow_browser_api_routes_registered", False):
         browser_email_setup_router,
         postal_provisioning_router,
     ):
-        app.router.routes.extend(browser_router.routes)
+        app.router.routes.extend(platform_router.routes)
     app.state.klyrow_browser_api_routes_registered = True
 else:
     auth_bff._identity_context = resolve_identity_context_with_provisioning
@@ -87,7 +86,10 @@ def _ui_index():
 
 # Remove platform-owned shell routes too if this module is explicitly reloaded.
 for route in list(app.router.routes):
-    if getattr(route, "name", "") in {"platform_admin_ui", "product_app_ui"}:
+    if getattr(route, "name", "") in {
+        "platform_admin_ui",
+        "product_app_ui",
+    }:
         app.router.routes.remove(route)
 
 

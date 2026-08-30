@@ -17,8 +17,8 @@ from sqlalchemy.orm import Session
 
 from . import auth_bff
 from .auth_bff import BrowserSession, OidcLoginTransaction
-from .main import SECRET, User, auth_rate, db, sha
-from .tenancy import OidcIdentity, TenantInvitation
+from .main import SECRET, Tenant, User, auth_rate, db, sha
+from .tenancy import OidcIdentity, TenantInvitation, TenantMember
 
 router = APIRouter(tags=["Browser account actions"])
 _ORIGINAL_NEW_SESSION = auth_bff._new_session
@@ -62,83 +62,141 @@ def stable_csrf_token(session_id: str) -> str:
     return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
 
 
-def _active_principal(
-    session: Session, item: BrowserSession
-) -> tuple[OidcIdentity, User]:
-    """Fail closed and revoke the session when either local principal is disabled."""
+def _aware(value):
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
 
-    identity = session.get(OidcIdentity, item.identity_id)
-    user = session.get(User, item.user_id)
-    if identity is not None:
-        session.refresh(identity)
-    if user is not None:
-        session.refresh(user)
+
+def _idle_timeout_seconds() -> int:
+    """Return a bounded inactivity timeout that never exceeds the absolute TTL."""
+
+    try:
+        configured = int(
+            os.getenv("KLYROW_BROWSER_SESSION_IDLE_SECONDS", "1800")
+        )
+    except (TypeError, ValueError):
+        configured = 1800
+    return max(300, min(configured, auth_bff._session_ttl()))
+
+
+def _active_authority(
+    session: Session,
+    *,
+    identity_id: str,
+    user_id: str,
+    tenant_id: str,
+) -> tuple[OidcIdentity, User, TenantMember, Tenant]:
+    """Reload every authority record that backs a browser session."""
+
+    identity = session.get(OidcIdentity, identity_id, populate_existing=True)
+    user = session.get(User, user_id, populate_existing=True)
     if (
-        identity is None
+        not identity
         or not identity.enabled
-        or user is None
+        or identity.user_id != user_id
+        or not user
         or not user.enabled
     ):
-        item.revoked_at = auth_bff.now()
-        session.commit()
         raise HTTPException(401, "principal_disabled")
-    return identity, user
+
+    membership = session.scalar(
+        select(TenantMember)
+        .execution_options(populate_existing=True)
+        .where(
+            TenantMember.tenant_id == tenant_id,
+            TenantMember.user_id == user_id,
+            TenantMember.active == True,
+        )
+    )
+    tenant = session.get(Tenant, tenant_id, populate_existing=True)
+    if not membership or not tenant or not tenant.enabled:
+        raise HTTPException(403, "workspace_access_denied")
+    return identity, user, membership, tenant
 
 
-def _get_browser_session_with_principal_validation(
-    request: Request, session: Session, touch: bool = True
+def _get_browser_session_with_authority(
+    request: Request,
+    session: Session,
+    touch: bool = True,
 ) -> BrowserSession:
-    # Do not touch last_seen_at until the prior value has passed the idle check.
+    """Enforce absolute, idle, identity, membership and tenant validity."""
+
     item = _ORIGINAL_GET_BROWSER_SESSION(request, session, touch=False)
-    current_time = auth_bff.now()
-    if (
-        current_time - _as_utc(item.last_seen_at)
-    ).total_seconds() > browser_session_idle_seconds():
-        item.revoked_at = current_time
+    current = auth_bff.now()
+    last_seen = _aware(item.last_seen_at) or _aware(item.created_at) or current
+    if (current - last_seen).total_seconds() > _idle_timeout_seconds():
+        item.revoked_at = current
         session.commit()
         raise HTTPException(401, "session_idle_timeout")
-    _active_principal(session, item)
+
+    try:
+        _identity, _user, membership, _tenant = _active_authority(
+            session,
+            identity_id=item.identity_id,
+            user_id=item.user_id,
+            tenant_id=item.tenant_id,
+        )
+    except HTTPException:
+        item.revoked_at = current
+        session.commit()
+        raise
+
+    changed = False
+    if item.role != membership.role:
+        item.role = membership.role
+        changed = True
     if touch:
-        item.last_seen_at = current_time
+        item.last_seen_at = current
+        changed = True
+    if changed:
         session.commit()
     return item
 
 
-def _new_session_with_stable_csrf(*args, **kwargs):
-    session: Session = args[0] if args else kwargs["s"]
-    identity = args[2] if len(args) > 2 else kwargs["identity"]
-    user = args[3] if len(args) > 3 else kwargs["user"]
-    rotated_from_id = args[6] if len(args) > 6 else kwargs.get("rotated_from_id")
-
-    # Re-read both records immediately before issuing or rotating a session.
-    identity_item = session.get(OidcIdentity, identity.id)
-    user_item = session.get(User, user.id)
-    if identity_item is not None:
-        session.refresh(identity_item)
-    if user_item is not None:
-        session.refresh(user_item)
-    if (
-        identity_item is None
-        or not identity_item.enabled
-        or user_item is None
-        or not user_item.enabled
-    ):
-        raise HTTPException(401, "principal_disabled")
+def _new_session_with_stable_csrf(
+    session: Session,
+    request: Request,
+    identity: OidcIdentity,
+    user: User,
+    membership: TenantMember,
+    tokens: dict,
+    rotated_from_id: Optional[str] = None,
+):
+    """Create/rotate a session without extending its original absolute deadline."""
 
     absolute_deadline = None
     if rotated_from_id:
-        parent = session.get(BrowserSession, rotated_from_id)
-        if parent is None:
-            raise HTTPException(401, "session_rotation_source_missing")
-        absolute_deadline = _as_utc(parent.expires_at)
-        if absolute_deadline <= auth_bff.now():
+        prior = session.get(BrowserSession, rotated_from_id, populate_existing=True)
+        if (
+            not prior
+            or prior.user_id != user.id
+            or prior.identity_id != identity.id
+        ):
+            raise HTTPException(401, "session_rotation_invalid")
+        absolute_deadline = _aware(prior.expires_at)
+        if not absolute_deadline or absolute_deadline <= auth_bff.now():
             raise HTTPException(401, "session_expired")
 
-    item, raw, _csrf = _ORIGINAL_NEW_SESSION(*args, **kwargs)
+    identity, user, membership, _tenant = _active_authority(
+        session,
+        identity_id=identity.id,
+        user_id=user.id,
+        tenant_id=membership.tenant_id,
+    )
+    item, raw, _csrf = _ORIGINAL_NEW_SESSION(
+        session,
+        request,
+        identity,
+        user,
+        membership,
+        tokens,
+        rotated_from_id=rotated_from_id,
+    )
+    if absolute_deadline and _aware(item.expires_at) > absolute_deadline:
+        item.expires_at = absolute_deadline
     csrf = stable_csrf_token(item.id)
     item.csrf_hash = sha(csrf)
-    if absolute_deadline is not None:
-        item.expires_at = min(_as_utc(item.expires_at), absolute_deadline)
     session.commit()
     return item, raw, csrf
 
@@ -184,7 +242,7 @@ def install_auth_extensions() -> None:
     for route in list(auth_bff.router.routes):
         if getattr(route, "path", "") in replacement_paths:
             auth_bff.router.routes.remove(route)
-    auth_bff._get_browser_session = _get_browser_session_with_principal_validation
+    auth_bff._get_browser_session = _get_browser_session_with_authority
     auth_bff._new_session = _new_session_with_stable_csrf
     _INSTALLED = True
 
@@ -211,16 +269,20 @@ def oidc_callback(
     )
     if not transaction or transaction.used_at:
         raise HTTPException(410, "oidc_state_invalid_or_used")
-    if _as_utc(transaction.expires_at) <= auth_bff.now():
+    expiry = _aware(transaction.expires_at)
+    if not expiry or expiry <= auth_bff.now():
         raise HTTPException(410, "oidc_state_expired")
     transaction.used_at = auth_bff.now()
     session.commit()
 
+    # Never turn a cancelled/omitted application-initiated action into success.
     if error or not code or (
         transaction.mode in _ACTION_MODES and kc_action_status != "success"
     ):
         return RedirectResponse(
-            "/service-error", status_code=303, headers={"Cache-Control": "no-store"}
+            "/service-error",
+            status_code=303,
+            headers={"Cache-Control": "no-store"},
         )
 
     verifier = auth_bff._decrypt(transaction.verifier_ciphertext)
@@ -255,7 +317,10 @@ def session_status(request: Request, session: Session = Depends(db)):
     try:
         item = auth_bff._get_browser_session(request, session)
     except HTTPException as exc:
-        if exc.status_code == 401:
+        if exc.status_code == 401 and exc.detail not in {
+            "principal_disabled",
+            "session_idle_timeout",
+        }:
             return JSONResponse(
                 {"authenticated": False},
                 status_code=200,
@@ -393,11 +458,14 @@ def validate_invitation(
 ):
     auth_rate(request, "browser-invitation")
     item = session.scalar(
-        select(TenantInvitation).where(TenantInvitation.token_hash == sha(payload.token))
+        select(TenantInvitation).where(
+            TenantInvitation.token_hash == sha(payload.token)
+        )
     )
     valid = False
     if item and not item.revoked_at and not item.accepted_at:
-        valid = _as_utc(item.expires_at) > auth_bff.now()
+        expiry = _aware(item.expires_at)
+        valid = bool(expiry and expiry > auth_bff.now())
     if not valid:
         return {"valid": False, "redirect_to": None}
 
