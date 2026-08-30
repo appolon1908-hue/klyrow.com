@@ -17,4 +17,4 @@
         deployment: pending
   relabel_configs:
     - action: labeldrop
-      regex: "(tenant_id|customer_id|organization_id|user_id|email|phone|recipient|sender|message_id|trace_id|request_id|raw_url|query_string|idempotency_key|smtp_username)"
+      regex: "(tenant_id|customer_id|organization_id|user_id|email|phone|recipient|sender|message_id|event_id|trace_id|request_id|raw_url|query_string|idempotency_key|smtp_username)"

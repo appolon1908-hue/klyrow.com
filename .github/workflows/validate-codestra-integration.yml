@@ -1,0 +1,36 @@
+name: Validate Codestra integration files
+
+on:
+  pull_request:
+    paths:
+      - "codestra/integration/**"
+      - "monitoring/klyrow-metrics-contract.v1.json"
+      - "monitoring/prometheus-target.disabled.yml"
+      - "monitoring/klyrow-recording-rules.yml"
+      - "docs/CODESTRA-INTEGRATION-FILES.md"
+      - "scripts/validate-codestra-integration.py"
+      - "tests/test_codestra_integration_files.py"
+      - ".github/workflows/validate-codestra-integration.yml"
+  push:
+    branches:
+      - "codex/klyrow-smtp-integration-files"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Validate integration files
+        run: python scripts/validate-codestra-integration.py

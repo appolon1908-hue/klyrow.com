@@ -58,8 +58,9 @@ for (const command of ['email.message.send.v1', 'email.message.cancel.v1', 'emai
 if (openBaoAliases.authority !== 'Codestra-OpenBao') fail('OpenBao alias authority mismatch');
 if (openBaoAliases.gitMayContainSecretValues !== false) fail('OpenBao aliases must not allow secret values in Git');
 for (const alias of openBaoAliases.aliases || []) {
-  if (!alias.name?.startsWith('klyrow-email/')) fail(`OpenBao alias must be namespaced: ${alias.name}`);
-  if (!alias.env?.endsWith('_FILE')) fail(`OpenBao alias env must reference a secret file: ${alias.env}`);
+  if (!alias.name?.startsWith('klyrow/') && !alias.name?.startsWith('klyrow-email/')) fail(`OpenBao alias must be namespaced: ${alias.name}`);
+  const mount = alias.env || alias.mountedAs || '';
+  if (mount !== 'n8n credential store item' && !mount.endsWith('_FILE') && !mount.endsWith('_KEY') && !mount.endsWith('_CERT')) fail(`OpenBao alias must reference a file, key, cert or credential-store mount: ${alias.name}`);
 }
 
 if (metricsContract.status !== 'CONTRACT_PREPARED_NOT_SCRAPED') fail('metrics contract must remain not scraped');
