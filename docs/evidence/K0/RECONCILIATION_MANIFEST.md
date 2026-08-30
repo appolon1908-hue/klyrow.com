@@ -13,7 +13,7 @@ excluded from the gate.
 - Trunk candidate: `feat/klyrow-postal-provisioning@e5b8791d0d9c652b084943c5b5fb765b2b32e811`
 - Candidate verification: 177 tests passed in a fresh Linux-style environment;
   see [CANDIDATE_VERIFICATION.md](CANDIDATE_VERIFICATION.md).
-- Final collected inventory before the clean-checkout gate: 210 tests.
+- Final collected inventory before the clean-checkout gate: 223 tests.
 - 73/15 cluster: all seven refs had the identical tip
   `519ad72b31307d8bd34a13eefbf65a15bd6ea3e9`; merged once and recorded for
   every alias.
@@ -103,7 +103,7 @@ The legacy provider/inbound selective-port record is
 | `integration/middleware-email-api-v1` | `519ad72b31307d8bd34a13eefbf65a15bd6ea3e9` | merged | Tip is an ancestor of the reconciled K0 trunk. |
 | `ops/website-provider-host-edge` | `e070758e14aff702b6b45a7a500c2c23fdd445d8` | merged | Tip is an ancestor of the reconciled K0 trunk. |
 | `phase-k0/trunk-reconciliation` | `bedc22f9018b6f85a8c0e62b76544861f4944a6d` | merged | Tip is an ancestor of the reconciled K0 trunk. |
-| `phase-s0/contract-conformance` | `79f27ecff568321f3b9c9a3b37d00d5689377512` | merged | Tip is an ancestor of the reconciled K0 trunk. |
+| `phase-s0/contract-conformance` | `0cd48c6247ac360d94931666caa7934979c4cd9b` | merged | Tip is an ancestor of the reconciled K0 trunk. |
 | `planning/corporate-email-saas-1-12` | `8460dad391858a35ea156e6e92823b6553d82260` | merged | Tip is an ancestor of the reconciled K0 trunk. |
 | `release/klyrow-production-readiness` | `ebf54de55d87868818bb518872d0804741e33d52` | merged | Tip is an ancestor of the reconciled K0 trunk. |
 | `test/email-fabric-contracts-v1` | `519ad72b31307d8bd34a13eefbf65a15bd6ea3e9` | merged | Tip is an ancestor of the reconciled K0 trunk. |
