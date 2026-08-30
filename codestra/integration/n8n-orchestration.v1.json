@@ -1,0 +1,80 @@
+{
+  "schemaVersion": "1.0",
+  "application": "klyrow.com",
+  "status": "PREPARED_NOT_IMPORTED",
+  "lane": "CP-KLYROW",
+  "n8n": {
+    "role": "orchestrator",
+    "writeAuthority": false,
+    "credentialsInWorkflowJsonAllowed": false,
+    "credentialsStore": "n8n credential store",
+    "inactiveByDefault": true,
+    "allowedHttpTargets": [
+      "https://api.codestra.co/v2/automation/jobs/claim",
+      "https://api.codestra.co/v2/automation/commands",
+      "https://api.codestra.co/v2/automation/commands/{command_id}",
+      "https://api.codestra.co/v2/automation/jobs/{job_id}/heartbeat",
+      "https://api.codestra.co/v2/automation/jobs/{job_id}/complete",
+      "https://api.codestra.co/v2/automation/jobs/{job_id}/fail"
+    ],
+    "forbiddenHttpTargetClasses": [
+      "direct-klyrow-gateway-private-api",
+      "direct-postal-admin-api",
+      "direct-smtp",
+      "direct-odoo-api",
+      "direct-database",
+      "direct-redis",
+      "direct-secret-store"
+    ]
+  },
+  "workflowGroups": [
+    {
+      "name": "CP-KLYROW-COMMON-ERROR",
+      "purpose": "Normalize email workflow failures into Middleware job failure, retry and DLQ decisions.",
+      "dependsOn": []
+    },
+    {
+      "name": "CP-KLYROW-EMAIL-SEND",
+      "purpose": "Claim governed email send jobs, submit Middleware command and wait for canonical command status.",
+      "dependsOn": [
+        "CP-KLYROW-COMMON-ERROR"
+      ]
+    },
+    {
+      "name": "CP-KLYROW-DELIVERY-STATUS-SYNC",
+      "purpose": "Coordinate queued, sent, delivered, bounced, complaint and unsubscribe status changes through Middleware.",
+      "dependsOn": [
+        "CP-KLYROW-COMMON-ERROR"
+      ]
+    },
+    {
+      "name": "CP-KLYROW-SMTP-CREDENTIAL-LIFECYCLE",
+      "purpose": "Coordinate SMTP credential create, rotate and revoke commands without exposing secrets to workflow JSON.",
+      "dependsOn": [
+        "CP-KLYROW-COMMON-ERROR"
+      ]
+    },
+    {
+      "name": "CP-KLYROW-DOMAIN-DELIVERABILITY",
+      "purpose": "Coordinate domain, DKIM, DMARC, PTR and sender-readiness checks through Middleware.",
+      "dependsOn": [
+        "CP-KLYROW-COMMON-ERROR"
+      ]
+    },
+    {
+      "name": "CP-KLYROW-DLQ-REPLAY",
+      "purpose": "Coordinate approved replay of failed email events while preserving idempotency and audit evidence.",
+      "dependsOn": [
+        "CP-KLYROW-COMMON-ERROR"
+      ]
+    }
+  ],
+  "runtimeGate": {
+    "stage": "staging",
+    "firstProof": "CP-KLYROW-EMAIL-SEND against staging Middleware with live email delivery disabled",
+    "requiresNoUnexpectedDlq": true,
+    "requiresMiddlewareCommandEvidence": true,
+    "requiresWorkflowExportHash": true,
+    "productionTrafficAllowed": false
+  }
+}
