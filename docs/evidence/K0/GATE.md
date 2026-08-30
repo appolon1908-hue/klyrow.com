@@ -10,7 +10,7 @@ SAFE_MODE: true
 PRODUCTION_GATE_APPROVED: false
 DEFECTS_CLOSED: D14 (verified pre-closed on the pinned baseline); D15 reconciliation complete, deletion staged after the approved squash merge
 FAILURES_ENCOUNTERED: K0-T2 source/spec contradiction; R6 reached as required and owner selected Option 1 on 2026-08-30
-BLOCKERS: none
+BLOCKERS: one eligible approving review required on PR #50 after the gate-evidence correction
 
 CLEAN_CHECKOUT_DEPENDENCIES: checked-in apps/gateway/requirements.txt plus CI-declared pytest and pip-audit only
 DEPENDENCY_AUDIT: no known vulnerabilities found
