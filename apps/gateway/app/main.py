@@ -2,6 +2,8 @@ import asyncio, base64, hashlib, hmac, ipaddress, json, os, secrets, socket, ssl
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from .delivery_safety import safe_mode_enabled
 from typing import Optional
 
 import httpx, jwt
@@ -30,7 +32,7 @@ def required_session_secret():
     return value
 SECRET=required_session_secret()
 if len(SECRET) < 32: raise RuntimeError("KLYROW_SESSION_SECRET must contain at least 32 characters")
-SAFE_MODE=os.getenv("KLYROW_SAFE_MODE", "true").lower()=="true" or os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()!="true"
+SAFE_MODE=safe_mode_enabled()
 engine=create_engine(DATABASE_URL, pool_pre_ping=True)
 DB=sessionmaker(engine, expire_on_commit=False)
 ph=PasswordHasher()

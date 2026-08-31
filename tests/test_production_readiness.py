@@ -105,6 +105,17 @@ def test_single_domain_canary_is_durable_and_fail_closed():
     assert 'KLYROW_BULK_DELIVERY_ENABLED: "false"' in compose
 
 
+def test_base_production_compose_forces_email_delivery_fail_closed():
+    compose = (ROOT / "docker-compose.yml").read_text()
+    gateway = compose.split("  gateway:", 1)[1].split("  worker:", 1)[0]
+    worker = compose.split("  worker:", 1)[1].split("  scheduler:", 1)[0]
+    for service in (gateway, worker):
+        assert 'KLYROW_SAFE_MODE: "true"' in service
+        assert 'KLYROW_PRODUCTION_GATE_APPROVED: "false"' in service
+        assert 'LIVE_EMAIL_DELIVERY: "false"' in service
+    assert 'KLYROW_SAFE_MODE: "${KLYROW_SAFE_MODE:-true}"' not in gateway + worker
+
+
 def test_resolver_requires_write_permission_for_mutating_routes():
     source = (ROOT / "apps/gateway/app/main.py").read_text()
     assert 'request.method not in {"GET","HEAD","OPTIONS"}' in source
