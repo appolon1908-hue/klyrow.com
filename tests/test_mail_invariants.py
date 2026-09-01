@@ -310,3 +310,11 @@ def test_p20_middleware_recipient_reference_is_sha256_and_not_cleartext():
     assert '"recipient_reference"' in emit_source
     assert '"sha256:"+hashlib.sha256' in emit_source
     assert '"recipient":' not in emit_source.split("if event_type.startswith", 1)[1].split("else:", 1)[0]
+
+
+def test_tenant_worker_preserves_authenticated_provider_acceptance_after_submit():
+    worker = _source("tenant_postal_delivery.py")
+    success_path = worker.split("with DB() as session:", 2)[2]
+    assert 'item.provider_message_id = provider_id' in success_path
+    assert 'set_core_message_status(message, "provider_accepted")' in success_path
+    assert 'item.state == "cancelled"' not in success_path

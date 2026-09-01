@@ -192,9 +192,6 @@ async def tenant_email_outbox_loop() -> None:
             with DB() as session:
                 item = session.get(EmailOutbox, snapshot[0])
                 message = session.get(Message, snapshot[1])
-                if item and item.state == "cancelled":
-                    session.commit()
-                    continue
                 if item:
                     item.state = "delivered"
                     item.provider_message_id = provider_id

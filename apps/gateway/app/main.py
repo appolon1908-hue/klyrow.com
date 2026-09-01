@@ -779,17 +779,17 @@ async def beyvra_send(x:MailIn,ctx=Depends(beyvra_service_auth),s:Session=Depend
 
 async def _send(x:MailIn,ctx,s,idempotency_key):
     if not idempotency_key: raise HTTPException(400,"idempotency_key_required")
+    request_hash=sha(x.model_dump_json())
+    prior=s.scalar(select(Idempotency).where(Idempotency.key==idempotency_key,Idempotency.tenant_id==ctx["tenant"]))
+    if prior:
+        if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
+        return json.loads(prior.response_json)
     from .operations import enforce_tenant_send_gate
     enforce_tenant_send_gate(s,ctx["tenant"])
     from .agent_mailboxes import authorize_agent_sender
     authorize_agent_sender(s,ctx,x.sender,x.campaign_id,x.reply_to)
     from .guards import authorize_send
     authorization=authorize_send(s,tenant_id=ctx["tenant"],sender=str(x.sender),recipient=str(x.to),stream=x.stream,sandbox=SAFE_MODE,campaign_id=x.campaign_id,topic=x.topic)
-    request_hash=sha(x.model_dump_json())
-    prior=s.scalar(select(Idempotency).where(Idempotency.key==idempotency_key,Idempotency.tenant_id==ctx["tenant"]))
-    if prior:
-        if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
-        return json.loads(prior.response_json)
     enforce_production_canary(x,s)
     if x.stream=="marketing" and (x.campaign_id or not SAFE_MODE):enforce_campaign_canary(x,ctx,s)
     sender=x.sender.lower();domain=sender.rsplit("@",1)[1]
@@ -849,9 +849,11 @@ async def middleware_command(x:MiddlewareCommandIn,ctx=Depends(auth),s:Session=D
         elif x.command=="email.message.cancel.v1":
             message_id=str(payload.get("message_id") or "");message=s.scalar(select(Message).where(Message.id==message_id,Message.tenant_id==ctx["tenant"]).with_for_update())
             if not message:raise HTTPException(404,"not_found")
-            if message.status in {"delivered","bounced","complained","failed"}:raise HTTPException(409,"terminal_message_cannot_cancel")
+            if message.status in {"cancelled","delivered","bounced","complained","failed"}:raise HTTPException(409,"terminal_message_cannot_cancel")
             outbox=s.scalar(select(EmailOutbox).where(EmailOutbox.message_id==message.id,EmailOutbox.tenant_id==ctx["tenant"]).with_for_update())
-            if outbox and outbox.state in {"pending","retry","sending"}:outbox.state="cancelled";outbox.last_error="cancelled_by_middleware_command";outbox.updated_at=datetime.now(timezone.utc)
+            if outbox and outbox.state not in {"pending","retry"}:raise HTTPException(409,"provider_submission_requires_reconciliation")
+            if not outbox and message.status!="accepted":raise HTTPException(409,"message_not_cancellable")
+            if outbox:outbox.state="cancelled";outbox.last_error="cancelled_by_middleware_command";outbox.updated_at=datetime.now(timezone.utc)
             set_core_message_status(message,"cancelled");item.state="cancelled";item.result_json=json.dumps({"message_id":message.id,"status":"cancelled","outbox_state":outbox.state if outbox else None})
         elif x.command=="email.domain.verify.v1":
             domain_id=str(payload.get("domain_id") or "");domain=s.scalar(select(Domain).where(Domain.id==domain_id,Domain.tenant_id==ctx["tenant"]))

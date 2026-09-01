@@ -1,5 +1,9 @@
-FROM python:3.12.11-alpine3.22@sha256:efcdfa6a6b2fd2afb9c7dfa9a5b288a6f68338b5cfdebe6b637d986067d85757
+FROM python:3.12.13-alpine3.22@sha256:a190708a2dec1bd18b1decb539f8e8f5407abaa9bf39cacda583f7f8c11db322
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+RUN apk add --no-cache --upgrade \
+    libcrypto3=3.5.8-r0 \
+    libssl3=3.5.8-r0 \
+    && rm -f /var/log/apk.log
 RUN adduser --disabled-password --gecos "" --uid 10002 klyrow-migrate
 WORKDIR /app
 COPY apps/gateway/requirements.txt ./requirements.txt

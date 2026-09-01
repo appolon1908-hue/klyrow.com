@@ -61,11 +61,25 @@ def test_ci_compares_two_timestamp_rewritten_oci_exports_before_publish():
 def test_protected_publication_covers_every_production_owned_image():
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "github.ref == 'refs/heads/main'" in workflow
-    assert 'test "$(git rev-parse HEAD)" = "$GITHUB_SHA"' in workflow
+    assert 'test "$(git rev-parse HEAD)" = "$KLYROW_SOURCE_SHA"' in workflow
     for image in ("gateway", "web", "migrate", "postal-provisioner"):
-        assert f"klyrow-{image}:${{{{ github.sha }}}}" in workflow
+        assert f"klyrow-{image}:${{{{ env.KLYROW_SOURCE_SHA }}}}" in workflow
         assert f"klyrow-{image}" in workflow
     assert workflow.count("actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a") == 4
+
+
+def test_pull_request_images_and_evidence_bind_to_exact_head_sha():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "KLYROW_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}" in workflow
+    assert workflow.count("uses: actions/checkout@") == workflow.count(
+        "ref: ${{ env.KLYROW_SOURCE_SHA }}"
+    )
+    assert workflow.count("github.sha") == 1
+    assert "${{ github.sha }}" not in workflow
+    assert "klyrow-gateway:${{ env.KLYROW_SOURCE_SHA }}" in workflow
+    assert "org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}" in workflow
+    assert "trivy-${{ env.KLYROW_SOURCE_SHA }}" in workflow
+    assert "klyrow-gateway-${{ env.KLYROW_SOURCE_SHA }}.cdx.json" in workflow
 
 
 def test_all_third_party_workflow_actions_are_commit_pinned():

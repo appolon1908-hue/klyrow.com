@@ -79,6 +79,20 @@ def test_middleware_command_cancel_and_suppression_upsert():
         assert s.get(EmailOutbox,"cancel-command-outbox").state=="cancelled"
         assert s.scalar(select(Suppression).where(Suppression.tenant_id=="a",Suppression.email=="stop@example.net")).reason=="manual"
 
+def test_middleware_command_rejects_cancellation_after_submission_starts():
+    with DB() as s:
+        s.add(Message(id="inflight-command-message",tenant_id="a",recipient="person@example.net",sender="sender@a.example.com",subject="inflight",status="submitted"))
+        s.add(EmailOutbox(id="inflight-command-outbox",tenant_id="a",message_id="inflight-command-message",payload="{}",state="sending"))
+        s.commit()
+    headers=middleware_hdr("a","command-correlation-inflight","command-cancel-inflight")
+    response=client.post("/v1/commands",headers=headers,json={"command":"email.message.cancel.v1","payload":{"message_id":"inflight-command-message"}})
+    assert response.status_code==409 and response.json()["detail"]=="provider_submission_requires_reconciliation"
+    with DB() as s:
+        assert s.get(Message,"inflight-command-message").status=="submitted"
+        assert s.get(EmailOutbox,"inflight-command-outbox").state=="sending"
+        operation=s.scalar(select(MiddlewareCommandOperation).where(MiddlewareCommandOperation.idempotency_key=="command-cancel-inflight"))
+        assert operation.state=="failed" and operation.error=="provider_submission_requires_reconciliation"
+
 def test_middleware_commands_require_command_scope_and_record_bad_payload():
     user_headers={**hdr("a"),"X-Tenant-ID":"a","X-Correlation-ID":"command-correlation-0004","Idempotency-Key":"command-scope-denied"}
     payload={"command":"email.message.send.v1","payload":{"sender":"sender@a.example.com","subject":"missing recipient","html":"<p>bad</p>"}}
@@ -100,6 +114,29 @@ def test_idempotency_key_is_tenant_scoped_and_changed_payload_conflicts():
     assert client.post("/v1/email/send",headers={**hdr("b"),"Idempotency-Key":"shared-key"},json=payload_b).status_code==202
     changed={**payload_a,"subject":"changed"};r=client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"shared-key"},json=changed)
     assert r.status_code==409 and r.json()["detail"]=="idempotency_key_payload_mismatch"
+
+def test_exact_replay_precedes_mutable_send_guards():
+    payload={"to":"stable-replay@example.net","sender":"sender@a.example.com","subject":"stable","html":"<p>stable</p>"}
+    headers={**hdr("a"),"Idempotency-Key":"stable-policy-replay"}
+    with patch("apps.gateway.app.main.emit_middleware",new=AsyncMock(return_value=True)):
+        first=client.post("/v1/email/send",headers=headers,json=payload)
+    assert first.status_code==202
+    try:
+        with DB() as s:
+            s.add(Suppression(id="stable-policy-suppression",tenant_id="a",email="stable-replay@example.net",reason="hard_bounce"))
+            s.get(Tenant,"a").quota=0
+            s.commit()
+        with patch("apps.gateway.app.main.emit_middleware",new=AsyncMock(return_value=True)):
+            replay=client.post("/v1/email/send",headers=headers,json=payload)
+            conflict=client.post("/v1/email/send",headers=headers,json={**payload,"subject":"changed"})
+        assert replay.status_code==202 and replay.json()==first.json()
+        assert conflict.status_code==409 and conflict.json()["detail"]=="idempotency_key_payload_mismatch"
+    finally:
+        with DB() as s:
+            suppression=s.get(Suppression,"stable-policy-suppression")
+            if suppression:s.delete(suppression)
+            s.get(Tenant,"a").quota=10
+            s.commit()
 
 def test_idempotency_key_is_tenant_scoped():
     body={"to":"same@example.net","subject":"same","html":"<p>same</p>"}
