@@ -12,7 +12,10 @@ FROM nginxinc/nginx-unprivileged:1.30.4-alpine3.24@sha256:45ce1e2e699234253d1def
 # Pin an exact published patched Nginx runtime rather than a moving minor tag.
 # Assert the exact pinned runtime patch level, then return to non-root UID 101.
 USER root
-RUN nginx -v 2>&1 | grep -q 'nginx/1.30.4'
+RUN apk add --no-cache --upgrade \
+    libexpat=2.8.4-r0 \
+    && rm -f /var/log/apk.log \
+    && nginx -v 2>&1 | grep -q 'nginx/1.30.4'
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /build/dist /usr/share/nginx/html
 USER 101
