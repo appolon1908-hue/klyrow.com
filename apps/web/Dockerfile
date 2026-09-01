@@ -10,10 +10,15 @@ RUN pnpm build
 
 FROM nginxinc/nginx-unprivileged:1.30.4-alpine3.24@sha256:45ce1e2e699234253d1def7baa96218a5d00b498d1ba0cbb1a17b6bdf73d1351
 # Pin an exact published patched Nginx runtime rather than a moving minor tag.
-# Assert the exact pinned runtime patch level, then return to non-root UID 101.
+# Install the independently checksum-pinned Alpine package from the source tree;
+# neither a moving repository index nor network access participates in this layer.
 USER root
-RUN apk add --no-cache --upgrade \
-    libexpat=2.8.4-r0 \
+COPY apps/web/vendor/libexpat-2.8.4-r0.apk /opt/klyrow/vendor/libexpat-2.8.4-r0.apk
+COPY apps/web/vendor/SHA256SUMS /opt/klyrow/vendor/SHA256SUMS
+RUN cd /opt/klyrow/vendor \
+    && sha256sum -c SHA256SUMS \
+    && apk verify --keys-dir /etc/apk/keys libexpat-2.8.4-r0.apk \
+    && apk add --no-cache --no-network ./libexpat-2.8.4-r0.apk \
     && rm -f /var/log/apk.log \
     && nginx -v 2>&1 | grep -q 'nginx/1.30.4'
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
