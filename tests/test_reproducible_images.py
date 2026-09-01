@@ -86,9 +86,13 @@ def test_postal_runtime_is_patched_from_immutable_os_and_gem_inputs():
     assert 'gem "rails", "= 7.2.3.2"' in gemfile
     assert 'gem "jwt", "= 2.10.3"' in gemfile
     assert 'gem "puma", "= 7.2.1"' in gemfile
+    assert 'gem "resolv", "= 0.7.2"' in gemfile
     assert 'gem "zlib", "= 3.2.3"' in gemfile
+    assert dockerfile.count("resolv-0.6.2") >= 7
+    assert '"resolv"=>"0.7.2"' in dockerfile
     assert "CHECKSUMS" in lock
     assert "rails (7.2.3.2) sha256=" in lock
+    assert "resolv (0.7.2) sha256=" in lock
     assert "zlib (3.2.3) sha256=" in lock
 
 

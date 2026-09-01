@@ -327,7 +327,7 @@ GEM
     regexp_parser (2.7.0)
     reline (0.7.0)
       io-console (~> 0.5)
-    resolv (0.6.2)
+    resolv (0.7.2)
     rexml (3.4.4)
     rouge (4.2.0)
     rspec (3.13.1)
@@ -477,7 +477,7 @@ DEPENDENCIES
   puma (= 7.2.1)
   rackup
   rails (= 7.2.3.2)
-  resolv
+  resolv (= 0.7.2)
   rspec
   rspec-rails
   rubocop
@@ -615,7 +615,7 @@ CHECKSUMS
   rdoc (8.0.0) sha256=03bf8c08a9639658855a0cfd77c0abca8325c227693f7f33f82957811348c469
   regexp_parser (2.7.0) sha256=f8b8b7f34cc53c907fad6aec2b9da996a4311a0ddd92f3bfd3b999de5420c234
   reline (0.7.0) sha256=5b012d8e55dbf9d450f12bde2cf7d15ff546ae80b3f8f3b30e570d431815583d
-  resolv (0.6.2) sha256=61efe545cedddeb1b14f77e51f85c85ca66af5098fdbf567fadf32c34590fb14
+  resolv (0.7.2) sha256=626d044d975ab2daac759bf898416f1b51e2cb8dcd6727c2b5b5b28b97ead2e1
   rexml (3.4.4) sha256=19e0a2c3425dfbf2d4fc1189747bdb2f849b6c5e74180401b15734bc97b5d142
   rouge (4.2.0) sha256=60dd666b3a223467dc72f5b7384764dfd7ad4e50b0df9eff072be58123506eba
   rspec (3.13.1) sha256=b9f9a58fa915b8d94a1d6b3195fe6dd28c4c34836a6097015142c4a9ace72140
