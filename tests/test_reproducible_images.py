@@ -95,11 +95,39 @@ def test_ci_compares_two_timestamp_rewritten_oci_exports_before_publish():
 def test_protected_publication_covers_every_production_owned_image():
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "github.ref == 'refs/heads/main'" in workflow
+    assert "github.ref_protected == true" in workflow
+    assert 'test "$GITHUB_REF_PROTECTED" = \'true\'' in workflow
     assert 'test "$(git rev-parse HEAD)" = "$KLYROW_SOURCE_SHA"' in workflow
     for image in ("gateway", "web", "migrate", "postal-provisioner"):
-        assert f"klyrow-{image}:${{{{ env.KLYROW_SOURCE_SHA }}}}" in workflow
+        assert f"klyrow-{image}:candidate-${{{{ github.run_id }}}}" in workflow
         assert f"klyrow-{image}" in workflow
-    assert workflow.count("actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a") == 4
+    assert "Sign and attest only unpublished exact digests" in workflow
+    assert "Verify signatures, provenance, and SBOM attestations" in workflow
+    assert "Promote only fully certified digests to immutable source tags" in workflow
+    assert workflow.count("provenance: false") == 4
+    assert workflow.count("sbom: false") == 4
+    assert workflow.count("cosign attest --yes --type slsaprovenance1") == 1
+    assert workflow.count("cosign attest --yes --type spdxjson") == 1
+
+
+def test_protected_publisher_scans_and_verifies_exact_digests_before_promotion():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    publish = workflow.index("  publish:")
+    candidate = workflow.index("Publish backend candidate", publish)
+    scan = workflow.index("Scan exact backend digest", publish)
+    collision = workflow.index("Reject immutable source-tag collisions before signing", publish)
+    sign = workflow.index("Sign and attest only unpublished exact digests", publish)
+    verify = workflow.index("Verify signatures, provenance, and SBOM attestations", publish)
+    promote = workflow.index("Promote only fully certified digests to immutable source tags", publish)
+    assert candidate < scan < collision < sign < verify < promote
+    assert workflow.count("format: json") >= 4
+    assert workflow.count("publish-trivy-") >= 4
+    assert 'test "$existing" = "$digest"' in workflow
+    assert "imagetools create --prefer-index=false" in workflow
+    assert "cosign verify --certificate-identity" in workflow
+    assert "sourceCommit == $source" in workflow
+    assert "registryDigest == $digest" in workflow
+    assert "sha256sum -c PUBLISH_SHA256SUMS" in workflow
 
 
 def test_pull_request_images_and_evidence_bind_to_exact_head_sha():
