@@ -140,8 +140,7 @@ recipient="$(gpg --batch --homedir "$gpg_home" --with-colons --list-keys |
 tar -C "$stage" -cf - mautic-persistent-data.tar MANIFEST.sha256 |
   gpg --batch --yes --homedir "$gpg_home" --trust-model always \
     --recipient "$recipient" --output "$checkpoint_directory/$checkpoint_name" --encrypt
-sha256sum "$checkpoint_directory/$checkpoint_name" > \
-  "$checkpoint_directory/$checkpoint_name.sha256"
+(cd "$checkpoint_directory" && sha256sum "$checkpoint_name" > "$checkpoint_name.sha256")
 chmod 0600 "$checkpoint_directory/$checkpoint_name" \
   "$checkpoint_directory/$checkpoint_name.sha256"
 
@@ -197,8 +196,7 @@ jq -n \
     legacy_volume_removed:false}' > \
   "$checkpoint_directory/$manifest_name"
 chmod 0600 "$checkpoint_directory/$manifest_name"
-sha256sum "$checkpoint_directory/$manifest_name" > \
-  "$checkpoint_directory/$manifest_name.sha256"
+(cd "$checkpoint_directory" && sha256sum "$manifest_name" > "$manifest_name.sha256")
 chmod 0600 "$checkpoint_directory/$manifest_name.sha256"
 
 printf 'Mautic persistent-volume migration verified; legacy volume preserved. Evidence: %s\n' \

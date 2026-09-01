@@ -133,6 +133,14 @@ def test_mautic_volume_migration_is_checkpointed_and_fail_closed():
     assert "--owner=0" not in source
     assert "--group=0" not in source
     assert '(cd "$stage" && sha256sum mautic-persistent-data.tar > MANIFEST.sha256)' in source
+    assert (
+        '(cd "$checkpoint_directory" && sha256sum "$checkpoint_name" > '
+        '"$checkpoint_name.sha256")' in source
+    )
+    assert (
+        '(cd "$checkpoint_directory" && sha256sum "$manifest_name" > '
+        '"$manifest_name.sha256")' in source
+    )
     assert "Destination volume verification failed" in source
     assert "legacy_volume_removed:false" in source
     assert "rm -v" not in source
