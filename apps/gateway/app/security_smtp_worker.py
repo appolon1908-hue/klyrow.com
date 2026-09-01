@@ -24,6 +24,7 @@ from sqlalchemy import select
 
 from .main import DB
 from .provider import ProviderAudit, ProviderEvent, ProviderMessage, SandboxCapture, now
+from .provider_outcome import INDETERMINATE, provider_outcome_is_ambiguous, reconcile_before_retry
 from .security_payload import (
     decrypt_security_payload,
     max_payload_age_seconds,
@@ -288,6 +289,24 @@ def _mark_failed(snapshot: dict[str, Any], error_name: str) -> None:
         session.commit()
 
 
+def _mark_indeterminate(snapshot: dict[str, Any], error_name: str) -> None:
+    """Quarantine an ambiguous Postal result until reconciliation proves absence."""
+
+    with DB() as session:
+        item = session.get(ProviderMessage, snapshot["id"])
+        if not item or item.status != "PROCESSING":
+            return
+        if not reconcile_before_retry(state=INDETERMINATE, provider_message_id=item.provider_message_id, provider_absence_confirmed=False):
+            item.status = INDETERMINATE
+            item.lease_expires_at = None
+            item.last_error = error_name[:120]
+            item.updated_at = now()
+            session.add(ProviderAudit(id=str(uuid.uuid4()), tenant_id=item.tenant_id,
+                actor="worker:klyrow-security-smtp", action="smtp.security.message.indeterminate",
+                outcome="reconciliation_required", correlation_id=item.correlation_id, resource_id=item.id))
+            session.commit()
+
+
 async def process_one_security_message() -> bool:
     """Submit one eligible SECURITY message to Postal."""
 
@@ -324,7 +343,10 @@ async def process_one_security_message() -> bool:
         _mark_submitted(snapshot, provider_message_id)
         return True
     except Exception as exc:  # noqa: BLE001 - error type only is persisted/logged
-        _mark_failed(snapshot, type(exc).__name__)
+        if provider_outcome_is_ambiguous(exc):
+            _mark_indeterminate(snapshot, type(exc).__name__)
+        else:
+            _mark_failed(snapshot, type(exc).__name__)
         print(
             json.dumps(
                 {

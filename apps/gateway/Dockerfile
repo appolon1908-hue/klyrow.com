@@ -1,4 +1,4 @@
-FROM node:22-bookworm-slim AS web-build
+FROM node:22-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS web-build
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 WORKDIR /build
@@ -8,15 +8,14 @@ RUN pnpm install --frozen-lockfile
 COPY apps/web/ ./
 RUN pnpm build
 
-FROM alpine:3.22
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/opt/python
-RUN apk upgrade --no-cache \
-    && apk add --no-cache ca-certificates python3 py3-pip
+FROM python:3.12.11-alpine3.22@sha256:efcdfa6a6b2fd2afb9c7dfa9a5b288a6f68338b5cfdebe6b637d986067d85757
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 RUN adduser --disabled-password --gecos "" --uid 10001 klyrow
 WORKDIR /app
 COPY apps/gateway/requirements.txt .
-RUN /usr/bin/python3 -m pip install --no-cache-dir --break-system-packages \
-    --target=/opt/python -r requirements.txt
+RUN /usr/local/bin/python3 -m pip install --no-cache-dir --no-compile --no-deps \
+    -r requirements.txt \
+    && /usr/local/bin/python3 -m pip check
 COPY apps/gateway/app ./app
 # The base gateway serves the same reviewed Vue artifact for /login, /app and
 # /admin. The optional dedicated web image remains available for split-edge

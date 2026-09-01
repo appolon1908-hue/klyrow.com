@@ -170,7 +170,7 @@ def test_signed_callback_resolves_tenant_from_local_outbound_mapping(
                 Suppression.email == recipient,
             )
         )
-        assert suppression and suppression.reason == "hard_bounce"
+        assert suppression and suppression.reason == "bounced"
         assert not session.scalar(
             select(Suppression).where(
                 Suppression.tenant_id == wrong_tenant,
@@ -180,7 +180,7 @@ def test_signed_callback_resolves_tenant_from_local_outbound_mapping(
         audit = session.scalar(
             select(Audit).where(
                 Audit.tenant_id == correct_tenant,
-                Audit.action == "email.status.hard_bounce",
+                Audit.action == "email.status.bounced",
             )
         )
         assert audit is not None

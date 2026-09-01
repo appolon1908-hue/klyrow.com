@@ -15,14 +15,16 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from email_validator import EmailNotValidError, validate_email
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, case, func, select
 from sqlalchemy.orm import Mapped, Session, mapped_column
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from .main import AllowedSender, Audit, Base, Domain, InboundRouteConfig, Message, Suppression, Tenant, auth, db
+from .guards import authorize_send, enforce_consent, suppression_record
+from .guards import enforce_suppression
+from .main import AllowedSender, Audit, Base, Domain, InboundRouteConfig, Message, Tenant, auth, db
 
 router = APIRouter(prefix="/v1/internal/email", tags=["Klyrow provider"])
 status_router = APIRouter(tags=["Klyrow provider status"])
@@ -32,7 +34,7 @@ smtp_hasher = PasswordHasher()
 DOMAIN_STATES = {"PENDING", "DNS_REQUIRED", "VERIFYING", "VERIFIED", "SENDING_ENABLED", "SUSPENDED", "REMOVED"}
 SENDER_STATES = {"PENDING", "ACTIVE", "SUSPENDED", "REMOVED"}
 STREAMS = {"TRANSACTIONAL", "SECURITY", "SYSTEM", "MARKETING", "BULK"}
-MESSAGE_STATES = {"CREATED", "QUEUED", "PROCESSING", "SUBMITTED", "SENT", "DELIVERED", "DEFERRED", "BOUNCED_SOFT", "BOUNCED_HARD", "COMPLAINED", "SUPPRESSED", "FAILED", "DEAD_LETTER"}
+MESSAGE_STATES = {"CREATED", "QUEUED", "PROCESSING", "SUBMITTED", "SENT", "DELIVERED", "DEFERRED", "INDETERMINATE", "BOUNCED_SOFT", "BOUNCED_HARD", "COMPLAINED", "SUPPRESSED", "FAILED", "DEAD_LETTER"}
 REPUTATION_STATES = {"GOOD", "WATCH", "LIMITED", "SUSPENDED"}
 
 
@@ -166,6 +168,12 @@ class ProviderInbound(Base):
     text_body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     html_body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     attachments_json: Mapped[str] = mapped_column(Text, default="[]")
+    auth_verdict: Mapped[str] = mapped_column(String, index=True)
+    spf_result: Mapped[str] = mapped_column(String)
+    dkim_result: Mapped[str] = mapped_column(String)
+    dmarc_result: Mapped[str] = mapped_column(String)
+    arc_result: Mapped[str] = mapped_column(String)
+    dmarc_fail_action: Mapped[str] = mapped_column(String)
     disposition: Mapped[str] = mapped_column(String, default="ACCEPT", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
@@ -240,7 +248,6 @@ class ProviderMailIn(BaseModel):
     stream: str = "TRANSACTIONAL"
     attachments: list[AttachmentIn] = Field(default_factory=list, max_length=20)
     sandbox: bool = True
-    marketing_consent_granted: bool = False
 
     @field_validator("recipient")
     @classmethod
@@ -376,6 +383,11 @@ class InboundFixtureIn(BaseModel):
     raw_message_b64: str = Field(min_length=4, max_length=35_000_000)
     destination_override: Optional[str] = None
     provider_spam_score: int = Field(default=0, ge=0, le=1000)
+    spf_result: str = Field(pattern="^(PASS|FAIL|SOFTFAIL|NEUTRAL|NONE|TEMPERROR|PERMERROR)$")
+    dkim_result: str = Field(pattern="^(PASS|FAIL|NONE|TEMPERROR|PERMERROR)$")
+    dmarc_result: str = Field(pattern="^(PASS|FAIL|NONE|TEMPERROR|PERMERROR)$")
+    arc_result: str = Field(pattern="^(PASS|FAIL|NONE)$")
+    dmarc_fail_action: str = Field(pattern="^(REJECT|QUARANTINE|ACCEPT)$")
 
 
 class SmtpCredentialIn(BaseModel):
@@ -578,11 +590,15 @@ def reconcile_legacy_registry(s: Session) -> dict:
 
 
 def preflight(payload: ProviderMailIn, ctx: dict, s: Session) -> dict:
-    if os.getenv("KLYROW_PLATFORM_EMERGENCY_STOP", "false").lower() == "true":
-        raise HTTPException(503, "platform_emergency_stop")
-    tenant = s.get(Tenant, ctx["tenant"])
-    if not tenant or not tenant.enabled:
-        raise HTTPException(403, "tenant_suspended")
+    authorization = authorize_send(
+        s,
+        tenant_id=ctx["tenant"],
+        sender=str(payload.sender),
+        recipient=str(payload.recipient),
+        stream=payload.stream,
+        sandbox=payload.sandbox,
+    )
+    tenant = authorization["tenant"]
     from .operations import enforce_tenant_send_gate
     enforce_tenant_send_gate(s, ctx["tenant"])
     policy = policy_for(s, ctx["tenant"])
@@ -607,20 +623,13 @@ def preflight(payload: ProviderMailIn, ctx: dict, s: Session) -> dict:
     provider_domain = s.scalar(select(ProviderDomain).where(ProviderDomain.tenant_id == ctx["tenant"], ProviderDomain.domain == domain_name))
     legacy_domain = s.scalar(select(Domain).where(Domain.tenant_id == ctx["tenant"], Domain.domain == domain_name, Domain.verified == True))
     if provider_domain:
-        if provider_domain.status in {"SUSPENDED", "REMOVED"}:
-            raise HTTPException(403, "sender_domain_suspended")
+        if provider_domain.status not in {"VERIFIED", "SENDING_ENABLED"}:
+            raise HTTPException(422, "sender_domain_not_verified")
         if not payload.sandbox and (provider_domain.status != "SENDING_ENABLED" or not provider_domain.sending_enabled):
             raise HTTPException(403, "sender_domain_not_enabled")
     elif not legacy_domain:
         raise HTTPException(422, "sender_domain_not_verified")
-    recipient = str(payload.recipient).lower()
-    if s.scalar(select(Suppression).where(Suppression.tenant_id == ctx["tenant"], Suppression.email == recipient)):
-        raise HTTPException(422, "recipient_suppressed")
-    if payload.sandbox:
-        allowed = set(json.loads(policy.allowed_test_recipients_json or "[]"))
-        sink_domain = os.getenv("KLYROW_SANDBOX_DOMAIN", "klyrow-sink.test")
-        if recipient not in allowed and not recipient.endswith("@" + sink_domain):
-            raise HTTPException(403, "sandbox_recipient_not_allowed")
+    recipient = authorization["recipient"]
     body_size = len((payload.html or "").encode()) + len((payload.text or "").encode())
     attachment_size = sum(item.size for item in payload.attachments)
     if body_size + attachment_size > policy.max_message_bytes:
@@ -629,8 +638,6 @@ def preflight(payload: ProviderMailIn, ctx: dict, s: Session) -> dict:
         raise HTTPException(413, "attachment_too_large")
     if any("/" in item.filename or "\\" in item.filename or item.filename in {".", ".."} for item in payload.attachments):
         raise HTTPException(422, "unsafe_attachment_filename")
-    if payload.stream == "MARKETING" and not payload.marketing_consent_granted:
-        raise HTTPException(403, "marketing_requires_authoritative_consent")
     since_hour = now() - timedelta(hours=1)
     since_day = now() - timedelta(days=1)
     hour_count = s.scalar(select(func.count(ProviderMessage.id)).where(ProviderMessage.tenant_id == ctx["tenant"], ProviderMessage.created_at >= since_hour)) or 0
@@ -655,6 +662,8 @@ def email_preflight(payload: ProviderMailIn, ctx=Depends(auth), s: Session = Dep
 
 @router.post("/send", status_code=202)
 def email_send(payload: ProviderMailIn, ctx=Depends(auth), s: Session = Depends(db), idempotency_key: str = Header(min_length=8, max_length=200), x_correlation_id: str = Header(min_length=8, max_length=128)):
+    authorize_send(s, tenant_id=ctx["tenant"], sender=str(payload.sender), recipient=str(payload.recipient), stream=payload.stream, sandbox=payload.sandbox)
+    enforce_consent(s, ctx["tenant"], str(payload.recipient), payload.stream)
     result = preflight(payload, ctx, s)
     request_hash = canonical_hash(payload)
     existing = s.scalar(select(ProviderMessage).where(ProviderMessage.tenant_id == ctx["tenant"], ProviderMessage.idempotency_key == idempotency_key))
@@ -664,8 +673,16 @@ def email_send(payload: ProviderMailIn, ctx=Depends(auth), s: Session = Depends(
         return {"message_id": existing.id, "status": existing.status, "request_id": existing.correlation_id, "sandbox": existing.sandbox}
     if s.scalar(select(ProviderMessage).where(ProviderMessage.tenant_id == ctx["tenant"], ProviderMessage.correlation_id == x_correlation_id)):
         raise HTTPException(409, "correlation_id_already_used")
-    message = ProviderMessage(id=str(uuid.uuid4()), tenant_id=ctx["tenant"], correlation_id=x_correlation_id, idempotency_key=idempotency_key, request_hash=request_hash, sender=result["sender"], recipient=result["recipient"], subject=payload.subject, payload_json=payload.model_dump_json(exclude_none=True), stream=payload.stream, status="QUEUED", sandbox=payload.sandbox)
+    from .billing import UsageEvent
+    from .guards import billing_identity
+    subscription_id, price_id = billing_identity(s, ctx["tenant"], sandbox=payload.sandbox)
+    message_payload=payload.model_dump(mode="json",exclude_none=True)
+    if payload.stream=="MARKETING":
+        from .preferences import one_click_unsubscribe_headers
+        message_payload["headers"]=one_click_unsubscribe_headers(ctx["tenant"],result["recipient"])
+    message = ProviderMessage(id=str(uuid.uuid4()), tenant_id=ctx["tenant"], correlation_id=x_correlation_id, idempotency_key=idempotency_key, request_hash=request_hash, sender=result["sender"], recipient=result["recipient"], subject=payload.subject, payload_json=json.dumps(message_payload,separators=(",",":"),sort_keys=True), stream=payload.stream, status="QUEUED", sandbox=payload.sandbox)
     s.add(message)
+    s.add(UsageEvent(id=str(uuid.uuid4()), tenant_id=ctx["tenant"], subscription_id=subscription_id, message_id=message.id, event_key="accepted:provider:"+idempotency_key, unit="accepted_message", quantity=1, price_id=price_id))
     audit_provider(s, ctx, "email.queued", "accepted", x_correlation_id, message.id)
     s.commit()
     return {"message_id": message.id, "status": message.status, "request_id": x_correlation_id, "sandbox": message.sandbox}
@@ -687,7 +704,6 @@ def canonical_email_send(payload: CanonicalEmailIn, ctx=Depends(auth), s: Sessio
         text=payload.content.text,
         stream=stream,
         sandbox=True,
-        marketing_consent_granted=payload.metadata.get("consent") == "granted",
     )
     result = email_send(provider_payload, ctx, s, idempotency_key, x_correlation_id)
     message = s.get(ProviderMessage, result["message_id"])
@@ -702,7 +718,7 @@ def process_one_sandbox(s: Session) -> Optional[str]:
         ProviderMessage.status.in_(["QUEUED", "DEFERRED"]),
         ProviderMessage.sandbox == True,
         ProviderMessage.available_at <= now(),
-    ).order_by(ProviderMessage.created_at).with_for_update(skip_locked=True).limit(1))
+    ).order_by(case({"SECURITY": 0, "SYSTEM": 10, "TRANSACTIONAL": 20, "MARKETING": 80, "BULK": 100}, value=ProviderMessage.stream, else_=1000), ProviderMessage.created_at).with_for_update(skip_locked=True).limit(1))
     if not message:
         return None
     message.status = "PROCESSING"
@@ -734,7 +750,7 @@ def recover_expired_leases(s: Session, max_attempts: int = 5) -> int:
     expired = list(s.scalars(select(ProviderMessage).where(ProviderMessage.status == "PROCESSING",
         ProviderMessage.lease_expires_at < now()).with_for_update(skip_locked=True)).all())
     for message in expired:
-        message.status = "DEAD_LETTER" if message.attempts >= max_attempts else "DEFERRED"
+        message.status = "DEAD_LETTER" if message.attempts >= max_attempts else "INDETERMINATE"
         message.available_at = now() + timedelta(seconds=min(300, 2 ** max(message.attempts, 1)))
         message.lease_expires_at = None
         message.last_error = "worker_lease_expired"
@@ -744,7 +760,7 @@ def recover_expired_leases(s: Session, max_attempts: int = 5) -> int:
 
 
 async def dispatch_provider_outbox(limit: int = 50) -> dict:
-    from .main import DB, emit_middleware
+    from .main import DB, SMTP_EVENT_MAP, emit_middleware
     delivered = 0
     failed = 0
     with DB() as s:
@@ -752,7 +768,8 @@ async def dispatch_provider_outbox(limit: int = 50) -> dict:
             ProviderEvent.available_at <= now()).order_by(ProviderEvent.created_at).limit(limit)).all())
     for snapshot in events:
         payload = json.loads(snapshot.payload_json)
-        ok = await emit_middleware("klyrow." + snapshot.kind, payload)
+        canonical_event = SMTP_EVENT_MAP.get(snapshot.kind)
+        ok = await emit_middleware(canonical_event, payload) if canonical_event else False
         with DB() as s:
             item = s.get(ProviderEvent, snapshot.id)
             if not item or item.state not in {"PENDING", "RETRY"}:
@@ -858,7 +875,7 @@ def canonical_message_events(messageId: str, ctx=Depends(auth), s: Session = Dep
 
 @router.post("/suppressions/check")
 def suppression_check(recipient: EmailStr, ctx=Depends(auth), s: Session = Depends(db)):
-    item = s.scalar(select(Suppression).where(Suppression.tenant_id == ctx["tenant"], Suppression.email == str(recipient).lower()))
+    item = suppression_record(s, ctx["tenant"], str(recipient))
     return {"recipient": str(recipient).lower(), "suppressed": bool(item), "reason": item.reason if item else None}
 
 
@@ -1215,6 +1232,11 @@ def inbound_receive(payload: InboundFixtureIn, ctx=Depends(auth), s: Session = D
         raise HTTPException(422, "invalid_mime_encoding") from exc
     tenant_policy = policy_for(s, ctx["tenant"])
     parsed = parse_inbound(raw, tenant_policy.max_message_bytes, tenant_policy.max_attachment_bytes)
+    auth_verdict = "PASS" if payload.dmarc_result == "PASS" else "FAIL"
+    if auth_verdict == "FAIL" and payload.dmarc_fail_action == "REJECT":
+        parsed["disposition"] = "REJECT"
+    elif auth_verdict == "FAIL" and payload.dmarc_fail_action == "QUARANTINE":
+        parsed["disposition"] = "QUARANTINE"
     if payload.provider_spam_score >= tenant_policy.spam_reject_score:
         parsed["disposition"] = "REJECT"
     elif payload.provider_spam_score >= tenant_policy.spam_quarantine_score:
@@ -1231,13 +1253,19 @@ def inbound_receive(payload: InboundFixtureIn, ctx=Depends(auth), s: Session = D
         route_id=route.id, message_id_header=parsed["message_id"], sender=parsed["from"], recipient=recipient,
         subject=parsed["subject"], text_body=parsed["text"], html_body=parsed["html"],
         attachments_json=json.dumps(parsed["attachments"], separators=(",", ":"), sort_keys=True),
+        auth_verdict=auth_verdict, spf_result=payload.spf_result, dkim_result=payload.dkim_result,
+        dmarc_result=payload.dmarc_result, arc_result=payload.arc_result,
+        dmarc_fail_action=payload.dmarc_fail_action,
         disposition=parsed["disposition"])
     s.add(item)
     event_id = str(uuid.uuid4())
     s.add(ProviderEvent(id=event_id, tenant_id=ctx["tenant"], message_id=item.id, kind="inbound.received",
         payload_json=json.dumps({"event_id": event_id, "event": "inbound.received", "tenant_id": ctx["tenant"],
             "inbound_id": item.id, "route_id": route.id, "destination_kind": route.destination_kind,
-            "destination_ref": route.destination_ref, "disposition": item.disposition}, separators=(",", ":"), sort_keys=True)))
+            "destination_ref": route.destination_ref, "disposition": item.disposition,
+            "auth_verdict": item.auth_verdict, "spf_result": item.spf_result,
+            "dkim_result": item.dkim_result, "dmarc_result": item.dmarc_result,
+            "arc_result": item.arc_result, "dmarc_fail_action": item.dmarc_fail_action}, separators=(",", ":"), sort_keys=True)))
     audit_provider(s, ctx, "inbound.received", item.disposition, resource_id=item.id)
     s.commit()
     return {"inbound_id": item.id, "duplicate": False, "disposition": item.disposition,
@@ -1294,14 +1322,17 @@ def operations_health(ctx=Depends(auth), s: Session = Depends(db)):
 
 
 @router.post("/operations/messages/{message_id}/retry")
-def operation_message_retry(message_id: str, ctx=Depends(auth), s: Session = Depends(db)):
+def operation_message_retry(message_id: str, provider_absence_confirmed: bool = False, ctx=Depends(auth), s: Session = Depends(db)):
     if ctx.get("role") != "platform_admin" or not ctx.get("service"):
         raise HTTPException(403, "operator_authorization_required")
     message = s.scalar(select(ProviderMessage).where(ProviderMessage.id == message_id,
         ProviderMessage.tenant_id == ctx["tenant"]))
     if not message:
         raise HTTPException(404, "message_not_found")
-    if message.status not in {"FAILED", "DEAD_LETTER", "DEFERRED"} or not message.sandbox:
+    from .provider_outcome import reconcile_before_retry
+    if message.status == "INDETERMINATE" and not reconcile_before_retry(state=message.status, provider_message_id=message.provider_message_id, provider_absence_confirmed=provider_absence_confirmed):
+        raise HTTPException(409, "provider_reconciliation_required")
+    if message.status not in {"FAILED", "DEAD_LETTER", "DEFERRED", "INDETERMINATE"} or not message.sandbox:
         raise HTTPException(409, "message_not_retryable")
     message.status = "QUEUED"
     message.available_at = now()

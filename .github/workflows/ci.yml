@@ -17,13 +17,13 @@ jobs:
       run:
         working-directory: apps/web
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.32.1
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "22"
           cache: pnpm
@@ -52,10 +52,10 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
@@ -88,11 +88,11 @@ jobs:
   secrets:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -103,13 +103,16 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Bind reproducible build epoch to source commit
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
 
       - name: Build backend candidate
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: apps/gateway/Dockerfile
@@ -119,8 +122,30 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
 
+      - name: Build migration candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/migrate.Dockerfile
+          load: true
+          tags: klyrow-migrate:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build Postal provisioner candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/postal-provisioner.Dockerfile
+          load: true
+          tags: klyrow-postal-provisioner:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
       - name: Build frontend candidate
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: apps/web/Dockerfile
@@ -201,19 +226,43 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
 
+      - name: Scan migration candidate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: klyrow-migrate:${{ github.sha }}
+          format: sarif
+          output: trivy-migrate.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Scan Postal provisioner candidate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: klyrow-postal-provisioner:${{ github.sha }}
+          format: sarif
+          output: trivy-postal-provisioner.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: "1"
+          ignore-unfixed: true
+
       - name: Retain Trivy scan evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: trivy-${{ github.sha }}
           path: |
             trivy-gateway.sarif
             trivy-web.sarif
+            trivy-migrate.sarif
+            trivy-postal-provisioner.sarif
           if-no-files-found: error
           retention-days: 30
 
       - name: Generate backend CycloneDX SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           image: klyrow-gateway:${{ github.sha }}
           format: cyclonedx-json
@@ -221,15 +270,58 @@ jobs:
           upload-artifact: true
 
       - name: Generate frontend CycloneDX SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           image: klyrow-web:${{ github.sha }}
           format: cyclonedx-json
           output-file: klyrow-web-${{ github.sha }}.cdx.json
           upload-artifact: true
 
+      - name: Generate migration CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: klyrow-migrate:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: klyrow-migrate-${{ github.sha }}.cdx.json
+          upload-artifact: true
+
+      - name: Generate Postal provisioner CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: klyrow-postal-provisioner:${{ github.sha }}
+          format: cyclonedx-json
+          output-file: klyrow-postal-provisioner-${{ github.sha }}.cdx.json
+          upload-artifact: true
+
+      - name: Verify reproducible OCI image bytes
+        run: |
+          set -euo pipefail
+          declare -A dockerfiles=(
+            [gateway]="apps/gateway/Dockerfile"
+            [web]="apps/web/Dockerfile"
+            [migrate]="docker/migrate.Dockerfile"
+            [postal-provisioner]="docker/postal-provisioner.Dockerfile"
+          )
+          for image in gateway web migrate postal-provisioner; do
+            dockerfile="${dockerfiles[$image]}"
+            for copy in a b; do
+              docker buildx build \
+                --no-cache \
+                --provenance=false \
+                --sbom=false \
+                --build-arg "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" \
+                --output "type=oci,dest=${RUNNER_TEMP}/klyrow-${image}-${copy}.tar,rewrite-timestamp=true" \
+                --file "${dockerfile}" \
+                .
+            done
+            cmp \
+              "${RUNNER_TEMP}/klyrow-${image}-a.tar" \
+              "${RUNNER_TEMP}/klyrow-${image}-b.tar"
+            sha256sum "${RUNNER_TEMP}/klyrow-${image}-a.tar"
+          done
+
   publish:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: [image]
     runs-on: ubuntu-latest
     permissions:
@@ -238,23 +330,30 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Bind reproducible build epoch to source commit
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
 
       - id: push_gateway
         name: Publish backend image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        env:
+          SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
         with:
           context: .
           file: apps/gateway/Dockerfile
-          push: true
+          outputs: type=registry,rewrite-timestamp=true
           tags: ghcr.io/${{ github.repository_owner }}/klyrow-gateway:${{ github.sha }}
           provenance: mode=max
           sbom: true
@@ -264,11 +363,13 @@ jobs:
 
       - id: push_web
         name: Publish frontend image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        env:
+          SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
         with:
           context: .
           file: apps/web/Dockerfile
-          push: true
+          outputs: type=registry,rewrite-timestamp=true
           tags: ghcr.io/${{ github.repository_owner }}/klyrow-web:${{ github.sha }}
           provenance: mode=max
           sbom: true
@@ -276,16 +377,62 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
 
+      - id: push_migrate
+        name: Publish migration image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        env:
+          SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
+        with:
+          context: .
+          file: docker/migrate.Dockerfile
+          outputs: type=registry,rewrite-timestamp=true
+          tags: ghcr.io/${{ github.repository_owner }}/klyrow-migrate:${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - id: push_postal_provisioner
+        name: Publish Postal provisioner image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        env:
+          SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
+        with:
+          context: .
+          file: docker/postal-provisioner.Dockerfile
+          outputs: type=registry,rewrite-timestamp=true
+          tags: ghcr.io/${{ github.repository_owner }}/klyrow-postal-provisioner:${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
       - name: Attest backend digest
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/klyrow-gateway
           subject-digest: ${{ steps.push_gateway.outputs.digest }}
           push-to-registry: true
 
       - name: Attest frontend digest
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/klyrow-web
           subject-digest: ${{ steps.push_web.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest migration digest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/klyrow-migrate
+          subject-digest: ${{ steps.push_migrate.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest Postal provisioner digest
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/klyrow-postal-provisioner
+          subject-digest: ${{ steps.push_postal_provisioner.outputs.digest }}
           push-to-registry: true

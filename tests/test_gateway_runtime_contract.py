@@ -15,7 +15,8 @@ def _env_value(name: str) -> str:
 
 def test_base_gateway_image_bundles_reviewed_vue_application():
     dockerfile = (ROOT / "apps/gateway/Dockerfile").read_text(encoding="utf-8")
-    assert "FROM node:22-bookworm-slim AS web-build" in dockerfile
+    assert "FROM node:22-bookworm-slim@sha256:" in dockerfile
+    assert " AS web-build" in dockerfile.splitlines()[0]
     assert "RUN pnpm build" in dockerfile
     assert "COPY --from=web-build /build/dist ./app/auth_web" in dockerfile
     assert '"app.platform:app"' in dockerfile

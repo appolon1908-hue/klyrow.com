@@ -22,8 +22,10 @@ from .main import (
     canary_configuration,
     canary_gate_key,
     canary_payload_allowed,
+    set_core_message_status,
 )
 from .postal_provisioning import now, tenant_postal_api_key
+from .provider_outcome import INDETERMINATE, provider_outcome_is_ambiguous, reconcile_before_retry
 
 
 def attributed_postal_payload(serialized_payload: str, message_id: str) -> dict:
@@ -54,6 +56,19 @@ async def tenant_email_outbox_loop() -> None:
             with DB() as session:
                 stale = now() - timedelta(minutes=5)
                 current = now()
+                abandoned = session.scalar(
+                    select(EmailOutbox).where(EmailOutbox.state == "sending", EmailOutbox.updated_at < stale).order_by(EmailOutbox.updated_at).with_for_update(skip_locked=True)
+                )
+                if abandoned and not reconcile_before_retry(state=INDETERMINATE, provider_message_id=abandoned.provider_message_id, provider_absence_confirmed=False):
+                    abandoned.state = INDETERMINATE
+                    abandoned.last_error = "abandoned_submission_requires_reconciliation"
+                    abandoned.next_attempt_at = None
+                    abandoned.updated_at = current
+                    message = session.get(Message, abandoned.message_id)
+                    if message:
+                        set_core_message_status(message, "indeterminate")
+                    session.commit()
+                    continue
                 item = session.scalar(
                     select(EmailOutbox)
                     .where(
@@ -64,12 +79,10 @@ async def tenant_email_outbox_loop() -> None:
                                 EmailOutbox.next_attempt_at.is_(None),
                                 EmailOutbox.next_attempt_at <= current,
                             ),
-                            (EmailOutbox.state == "sending")
-                            & (EmailOutbox.updated_at < stale),
                         ),
                         EmailOutbox.attempts < 5,
                     )
-                    .order_by(EmailOutbox.created_at)
+                    .order_by(EmailOutbox.priority, EmailOutbox.created_at)
                     .with_for_update(skip_locked=True)
                 )
                 if not item:
@@ -131,7 +144,7 @@ async def tenant_email_outbox_loop() -> None:
                     item.updated_at = current
                     message = session.get(Message, item.message_id)
                     if message:
-                        message.status = "quarantined"
+                        set_core_message_status(message, "suppressed")
                     session.commit()
                     continue
                 if first_attempt and gate:
@@ -143,6 +156,9 @@ async def tenant_email_outbox_loop() -> None:
                 item.attempts += 1
                 item.next_attempt_at = None
                 item.updated_at = current
+                message = session.get(Message, item.message_id)
+                if message:
+                    set_core_message_status(message, "submitted")
                 snapshot = (
                     item.id,
                     item.message_id,
@@ -176,46 +192,46 @@ async def tenant_email_outbox_loop() -> None:
             with DB() as session:
                 item = session.get(EmailOutbox, snapshot[0])
                 message = session.get(Message, snapshot[1])
+                if item and item.state == "cancelled":
+                    session.commit()
+                    continue
                 if item:
                     item.state = "delivered"
                     item.provider_message_id = provider_id
                     item.last_error = None
                     item.updated_at = now()
                 if message:
-                    message.status = "accepted"
+                    set_core_message_status(message, "provider_accepted")
                 session.commit()
         except Exception as exc:
             with DB() as session:
                 if snapshot is not None:
                     item = session.get(EmailOutbox, snapshot[0])
                     if item:
-                        failed = item.attempts >= 5
-                        item.state = "failed" if failed else "retry"
-                        item.last_error = type(exc).__name__
-                        item.updated_at = now()
-                        item.next_attempt_at = (
-                            None
-                            if failed
-                            else item.updated_at
-                            + timedelta(
-                                seconds=min(300, 2 ** max(item.attempts, 1))
-                            )
-                        )
-                        if failed:
-                            message = session.get(Message, item.message_id)
+                        message = session.get(Message, item.message_id)
+                        if provider_outcome_is_ambiguous(exc) and not reconcile_before_retry(state=INDETERMINATE, provider_message_id=item.provider_message_id, provider_absence_confirmed=False):
+                            item.state = INDETERMINATE
+                            item.last_error = type(exc).__name__
+                            item.updated_at = now()
+                            item.next_attempt_at = None
                             if message:
-                                message.status = "failed"
-                            session.add(
-                                Event(
-                                    id=str(uuid.uuid4()),
-                                    tenant_id=item.tenant_id,
-                                    message_id=item.message_id,
-                                    kind="klyrow.email.failed",
-                                    payload=json.dumps(
-                                        {"reason": "provider_retry_exhausted"}
-                                    ),
+                                set_core_message_status(message, "indeterminate")
+                        else:
+                            failed = item.attempts >= 5
+                            item.state = "failed" if failed else "retry"
+                            item.last_error = type(exc).__name__
+                            item.updated_at = now()
+                            item.next_attempt_at = None if failed else item.updated_at + timedelta(seconds=min(300, 2 ** max(item.attempts, 1)))
+                            if message:
+                                set_core_message_status(message, "failed" if failed else "deferred")
+                            if failed:
+                                session.add(
+                                    Event(
+                                        id=str(uuid.uuid4()), tenant_id=item.tenant_id,
+                                        message_id=item.message_id, kind="klyrow.email.failed",
+                                        payload=json.dumps({"reason": "provider_retry_exhausted"}),
+                                    )
                                 )
-                            )
                         session.commit()
             print(
                 json.dumps(

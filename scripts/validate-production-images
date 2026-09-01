@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+[[ "$#" -gt 0 ]] || {
+  echo "Usage: scripts/validate-production-images docker compose [compose options]" >&2
+  exit 2
+}
+
+rendered="$("$@" config --format json)"
+python3 -c '
+import json
+import re
+import sys
+
+document = json.load(sys.stdin)
+services = document.get("services", {})
+digest_reference = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
+
+if not services:
+    raise SystemExit("production Compose has no services")
+
+for name, service in sorted(services.items()):
+    if "build" in service:
+        raise SystemExit(f"{name}: local build input is forbidden in production")
+    image = service.get("image", "")
+    if not digest_reference.fullmatch(image):
+        raise SystemExit(f"{name}: image must be an immutable sha256 digest reference")
+
+expected_repositories = {
+    "gateway": "ghcr.io/appolon1908-hue/klyrow-gateway",
+    "gateway-migrate": "ghcr.io/appolon1908-hue/klyrow-migrate",
+    "web": "ghcr.io/appolon1908-hue/klyrow-web",
+    "postal-provisioner": "ghcr.io/appolon1908-hue/klyrow-postal-provisioner",
+}
+for service_name, repository in expected_repositories.items():
+    image = services.get(service_name, {}).get("image", "")
+    if not image.startswith(repository + "@sha256:"):
+        raise SystemExit(f"{service_name}: image is not bound to {repository}")
+
+gateway_image = services["gateway"]["image"]
+for service_name in (
+    "worker",
+    "scheduler",
+    "billing-api",
+    "billing-worker",
+    "smtp-relay",
+    "provisioning-worker",
+):
+    if services.get(service_name, {}).get("image") != gateway_image:
+        raise SystemExit(f"{service_name}: must use the exact gateway digest")
+
+print(f"Validated {len(services)} digest-pinned production service images.")
+' <<<"$rendered"
+unset rendered

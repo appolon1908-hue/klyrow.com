@@ -12,6 +12,11 @@ def test_runtime_secret_bootstrap_never_prints_credentials():
     assert "KLYROW_SESSION_SECRET_FILE=$runtime_secret_dir/session-secret" in script
     assert "KLYROW_POSTAL_API_KEY_FILE=$runtime_secret_dir/postal-api-key" in script
     assert "KLYROW_METRICS_TOKEN_FILE=$runtime_secret_dir/metrics-token" in script
+    assert "KLYROW_MIDDLEWARE_API_KEY_FILE=$runtime_secret_dir/middleware-api-key" in script
+    assert "KLYROW_WEBHOOK_SECRET_FILE=$runtime_secret_dir/webhook-secret" in script
+    assert "KLYROW_PROVIDER_CREDENTIAL_KEY_FILE=$runtime_secret_dir/provider-credential-key" in script
+    assert "KLYROW_POSTAL_PROVISIONER_TOKEN_FILE=$runtime_secret_dir/postal-provisioner-token" in script
+    assert "KLYROW_SECURITY_PAYLOAD_KEY_FILE=$runtime_secret_dir/security-payload-key" in script
     assert "Initial admin password:" not in script
     assert "chown root:root .env" in script
 
@@ -20,8 +25,9 @@ def test_schema_migration_is_a_required_gateway_dependency():
     compose = (ROOT / "docker-compose.yml").read_text()
     runner = (ROOT / "scripts/migrate").read_text()
     assert "gateway-migrate: {condition: service_completed_successfully}" in compose
-    assert "2026082202_production_canary_claim_ledger.sql" in compose
-    assert "docker/migrate.Dockerfile" in compose
+    assert "2026090101_mail_contract_and_command_plane.sql" in compose
+    assert "KLYROW_MIGRATE_IMAGE" in compose
+    assert "docker/migrate.Dockerfile" not in compose
     assert "pg_advisory_xact_lock" in runner
     assert "applied migration checksum mismatch" in runner
     canary = (ROOT / "migrations/2026082202_production_canary_claim_ledger.sql").read_text()
@@ -53,13 +59,41 @@ def test_upgrade_migrates_legacy_environment_secrets_before_compose():
     assert 'removed = set(specs)' in migration
 
 
-def test_standard_launchers_include_and_build_the_browser_web_service():
+def test_standard_launchers_use_the_complete_digest_pinned_release():
     for relative_path in ("scripts/start", "scripts/deploy", "scripts/update"):
         source = (ROOT / relative_path).read_text()
         assert "-f docker-compose.web.yml" in source
-    for relative_path in ("scripts/deploy", "scripts/update"):
-        source = (ROOT / relative_path).read_text()
-        assert '"${COMPOSE[@]}" build gateway web' in source
+        assert "-f docker-compose.postal-provisioning.yml" in source
+        assert "scripts/validate-production-images" in source
+        assert " build " not in source
+        assert "--build" not in source
+        assert "scripts/migrate\n" not in source
+
+
+def test_production_compose_forbids_local_builds_and_requires_release_images():
+    base = (ROOT / "docker-compose.yml").read_text()
+    web = (ROOT / "docker-compose.web.yml").read_text()
+    provisioning = (ROOT / "docker-compose.postal-provisioning.yml").read_text()
+    combined = base + web + provisioning
+    assert "build:" not in combined
+    for variable in (
+        "KLYROW_GATEWAY_IMAGE",
+        "KLYROW_WEB_IMAGE",
+        "KLYROW_MIGRATE_IMAGE",
+        "KLYROW_POSTAL_PROVISIONER_IMAGE",
+    ):
+        assert variable in combined
+    assert "./migrations:/migrations:ro" not in base
+
+
+def test_production_image_validator_requires_digests_and_canonical_repositories():
+    source = (ROOT / "scripts/validate-production-images").read_text()
+    assert 'if "build" in service' in source
+    assert "@sha256:[0-9a-f]{64}" in source
+    assert "ghcr.io/appolon1908-hue/klyrow-gateway" in source
+    assert "ghcr.io/appolon1908-hue/klyrow-migrate" in source
+    assert "ghcr.io/appolon1908-hue/klyrow-web" in source
+    assert "ghcr.io/appolon1908-hue/klyrow-postal-provisioner" in source
 
 
 def test_outbox_recovers_abandoned_sending_leases():
@@ -76,7 +110,7 @@ def test_outbox_retries_back_off_and_terminal_failure_updates_message():
     assert "failed=item.attempts>=5" in source
     assert "if first_attempt:" in source
     assert "min(300,2**max(item.attempts,1))" in source
-    assert 'message.status="failed"' in source
+    assert 'set_core_message_status(message,"failed")' in source
     assert 'kind="klyrow.email.failed"' in source
     assert "next_attempt_at timestamptz" in migration
 

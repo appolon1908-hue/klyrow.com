@@ -92,6 +92,7 @@
     ],
     "publishedEvents": [
       "klyrow.email.queued",
+      "klyrow.email.submitted",
       "klyrow.email.sent",
       "klyrow.email.delivered",
       "klyrow.email.deferred",
@@ -100,7 +101,8 @@
       "klyrow.email.opened",
       "klyrow.email.clicked",
       "klyrow.email.unsubscribed",
-      "klyrow.email.inbound_received"
+      "klyrow.email.inbound_received",
+      "klyrow.usage.recorded"
     ],
     "indeterminateRequiresReconciliation": true
   },
