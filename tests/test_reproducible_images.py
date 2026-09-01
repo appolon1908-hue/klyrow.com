@@ -44,6 +44,13 @@ def test_web_runtime_does_not_retain_nondeterministic_package_log():
     assert "rm -f /var/log/apk.log" in dockerfile
 
 
+def test_vendored_web_apk_is_bound_to_matching_runtime_architecture():
+    dockerfile = (ROOT / "apps/web/Dockerfile").read_text(encoding="utf-8")
+    assert "ARG TARGETARCH" in dockerfile
+    assert 'RUN test "$TARGETARCH" = amd64' in dockerfile
+    assert "deliberately amd64-only" in dockerfile
+
+
 def test_every_container_build_stage_pins_its_base_manifest_digest():
     for relative_path in (
         "apps/gateway/Dockerfile",
@@ -56,7 +63,7 @@ def test_every_container_build_stage_pins_its_base_manifest_digest():
         dockerfile = (ROOT / relative_path).read_text(encoding="utf-8")
         from_lines = [line for line in dockerfile.splitlines() if line.startswith("FROM ")]
         assert from_lines
-        assert all("@sha256:" in line for line in from_lines)
+        assert all("@sha256:" in line or line.startswith("FROM scratch") for line in from_lines)
         assert "apk upgrade" not in dockerfile
 
 
@@ -101,7 +108,8 @@ def test_mautic_runtime_is_patched_from_immutable_inputs():
     )
     assert dockerfile.startswith(
         "FROM mirror.gcr.io/mautic/mautic@sha256:"
-        "373a3de08dfce296e31fe0b7caf269594c43020454628f445c169990b9af4d5e\n"
+        "373a3de08dfce296e31fe0b7caf269594c43020454628f445c169990b9af4d5e "
+        "AS patched\n"
     )
     assert "docker/postal-security/debian.sources.list" in dockerfile
     assert "patch --batch --forward --fuzz=0 -p0" in dockerfile
@@ -149,6 +157,39 @@ def test_database_runtimes_replace_gosu_with_a_patched_reproducible_build():
     assert "separate reviewed host change" in documentation
     assert "restore-test encrypted" in documentation
     assert "never authorizes an unreviewed" in documentation
+
+
+def test_mautic_runtime_removes_generated_twig_cache_after_console_validation():
+    dockerfile = (ROOT / "docker/mautic.Dockerfile").read_text(encoding="utf-8")
+    console = dockerfile.index("php bin/console --version")
+    purge = dockerfile.index("find /var/www/html/var/tmp -mindepth 1 -delete")
+    empty = dockerfile.index(
+        'test -z "$(find /var/www/html/var/tmp -mindepth 1 -print -quit)"'
+    )
+    assert console < purge < empty
+    assert "FROM scratch AS runtime" in dockerfile
+    assert "COPY --from=patched / /" in dockerfile
+    assert "recoverable from image history" in dockerfile
+    assert 'ENTRYPOINT ["/entrypoint.sh"]' in dockerfile
+    assert "STOPSIGNAL SIGWINCH" in dockerfile
+    assert "PHP_VERSION=8.3.32" in dockerfile
+    assert "APACHE_DOCUMENT_ROOT=/var/www/html/docroot" in dockerfile
+
+
+def test_all_image_gates_scan_vulnerabilities_and_embedded_secrets():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    trivy_actions = workflow.count("uses: aquasecurity/trivy-action@")
+    explicit_scanners = workflow.count("scanners: vuln,secret")
+    assert trivy_actions >= 10
+    assert explicit_scanners == trivy_actions
+
+
+def test_gitleaks_ignore_is_one_exact_historical_public_key_fingerprint():
+    ignored = (ROOT / ".gitleaksignore").read_text(encoding="utf-8").splitlines()
+    assert ignored == [
+        "ca9fd1a23b32e745b42fb0fcce2945e8d6e9f0e3:"
+        "docker/mautic.Dockerfile:generic-api-key:61"
+    ]
 
 
 def test_ci_compares_two_timestamp_rewritten_oci_exports_before_publish():

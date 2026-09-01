@@ -303,6 +303,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: klyrow-gateway:${{ env.KLYROW_SOURCE_SHA }}
+          scanners: vuln,secret
           format: sarif
           output: trivy-gateway.sarif
           severity: CRITICAL,HIGH
@@ -314,6 +315,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: klyrow-web:${{ env.KLYROW_SOURCE_SHA }}
+          scanners: vuln,secret
           format: sarif
           output: trivy-web.sarif
           severity: CRITICAL,HIGH
@@ -325,6 +327,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: klyrow-migrate:${{ env.KLYROW_SOURCE_SHA }}
+          scanners: vuln,secret
           format: sarif
           output: trivy-migrate.sarif
           severity: CRITICAL,HIGH
@@ -336,6 +339,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: klyrow-postal-provisioner:${{ env.KLYROW_SOURCE_SHA }}
+          scanners: vuln,secret
           format: sarif
           output: trivy-postal-provisioner.sarif
           severity: CRITICAL,HIGH
@@ -347,6 +351,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: klyrow-mautic:${{ env.KLYROW_SOURCE_SHA }}
+          scanners: vuln,secret
           format: sarif
           output: trivy-mautic.sarif
           severity: CRITICAL,HIGH
@@ -358,6 +363,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: klyrow-postgres:${{ env.KLYROW_SOURCE_SHA }}
+          scanners: vuln,secret
           format: sarif
           output: trivy-postgres.sarif
           severity: CRITICAL,HIGH
@@ -369,6 +375,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: klyrow-mariadb:${{ env.KLYROW_SOURCE_SHA }}
+          scanners: vuln,secret
           format: sarif
           output: trivy-mariadb.sarif
           severity: CRITICAL,HIGH
@@ -648,6 +655,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/${{ github.repository_owner }}/klyrow-gateway@${{ steps.push_gateway.outputs.digest }}
+          scanners: vuln,secret
           format: json
           output: publish-trivy-gateway.json
           severity: CRITICAL,HIGH
@@ -658,6 +666,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/${{ github.repository_owner }}/klyrow-web@${{ steps.push_web.outputs.digest }}
+          scanners: vuln,secret
           format: json
           output: publish-trivy-web.json
           severity: CRITICAL,HIGH
@@ -668,6 +677,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/${{ github.repository_owner }}/klyrow-migrate@${{ steps.push_migrate.outputs.digest }}
+          scanners: vuln,secret
           format: json
           output: publish-trivy-migrate.json
           severity: CRITICAL,HIGH
@@ -678,6 +688,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/${{ github.repository_owner }}/klyrow-postal-provisioner@${{ steps.push_postal_provisioner.outputs.digest }}
+          scanners: vuln,secret
           format: json
           output: publish-trivy-postal-provisioner.json
           severity: CRITICAL,HIGH
@@ -688,6 +699,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/${{ github.repository_owner }}/klyrow-mautic@${{ steps.push_mautic.outputs.digest }}
+          scanners: vuln,secret
           format: json
           output: publish-trivy-mautic.json
           severity: CRITICAL,HIGH
@@ -698,6 +710,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/${{ github.repository_owner }}/klyrow-postgres@${{ steps.push_postgres.outputs.digest }}
+          scanners: vuln,secret
           format: json
           output: publish-trivy-postgres.json
           severity: CRITICAL,HIGH
@@ -708,6 +721,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ghcr.io/${{ github.repository_owner }}/klyrow-mariadb@${{ steps.push_mariadb.outputs.digest }}
+          scanners: vuln,secret
           format: json
           output: publish-trivy-mariadb.json
           severity: CRITICAL,HIGH
