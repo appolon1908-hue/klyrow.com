@@ -28,6 +28,8 @@ def test_python_dependency_closure_is_exactly_pinned():
 def test_web_runtime_does_not_retain_nondeterministic_package_log():
     dockerfile = (ROOT / "apps/web/Dockerfile").read_text(encoding="utf-8")
     assert "apk upgrade" not in dockerfile
+    assert "libexpat=2.8.4-r0" in dockerfile
+    assert "rm -f /var/log/apk.log" in dockerfile
 
 
 def test_every_container_build_stage_pins_its_base_manifest_digest():
