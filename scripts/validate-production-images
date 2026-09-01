@@ -32,6 +32,9 @@ expected_repositories = {
     "web": "ghcr.io/appolon1908-hue/klyrow-web",
     "postal-provisioner": "ghcr.io/appolon1908-hue/klyrow-postal-provisioner",
     "mautic": "ghcr.io/appolon1908-hue/klyrow-mautic",
+    "postgres": "ghcr.io/appolon1908-hue/klyrow-postgres",
+    "mautic-db": "ghcr.io/appolon1908-hue/klyrow-mariadb",
+    "postal-db": "ghcr.io/appolon1908-hue/klyrow-mariadb",
 }
 for service_name, repository in expected_repositories.items():
     image = services.get(service_name, {}).get("image", "")
@@ -54,6 +57,10 @@ mautic_image = services["mautic"]["image"]
 for service_name in ("mautic-cron", "mautic-worker"):
     if services.get(service_name, {}).get("image") != mautic_image:
         raise SystemExit(f"{service_name}: must use the exact Mautic digest")
+
+mariadb_image = services["mautic-db"]["image"]
+if services["postal-db"]["image"] != mariadb_image:
+    raise SystemExit("postal-db: must use the exact MariaDB digest")
 
 print(f"Validated {len(services)} digest-pinned production service images.")
 ' <<<"$rendered"

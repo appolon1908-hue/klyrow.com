@@ -37,6 +37,7 @@ def test_every_container_build_stage_pins_its_base_manifest_digest():
         "docker/migrate.Dockerfile",
         "docker/postal-provisioner.Dockerfile",
         "docker/mautic.Dockerfile",
+        "docker/database-runtime.Dockerfile",
     ):
         dockerfile = (ROOT / relative_path).read_text(encoding="utf-8")
         from_lines = [line for line in dockerfile.splitlines() if line.startswith("FROM ")]
@@ -105,19 +106,54 @@ def test_mautic_runtime_is_patched_from_immutable_inputs():
     assert '+            "version": "2.1.70"' in patch
 
 
+def test_database_runtimes_replace_gosu_with_a_patched_reproducible_build():
+    dockerfile = (ROOT / "docker/database-runtime.Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    assert dockerfile.count("FROM ") == 3
+    assert "golang@sha256:e401dae1" in dockerfile
+    assert "postgres@sha256:051f7b7b" in dockerfile
+    assert "mariadb@sha256:611a2fcc" in dockerfile
+    assert "--checksum=sha256:cd9719b775db" in dockerfile
+    assert "gosu/archive/refs/tags/1.19.tar.gz" in dockerfile
+    assert "CGO_ENABLED=0 go build" in dockerfile
+    assert "-trimpath" in dockerfile
+    assert "-buildvcs=false" in dockerfile
+    assert "-ldflags='-d -w -buildid='" in dockerfile
+    assert "-buildid=" in dockerfile
+    assert "go1.25.13" in dockerfile
+    assert dockerfile.count("COPY --from=gosu-builder /out/gosu") == 2
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert (
+        "image: mirror.gcr.io/library/postgres@sha256:"
+        "051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0"
+        in workflow
+    )
+    documentation = (ROOT / "docs/DATABASE_HARDENED_RUNTIME.md").read_text(
+        encoding="utf-8"
+    )
+    assert "separate reviewed host change" in documentation
+    assert "restore-test encrypted" in documentation
+    assert "never authorizes an unreviewed" in documentation
+
+
 def test_ci_compares_two_timestamp_rewritten_oci_exports_before_publish():
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" in workflow
     assert "Verify reproducible OCI image bytes" in workflow
     assert "for copy in a b" in workflow
-    assert "for image in gateway web migrate postal-provisioner mautic" in workflow
+    assert "for image in gateway web migrate postal-provisioner mautic postgres mariadb" in workflow
     assert '[migrate]="docker/migrate.Dockerfile"' in workflow
     assert '[postal-provisioner]="docker/postal-provisioner.Dockerfile"' in workflow
     assert '[mautic]="docker/mautic.Dockerfile"' in workflow
+    assert '[postgres]="docker/database-runtime.Dockerfile"' in workflow
+    assert '[mariadb]="docker/database-runtime.Dockerfile"' in workflow
+    assert '[postgres]="postgres"' in workflow
+    assert '[mariadb]="mariadb"' in workflow
     assert "--no-cache" in workflow
     assert "type=oci,dest=${RUNNER_TEMP}/klyrow-${image}-${copy}.tar,rewrite-timestamp=true" in workflow
     assert "cmp \\\n" in workflow
-    assert workflow.count("outputs: type=registry,rewrite-timestamp=true") == 5
+    assert workflow.count("outputs: type=registry,rewrite-timestamp=true") == 7
 
 
 def test_protected_publication_covers_every_production_owned_image():
@@ -126,14 +162,22 @@ def test_protected_publication_covers_every_production_owned_image():
     assert "github.ref_protected == true" in workflow
     assert 'test "$GITHUB_REF_PROTECTED" = \'true\'' in workflow
     assert 'test "$(git rev-parse HEAD)" = "$KLYROW_SOURCE_SHA"' in workflow
-    for image in ("gateway", "web", "migrate", "postal-provisioner", "mautic"):
+    for image in (
+        "gateway",
+        "web",
+        "migrate",
+        "postal-provisioner",
+        "mautic",
+        "postgres",
+        "mariadb",
+    ):
         assert f"klyrow-{image}:candidate-${{{{ github.run_id }}}}" in workflow
         assert f"klyrow-{image}" in workflow
     assert "Sign and attest only unpublished exact digests" in workflow
     assert "Verify signatures, provenance, and SBOM attestations" in workflow
     assert "Promote only fully certified digests to immutable source tags" in workflow
-    assert workflow.count("provenance: false") == 5
-    assert workflow.count("sbom: false") == 5
+    assert workflow.count("provenance: false") == 7
+    assert workflow.count("sbom: false") == 7
     assert workflow.count("cosign attest --yes --type slsaprovenance1") == 1
     assert workflow.count("cosign attest --yes --type spdxjson") == 1
 
@@ -148,8 +192,8 @@ def test_protected_publisher_scans_and_verifies_exact_digests_before_promotion()
     verify = workflow.index("Verify signatures, provenance, and SBOM attestations", publish)
     promote = workflow.index("Promote only fully certified digests to immutable source tags", publish)
     assert candidate < scan < collision < sign < verify < promote
-    assert workflow.count("format: json") >= 5
-    assert workflow.count("publish-trivy-") >= 5
+    assert workflow.count("format: json") >= 7
+    assert workflow.count("publish-trivy-") >= 7
     assert 'test "$existing" = "$digest"' in workflow
     assert "imagetools create --prefer-index=false" in workflow
     assert "cosign verify --certificate-identity" in workflow

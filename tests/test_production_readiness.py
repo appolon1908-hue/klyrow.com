@@ -95,7 +95,10 @@ def test_production_image_validator_requires_digests_and_canonical_repositories(
     assert "ghcr.io/appolon1908-hue/klyrow-web" in source
     assert "ghcr.io/appolon1908-hue/klyrow-postal-provisioner" in source
     assert "ghcr.io/appolon1908-hue/klyrow-mautic" in source
+    assert "ghcr.io/appolon1908-hue/klyrow-postgres" in source
+    assert "ghcr.io/appolon1908-hue/klyrow-mariadb" in source
     assert 'for service_name in ("mautic-cron", "mautic-worker")' in source
+    assert 'services["postal-db"]["image"] != mariadb_image' in source
 
 
 def test_mautic_persists_only_runtime_data_and_never_hides_patched_code():

@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:17.6-bookworm
+        image: mirror.gcr.io/library/postgres@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0
         env:
           POSTGRES_DB: klyrow_ci
           POSTGRES_USER: klyrow
@@ -161,6 +161,71 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
+
+      - name: Build PostgreSQL candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/database-runtime.Dockerfile
+          target: postgres
+          load: true
+          tags: klyrow-postgres:${{ env.KLYROW_SOURCE_SHA }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
+
+      - name: Build MariaDB candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/database-runtime.Dockerfile
+          target: mariadb
+          load: true
+          tags: klyrow-mariadb:${{ env.KLYROW_SOURCE_SHA }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
+
+      - name: Verify hardened database runtimes
+        run: |
+          set -Eeuo pipefail
+          cleanup() {
+            docker rm -f klyrow-postgres-ci klyrow-mariadb-ci >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run --rm -d --name klyrow-postgres-ci \
+            --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid,size=512m \
+            --env POSTGRES_PASSWORD=ci-only-password \
+            --env POSTGRES_DB=klyrow_ci \
+            --env POSTGRES_USER=klyrow \
+            "klyrow-postgres:${KLYROW_SOURCE_SHA}"
+          docker run --rm -d --name klyrow-mariadb-ci \
+            --tmpfs /var/lib/mysql:rw,noexec,nosuid,size=768m \
+            --env MARIADB_ROOT_PASSWORD=ci-only-root-password \
+            --env MARIADB_DATABASE=klyrow_ci \
+            --env MARIADB_USER=klyrow \
+            --env MARIADB_PASSWORD=ci-only-password \
+            "klyrow-mariadb:${KLYROW_SOURCE_SHA}"
+          postgres_ready=false
+          mariadb_ready=false
+          for attempt in $(seq 1 90); do
+            if docker exec klyrow-postgres-ci \
+              pg_isready -U klyrow -d klyrow_ci >/dev/null 2>&1; then
+              postgres_ready=true
+            fi
+            if docker exec klyrow-mariadb-ci \
+              healthcheck.sh --connect --innodb_initialized >/dev/null 2>&1; then
+              mariadb_ready=true
+            fi
+            if [[ "$postgres_ready" == true && "$mariadb_ready" == true ]]; then
+              break
+            fi
+            sleep 1
+          done
+          test "$postgres_ready" = true
+          test "$mariadb_ready" = true
+          docker exec klyrow-postgres-ci gosu --version | grep -F 'go1.25.13'
+          docker exec klyrow-mariadb-ci gosu --version | grep -F 'go1.25.13'
 
       - name: Verify hardened Mautic runtime
         run: |
@@ -289,6 +354,28 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
 
+      - name: Scan PostgreSQL candidate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: klyrow-postgres:${{ env.KLYROW_SOURCE_SHA }}
+          format: sarif
+          output: trivy-postgres.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Scan MariaDB candidate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: klyrow-mariadb:${{ env.KLYROW_SOURCE_SHA }}
+          format: sarif
+          output: trivy-mariadb.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: "1"
+          ignore-unfixed: true
+
       - name: Retain Trivy scan evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -300,6 +387,8 @@ jobs:
             trivy-migrate.sarif
             trivy-postal-provisioner.sarif
             trivy-mautic.sarif
+            trivy-postgres.sarif
+            trivy-mariadb.sarif
           if-no-files-found: error
           retention-days: 30
 
@@ -343,6 +432,22 @@ jobs:
           output-file: klyrow-mautic-${{ env.KLYROW_SOURCE_SHA }}.cdx.json
           upload-artifact: true
 
+      - name: Generate PostgreSQL CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: klyrow-postgres:${{ env.KLYROW_SOURCE_SHA }}
+          format: cyclonedx-json
+          output-file: klyrow-postgres-${{ env.KLYROW_SOURCE_SHA }}.cdx.json
+          upload-artifact: true
+
+      - name: Generate MariaDB CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: klyrow-mariadb:${{ env.KLYROW_SOURCE_SHA }}
+          format: cyclonedx-json
+          output-file: klyrow-mariadb-${{ env.KLYROW_SOURCE_SHA }}.cdx.json
+          upload-artifact: true
+
       - name: Verify reproducible OCI image bytes
         run: |
           set -euo pipefail
@@ -352,9 +457,19 @@ jobs:
             [migrate]="docker/migrate.Dockerfile"
             [postal-provisioner]="docker/postal-provisioner.Dockerfile"
             [mautic]="docker/mautic.Dockerfile"
+            [postgres]="docker/database-runtime.Dockerfile"
+            [mariadb]="docker/database-runtime.Dockerfile"
           )
-          for image in gateway web migrate postal-provisioner mautic; do
+          declare -A targets=(
+            [postgres]="postgres"
+            [mariadb]="mariadb"
+          )
+          for image in gateway web migrate postal-provisioner mautic postgres mariadb; do
             dockerfile="${dockerfiles[$image]}"
+            target_args=()
+            if [[ -n "${targets[$image]:-}" ]]; then
+              target_args+=(--target "${targets[$image]}")
+            fi
             for copy in a b; do
               docker buildx build \
                 --no-cache \
@@ -363,6 +478,7 @@ jobs:
                 --build-arg "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" \
                 --output "type=oci,dest=${RUNNER_TEMP}/klyrow-${image}-${copy}.tar,rewrite-timestamp=true" \
                 --file "${dockerfile}" \
+                "${target_args[@]}" \
                 .
             done
             cmp \
@@ -477,6 +593,38 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
 
+      - id: push_postgres
+        name: Publish PostgreSQL candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/database-runtime.Dockerfile
+          target: postgres
+          outputs: type=registry,rewrite-timestamp=true
+          tags: ghcr.io/${{ github.repository_owner }}/klyrow-postgres:candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          build-args: SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
+
+      - id: push_mariadb
+        name: Publish MariaDB candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/database-runtime.Dockerfile
+          target: mariadb
+          outputs: type=registry,rewrite-timestamp=true
+          tags: ghcr.io/${{ github.repository_owner }}/klyrow-mariadb:candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          build-args: SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
+
       - name: Pull exact candidates for release evidence
         env:
           GATEWAY_DIGEST: ${{ steps.push_gateway.outputs.digest }}
@@ -484,6 +632,8 @@ jobs:
           MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
           POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
           MAUTIC_DIGEST: ${{ steps.push_mautic.outputs.digest }}
+          POSTGRES_DIGEST: ${{ steps.push_postgres.outputs.digest }}
+          MARIADB_DIGEST: ${{ steps.push_mariadb.outputs.digest }}
         run: |
           set -Eeuo pipefail
           docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-gateway@${GATEWAY_DIGEST}"
@@ -491,6 +641,8 @@ jobs:
           docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-migrate@${MIGRATE_DIGEST}"
           docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-postal-provisioner@${POSTAL_PROVISIONER_DIGEST}"
           docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-mautic@${MAUTIC_DIGEST}"
+          docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-postgres@${POSTGRES_DIGEST}"
+          docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-mariadb@${MARIADB_DIGEST}"
 
       - name: Scan exact backend digest
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -542,6 +694,26 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
 
+      - name: Scan exact PostgreSQL digest
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/klyrow-postgres@${{ steps.push_postgres.outputs.digest }}
+          format: json
+          output: publish-trivy-postgres.json
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Scan exact MariaDB digest
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/klyrow-mariadb@${{ steps.push_mariadb.outputs.digest }}
+          format: json
+          output: publish-trivy-mariadb.json
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
       - name: Generate exact backend SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
@@ -582,6 +754,22 @@ jobs:
           output-file: publish-sbom-mautic.spdx.json
           upload-artifact: false
 
+      - name: Generate exact PostgreSQL SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/klyrow-postgres@${{ steps.push_postgres.outputs.digest }}
+          format: spdx-json
+          output-file: publish-sbom-postgres.spdx.json
+          upload-artifact: false
+
+      - name: Generate exact MariaDB SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/klyrow-mariadb@${{ steps.push_mariadb.outputs.digest }}
+          format: spdx-json
+          output-file: publish-sbom-mariadb.spdx.json
+          upload-artifact: false
+
       - name: Bind vulnerability, provenance, and SBOM evidence
         env:
           GATEWAY_DIGEST: ${{ steps.push_gateway.outputs.digest }}
@@ -589,9 +777,11 @@ jobs:
           MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
           POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
           MAUTIC_DIGEST: ${{ steps.push_mautic.outputs.digest }}
+          POSTGRES_DIGEST: ${{ steps.push_postgres.outputs.digest }}
+          MARIADB_DIGEST: ${{ steps.push_mariadb.outputs.digest }}
         run: |
           set -Eeuo pipefail
-          for image in gateway web migrate postal-provisioner mautic; do
+          for image in gateway web migrate postal-provisioner mautic postgres mariadb; do
             test "$(jq '[.Results[].Vulnerabilities[]?] | length' "publish-trivy-${image}.json")" = 0
             jq -e '.spdxVersion == "SPDX-2.3" and (.packages | length > 0)' \
               "publish-sbom-${image}.spdx.json"
@@ -601,7 +791,9 @@ jobs:
             "web|$WEB_DIGEST" \
             "migrate|$MIGRATE_DIGEST" \
             "postal-provisioner|$POSTAL_PROVISIONER_DIGEST" \
-            "mautic|$MAUTIC_DIGEST"; do
+            "mautic|$MAUTIC_DIGEST" \
+            "postgres|$POSTGRES_DIGEST" \
+            "mariadb|$MARIADB_DIGEST"; do
             IFS='|' read -r image digest <<< "$item"
             jq -n \
               --arg repository "https://github.com/${GITHUB_REPOSITORY}" \
@@ -640,6 +832,8 @@ jobs:
           MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
           POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
           MAUTIC_DIGEST: ${{ steps.push_mautic.outputs.digest }}
+          POSTGRES_DIGEST: ${{ steps.push_postgres.outputs.digest }}
+          MARIADB_DIGEST: ${{ steps.push_mariadb.outputs.digest }}
         run: |
           set -Eeuo pipefail
           for item in \
@@ -647,7 +841,9 @@ jobs:
             "web|$WEB_DIGEST" \
             "migrate|$MIGRATE_DIGEST" \
             "postal_provisioner|$POSTAL_PROVISIONER_DIGEST" \
-            "mautic|$MAUTIC_DIGEST"; do
+            "mautic|$MAUTIC_DIGEST" \
+            "postgres|$POSTGRES_DIGEST" \
+            "mariadb|$MARIADB_DIGEST"; do
             IFS='|' read -r key digest <<< "$item"
             image="${key//_/-}"
             final_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}:${KLYROW_SOURCE_SHA}"
@@ -669,11 +865,15 @@ jobs:
           MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
           POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
           MAUTIC_DIGEST: ${{ steps.push_mautic.outputs.digest }}
+          POSTGRES_DIGEST: ${{ steps.push_postgres.outputs.digest }}
+          MARIADB_DIGEST: ${{ steps.push_mariadb.outputs.digest }}
           GATEWAY_EXISTS: ${{ steps.release_state.outputs.gateway_exists }}
           WEB_EXISTS: ${{ steps.release_state.outputs.web_exists }}
           MIGRATE_EXISTS: ${{ steps.release_state.outputs.migrate_exists }}
           POSTAL_PROVISIONER_EXISTS: ${{ steps.release_state.outputs.postal_provisioner_exists }}
           MAUTIC_EXISTS: ${{ steps.release_state.outputs.mautic_exists }}
+          POSTGRES_EXISTS: ${{ steps.release_state.outputs.postgres_exists }}
+          MARIADB_EXISTS: ${{ steps.release_state.outputs.mariadb_exists }}
           SIGNING_IDENTITY: https://github.com/appolon1908-hue/klyrow.com/.github/workflows/ci.yml@refs/heads/main
           OIDC_ISSUER: https://token.actions.githubusercontent.com
         run: |
@@ -683,7 +883,9 @@ jobs:
             "web|$WEB_DIGEST|$WEB_EXISTS" \
             "migrate|$MIGRATE_DIGEST|$MIGRATE_EXISTS" \
             "postal-provisioner|$POSTAL_PROVISIONER_DIGEST|$POSTAL_PROVISIONER_EXISTS" \
-            "mautic|$MAUTIC_DIGEST|$MAUTIC_EXISTS"; do
+            "mautic|$MAUTIC_DIGEST|$MAUTIC_EXISTS" \
+            "postgres|$POSTGRES_DIGEST|$POSTGRES_EXISTS" \
+            "mariadb|$MARIADB_DIGEST|$MARIADB_EXISTS"; do
             IFS='|' read -r image digest published <<< "$item"
             exact_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}@${digest}"
             test "$published" != true || continue
@@ -717,6 +919,8 @@ jobs:
           MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
           POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
           MAUTIC_DIGEST: ${{ steps.push_mautic.outputs.digest }}
+          POSTGRES_DIGEST: ${{ steps.push_postgres.outputs.digest }}
+          MARIADB_DIGEST: ${{ steps.push_mariadb.outputs.digest }}
           SIGNING_IDENTITY: https://github.com/appolon1908-hue/klyrow.com/.github/workflows/ci.yml@refs/heads/main
           OIDC_ISSUER: https://token.actions.githubusercontent.com
         run: |
@@ -726,7 +930,9 @@ jobs:
             "web|$WEB_DIGEST" \
             "migrate|$MIGRATE_DIGEST" \
             "postal-provisioner|$POSTAL_PROVISIONER_DIGEST" \
-            "mautic|$MAUTIC_DIGEST"; do
+            "mautic|$MAUTIC_DIGEST" \
+            "postgres|$POSTGRES_DIGEST" \
+            "mariadb|$MARIADB_DIGEST"; do
             IFS='|' read -r image digest <<< "$item"
             exact_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}@${digest}"
             cosign verify --certificate-identity "$SIGNING_IDENTITY" \
@@ -755,6 +961,8 @@ jobs:
           MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
           POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
           MAUTIC_DIGEST: ${{ steps.push_mautic.outputs.digest }}
+          POSTGRES_DIGEST: ${{ steps.push_postgres.outputs.digest }}
+          MARIADB_DIGEST: ${{ steps.push_mariadb.outputs.digest }}
         run: |
           set -Eeuo pipefail
           for item in \
@@ -762,7 +970,9 @@ jobs:
             "web|$WEB_DIGEST" \
             "migrate|$MIGRATE_DIGEST" \
             "postal-provisioner|$POSTAL_PROVISIONER_DIGEST" \
-            "mautic|$MAUTIC_DIGEST"; do
+            "mautic|$MAUTIC_DIGEST" \
+            "postgres|$POSTGRES_DIGEST" \
+            "mariadb|$MARIADB_DIGEST"; do
             IFS='|' read -r image digest <<< "$item"
             exact_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}@${digest}"
             final_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}:${KLYROW_SOURCE_SHA}"
@@ -781,6 +991,8 @@ jobs:
           MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
           POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
           MAUTIC_DIGEST: ${{ steps.push_mautic.outputs.digest }}
+          POSTGRES_DIGEST: ${{ steps.push_postgres.outputs.digest }}
+          MARIADB_DIGEST: ${{ steps.push_mariadb.outputs.digest }}
         run: |
           set -Eeuo pipefail
           echo "$KLYROW_SOURCE_SHA" > PUBLISH_SOURCE_SHA
@@ -790,7 +1002,9 @@ jobs:
             --arg migrate "$MIGRATE_DIGEST" \
             --arg postal_provisioner "$POSTAL_PROVISIONER_DIGEST" \
             --arg mautic "$MAUTIC_DIGEST" \
-            '{gateway: $gateway, web: $web, migrate: $migrate, postal_provisioner: $postal_provisioner, mautic: $mautic}' \
+            --arg postgres "$POSTGRES_DIGEST" \
+            --arg mariadb "$MARIADB_DIGEST" \
+            '{gateway: $gateway, web: $web, migrate: $migrate, postal_provisioner: $postal_provisioner, mautic: $mautic, postgres: $postgres, mariadb: $mariadb}' \
             > PUBLISH_IMAGE_DIGESTS.json
           sha256sum PUBLISH_SOURCE_SHA PUBLISH_IMAGE_DIGESTS.json \
             publish-trivy-*.json publish-sbom-*.spdx.json publish-provenance-*.json \
