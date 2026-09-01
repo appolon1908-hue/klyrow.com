@@ -130,6 +130,9 @@ def test_mautic_volume_migration_is_checkpointed_and_fail_closed():
     assert 'docker run "${copy_flags[@]}"' in source
     assert "--security-opt no-new-privileges" in source
     assert "tar --sort=name" in source
+    assert "--owner=0" not in source
+    assert "--group=0" not in source
+    assert '(cd "$stage" && sha256sum mautic-persistent-data.tar > MANIFEST.sha256)' in source
     assert "Destination volume verification failed" in source
     assert "legacy_volume_removed:false" in source
     assert "rm -v" not in source
@@ -142,6 +145,9 @@ def test_mautic_volume_migration_preserves_restrictive_ownership_in_ci():
     assert "chmod 0600 /legacy/config/restricted.txt" in regression
     assert 'stat -c "%u:%g:%a"' in regression
     assert 'cmp "$source" "$destination"' in regression
+    assert 'test "$wrong_owner_digest" != "$source_digest"' in regression
+    assert "sha256sum -c MANIFEST.sha256" in regression
+    assert "mautic-persistent-data\\.tar$" in regression
     assert "tests/test_mautic_volume_migration.sh" in workflow
 
 
