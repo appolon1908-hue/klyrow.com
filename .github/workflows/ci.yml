@@ -171,6 +171,8 @@ jobs:
             audit --working-dir=/var/www/html --no-dev --abandoned=ignore
           docker run --rm --entrypoint sh "$image" -c \
             'test ! -e /usr/bin/node && test ! -e /usr/bin/npm && test ! -e /var/www/html/node_modules'
+          sudo env "KLYROW_SOURCE_SHA=$KLYROW_SOURCE_SHA" \
+            tests/test_mautic_volume_migration.sh
 
       - name: Build frontend candidate
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6

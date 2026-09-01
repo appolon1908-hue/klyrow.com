@@ -76,11 +76,21 @@ container_flags=(
   --security-opt no-new-privileges
   --entrypoint /bin/sh
 )
+read_only_flags=(
+  "${container_flags[@]}"
+  --cap-add DAC_READ_SEARCH
+)
+copy_flags=(
+  "${container_flags[@]}"
+  --cap-add CHOWN
+  --cap-add DAC_OVERRIDE
+  --cap-add FOWNER
+)
 
 tree_digest() {
   local volume="$1"
   local relative="$2"
-  docker run "${container_flags[@]}" \
+  docker run "${read_only_flags[@]}" \
     --volume "$volume:/data:ro" \
     "$mautic_image" -ceu '
       relative="$1"
@@ -109,7 +119,7 @@ manifest_name="mautic-volume-migration-${source_sha}-${stamp}.json"
   "Checkpoint evidence already exists"
 [[ ! -e "$checkpoint_directory/$manifest_name" ]] || fail \
   "Migration manifest already exists"
-docker run "${container_flags[@]}" \
+docker run "${read_only_flags[@]}" \
   --volume "$legacy_volume:/legacy:ro" \
   --volume "$stage:/checkpoint" \
   "$mautic_image" -ceu '
@@ -147,13 +157,13 @@ for relative in config var/logs docroot/media/files docroot/media/images; do
       --label codestra.migration-checkpoint="$checkpoint_name" \
       "$destination" >/dev/null
   fi
-  if [[ -n "$(docker run "${container_flags[@]}" \
+  if [[ -n "$(docker run "${read_only_flags[@]}" \
     --volume "$destination:/data:ro" "$mautic_image" \
     -ceu 'find /data -mindepth 1 -print -quit')" ]]; then
     [[ "$(tree_digest "$destination" "")" == "$source_digest" ]] || fail \
       "Destination volume $destination is nonempty and differs from its source"
   else
-    docker run "${container_flags[@]}" \
+    docker run "${copy_flags[@]}" \
       --volume "$legacy_volume:/legacy:ro" \
       --volume "$destination:/destination" \
       "$mautic_image" -ceu '

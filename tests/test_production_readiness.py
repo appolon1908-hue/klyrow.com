@@ -121,11 +121,28 @@ def test_mautic_volume_migration_is_checkpointed_and_fail_closed():
     assert "--network none" in source
     assert "--read-only" in source
     assert "--cap-drop ALL" in source
+    assert "read_only_flags=(" in source
+    assert "--cap-add DAC_READ_SEARCH" in source
+    assert "copy_flags=(" in source
+    assert "--cap-add CHOWN" in source
+    assert "--cap-add DAC_OVERRIDE" in source
+    assert "--cap-add FOWNER" in source
+    assert 'docker run "${copy_flags[@]}"' in source
     assert "--security-opt no-new-privileges" in source
     assert "tar --sort=name" in source
     assert "Destination volume verification failed" in source
     assert "legacy_volume_removed:false" in source
     assert "rm -v" not in source
+
+
+def test_mautic_volume_migration_preserves_restrictive_ownership_in_ci():
+    regression = (ROOT / "tests/test_mautic_volume_migration.sh").read_text()
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    assert "chown -R www-data:www-data" in regression
+    assert "chmod 0600 /legacy/config/restricted.txt" in regression
+    assert 'stat -c "%u:%g:%a"' in regression
+    assert 'cmp "$source" "$destination"' in regression
+    assert "tests/test_mautic_volume_migration.sh" in workflow
 
 
 def test_outbox_recovers_abandoned_sending_leases():
