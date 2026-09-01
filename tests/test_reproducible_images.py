@@ -44,6 +44,13 @@ def test_web_runtime_does_not_retain_nondeterministic_package_log():
     assert "rm -f /var/log/apk.log" in dockerfile
 
 
+def test_vendored_web_apk_is_bound_to_matching_runtime_architecture():
+    dockerfile = (ROOT / "apps/web/Dockerfile").read_text(encoding="utf-8")
+    assert "ARG TARGETARCH" in dockerfile
+    assert 'RUN test "$TARGETARCH" = amd64' in dockerfile
+    assert "deliberately amd64-only" in dockerfile
+
+
 def test_every_container_build_stage_pins_its_base_manifest_digest():
     for relative_path in (
         "apps/gateway/Dockerfile",
