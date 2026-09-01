@@ -58,7 +58,6 @@ ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     PHP_CFLAGS="-fstack-protector-strong -fpic -fpie -O2 -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64" \
     PHP_CPPFLAGS="-fstack-protector-strong -fpic -fpie -O2 -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64" \
     PHP_LDFLAGS="-Wl,-O1 -pie" \
-    GPG_KEYS="1198C0117593497A5EC5C199286AF1F9897469DC C28D937575603EB4ABB725861C0779DC5C0A9DE4 AFD8691FDAEDF03BDF6E460563F15A9B715376CA" \
     PHP_VERSION=8.3.32 \
     PHP_URL=https://www.php.net/distributions/php-8.3.32.tar.xz \
     PHP_ASC_URL=https://www.php.net/distributions/php-8.3.32.tar.xz.asc \

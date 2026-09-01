@@ -152,6 +152,14 @@ def test_all_image_gates_scan_vulnerabilities_and_embedded_secrets():
     assert explicit_scanners == trivy_actions
 
 
+def test_gitleaks_ignore_is_one_exact_historical_public_key_fingerprint():
+    ignored = (ROOT / ".gitleaksignore").read_text(encoding="utf-8").splitlines()
+    assert ignored == [
+        "ca9fd1a23b32e745b42fb0fcce2945e8d6e9f0e3:"
+        "docker/mautic.Dockerfile:generic-api-key:61"
+    ]
+
+
 def test_ci_compares_two_timestamp_rewritten_oci_exports_before_publish():
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" in workflow
