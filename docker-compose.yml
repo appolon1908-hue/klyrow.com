@@ -261,7 +261,11 @@ services:
       DOCKER_MAUTIC_ROLE: mautic_web
     depends_on:
       mautic-db: {condition: service_healthy}
-    volumes: [mautic_data:/var/www/html]
+    volumes: &mautic_volumes
+      - mautic_config:/var/www/html/config
+      - mautic_logs:/var/www/html/var/logs
+      - mautic_media_files:/var/www/html/docroot/media/files
+      - mautic_media_images:/var/www/html/docroot/media/images
     ports: ["127.0.0.1:18001:80"]
     networks: [frontend, backend]
     restart: unless-stopped
@@ -278,7 +282,7 @@ services:
       DOCKER_MAUTIC_ROLE: mautic_cron
     depends_on:
       mautic: {condition: service_healthy}
-    volumes: [mautic_data:/var/www/html]
+    volumes: *mautic_volumes
     networks: [backend]
     restart: unless-stopped
   mautic-worker:
@@ -289,7 +293,7 @@ services:
     depends_on:
       mautic: {condition: service_healthy}
       postal-smtp: {condition: service_started}
-    volumes: [mautic_data:/var/www/html]
+    volumes: *mautic_volumes
     networks: [backend]
     restart: unless-stopped
   postal-db:
@@ -399,7 +403,10 @@ networks:
 volumes:
   postgres_data: {}
   mautic_db: {}
-  mautic_data: {}
+  mautic_config: {}
+  mautic_logs: {}
+  mautic_media_files: {}
+  mautic_media_images: {}
   postal_db: {}
   rabbitmq_data: {}
   postal_assets: {}

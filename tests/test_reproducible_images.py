@@ -36,6 +36,7 @@ def test_every_container_build_stage_pins_its_base_manifest_digest():
         "apps/web/Dockerfile",
         "docker/migrate.Dockerfile",
         "docker/postal-provisioner.Dockerfile",
+        "docker/mautic.Dockerfile",
     ):
         dockerfile = (ROOT / relative_path).read_text(encoding="utf-8")
         from_lines = [line for line in dockerfile.splitlines() if line.startswith("FROM ")]
@@ -78,18 +79,45 @@ def test_postal_runtime_is_patched_from_immutable_os_and_gem_inputs():
     assert "zlib (3.2.3) sha256=" in lock
 
 
+def test_mautic_runtime_is_patched_from_immutable_inputs():
+    dockerfile = (ROOT / "docker/mautic.Dockerfile").read_text(encoding="utf-8")
+    patch = (ROOT / "docker/mautic-security/composer-security.patch").read_text(
+        encoding="utf-8"
+    )
+    assert dockerfile.startswith(
+        "FROM mirror.gcr.io/mautic/mautic@sha256:"
+        "373a3de08dfce296e31fe0b7caf269594c43020454628f445c169990b9af4d5e\n"
+    )
+    assert "docker/postal-security/debian.sources.list" in dockerfile
+    assert "patch --batch --forward --fuzz=0 -p0" in dockerfile
+    assert "composer install" in dockerfile
+    assert "composer update" not in dockerfile
+    assert "composer audit --no-dev --abandoned=ignore" in dockerfile
+    assert "apt-get purge -y nodejs" in dockerfile
+    assert "rm -f /usr/bin/node /usr/bin/npm" in dockerfile
+    assert "/root/.npm" in dockerfile
+    assert "/root/.composer/cache" in dockerfile
+    assert "/tmp/node-compile-cache" in dockerfile
+    assert '"guzzlehttp/guzzle": "7.15.2 as 7.10.99"' in patch
+    assert '"name": "phpoffice/phpspreadsheet"' in patch
+    assert '+            "version": "5.9.0"' in patch
+    assert '"name": "studio-42/elfinder"' in patch
+    assert '+            "version": "2.1.70"' in patch
+
+
 def test_ci_compares_two_timestamp_rewritten_oci_exports_before_publish():
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" in workflow
     assert "Verify reproducible OCI image bytes" in workflow
     assert "for copy in a b" in workflow
-    assert "for image in gateway web migrate postal-provisioner" in workflow
+    assert "for image in gateway web migrate postal-provisioner mautic" in workflow
     assert '[migrate]="docker/migrate.Dockerfile"' in workflow
     assert '[postal-provisioner]="docker/postal-provisioner.Dockerfile"' in workflow
+    assert '[mautic]="docker/mautic.Dockerfile"' in workflow
     assert "--no-cache" in workflow
     assert "type=oci,dest=${RUNNER_TEMP}/klyrow-${image}-${copy}.tar,rewrite-timestamp=true" in workflow
     assert "cmp \\\n" in workflow
-    assert workflow.count("outputs: type=registry,rewrite-timestamp=true") == 4
+    assert workflow.count("outputs: type=registry,rewrite-timestamp=true") == 5
 
 
 def test_protected_publication_covers_every_production_owned_image():
@@ -98,14 +126,14 @@ def test_protected_publication_covers_every_production_owned_image():
     assert "github.ref_protected == true" in workflow
     assert 'test "$GITHUB_REF_PROTECTED" = \'true\'' in workflow
     assert 'test "$(git rev-parse HEAD)" = "$KLYROW_SOURCE_SHA"' in workflow
-    for image in ("gateway", "web", "migrate", "postal-provisioner"):
+    for image in ("gateway", "web", "migrate", "postal-provisioner", "mautic"):
         assert f"klyrow-{image}:candidate-${{{{ github.run_id }}}}" in workflow
         assert f"klyrow-{image}" in workflow
     assert "Sign and attest only unpublished exact digests" in workflow
     assert "Verify signatures, provenance, and SBOM attestations" in workflow
     assert "Promote only fully certified digests to immutable source tags" in workflow
-    assert workflow.count("provenance: false") == 4
-    assert workflow.count("sbom: false") == 4
+    assert workflow.count("provenance: false") == 5
+    assert workflow.count("sbom: false") == 5
     assert workflow.count("cosign attest --yes --type slsaprovenance1") == 1
     assert workflow.count("cosign attest --yes --type spdxjson") == 1
 
@@ -120,8 +148,8 @@ def test_protected_publisher_scans_and_verifies_exact_digests_before_promotion()
     verify = workflow.index("Verify signatures, provenance, and SBOM attestations", publish)
     promote = workflow.index("Promote only fully certified digests to immutable source tags", publish)
     assert candidate < scan < collision < sign < verify < promote
-    assert workflow.count("format: json") >= 4
-    assert workflow.count("publish-trivy-") >= 4
+    assert workflow.count("format: json") >= 5
+    assert workflow.count("publish-trivy-") >= 5
     assert 'test "$existing" = "$digest"' in workflow
     assert "imagetools create --prefer-index=false" in workflow
     assert "cosign verify --certificate-identity" in workflow

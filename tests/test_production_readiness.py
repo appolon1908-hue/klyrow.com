@@ -94,6 +94,38 @@ def test_production_image_validator_requires_digests_and_canonical_repositories(
     assert "ghcr.io/appolon1908-hue/klyrow-migrate" in source
     assert "ghcr.io/appolon1908-hue/klyrow-web" in source
     assert "ghcr.io/appolon1908-hue/klyrow-postal-provisioner" in source
+    assert "ghcr.io/appolon1908-hue/klyrow-mautic" in source
+    assert 'for service_name in ("mautic-cron", "mautic-worker")' in source
+
+
+def test_mautic_persists_only_runtime_data_and_never_hides_patched_code():
+    compose = (ROOT / "docker-compose.yml").read_text()
+    assert "mautic_data:/var/www/html" not in compose
+    assert "mautic_config:/var/www/html/config" in compose
+    assert "mautic_logs:/var/www/html/var/logs" in compose
+    assert "mautic_media_files:/var/www/html/docroot/media/files" in compose
+    assert "mautic_media_images:/var/www/html/docroot/media/images" in compose
+    assert "volumes: &mautic_volumes" in compose
+    assert compose.count("volumes: *mautic_volumes") == 2
+
+
+def test_mautic_volume_migration_is_checkpointed_and_fail_closed():
+    source = (ROOT / "scripts/migrate-mautic-volumes").read_text()
+    assert '[[ "$EUID" -eq 0 ]]' in source
+    assert "MIGRATE_PERSISTENT_DATA_ONLY" in source
+    assert "klyrow-mautic@sha256:" in source
+    assert '[[ -z "$(docker ps -q --filter "volume=$legacy_volume")" ]]' in source
+    assert "stat -f -c %T" in source and "tmpfs" in source
+    assert "mautic-persistent-data.tar" in source
+    assert "--encrypt" in source
+    assert "--network none" in source
+    assert "--read-only" in source
+    assert "--cap-drop ALL" in source
+    assert "--security-opt no-new-privileges" in source
+    assert "tar --sort=name" in source
+    assert "Destination volume verification failed" in source
+    assert "legacy_volume_removed:false" in source
+    assert "rm -v" not in source
 
 
 def test_outbox_recovers_abandoned_sending_leases():

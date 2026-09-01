@@ -151,6 +151,27 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
 
+      - name: Build Mautic candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/mautic.Dockerfile
+          load: true
+          tags: klyrow-mautic:${{ env.KLYROW_SOURCE_SHA }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
+
+      - name: Verify hardened Mautic runtime
+        run: |
+          set -euo pipefail
+          image="klyrow-mautic:${KLYROW_SOURCE_SHA}"
+          docker run --rm --entrypoint php "$image" /var/www/html/bin/console --version
+          docker run --rm --entrypoint composer "$image" \
+            audit --working-dir=/var/www/html --no-dev --abandoned=ignore
+          docker run --rm --entrypoint sh "$image" -c \
+            'test ! -e /usr/bin/node && test ! -e /usr/bin/npm && test ! -e /var/www/html/node_modules'
+
       - name: Build frontend candidate
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -255,6 +276,17 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
 
+      - name: Scan Mautic candidate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: klyrow-mautic:${{ env.KLYROW_SOURCE_SHA }}
+          format: sarif
+          output: trivy-mautic.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: "1"
+          ignore-unfixed: true
+
       - name: Retain Trivy scan evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -265,6 +297,7 @@ jobs:
             trivy-web.sarif
             trivy-migrate.sarif
             trivy-postal-provisioner.sarif
+            trivy-mautic.sarif
           if-no-files-found: error
           retention-days: 30
 
@@ -300,6 +333,14 @@ jobs:
           output-file: klyrow-postal-provisioner-${{ env.KLYROW_SOURCE_SHA }}.cdx.json
           upload-artifact: true
 
+      - name: Generate Mautic CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: klyrow-mautic:${{ env.KLYROW_SOURCE_SHA }}
+          format: cyclonedx-json
+          output-file: klyrow-mautic-${{ env.KLYROW_SOURCE_SHA }}.cdx.json
+          upload-artifact: true
+
       - name: Verify reproducible OCI image bytes
         run: |
           set -euo pipefail
@@ -308,8 +349,9 @@ jobs:
             [web]="apps/web/Dockerfile"
             [migrate]="docker/migrate.Dockerfile"
             [postal-provisioner]="docker/postal-provisioner.Dockerfile"
+            [mautic]="docker/mautic.Dockerfile"
           )
-          for image in gateway web migrate postal-provisioner; do
+          for image in gateway web migrate postal-provisioner mautic; do
             dockerfile="${dockerfiles[$image]}"
             for copy in a b; do
               docker buildx build \
@@ -418,18 +460,35 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
 
+      - id: push_mautic
+        name: Publish Mautic candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/mautic.Dockerfile
+          outputs: type=registry,rewrite-timestamp=true
+          tags: ghcr.io/${{ github.repository_owner }}/klyrow-mautic:candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          build-args: SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
+
       - name: Pull exact candidates for release evidence
         env:
           GATEWAY_DIGEST: ${{ steps.push_gateway.outputs.digest }}
           WEB_DIGEST: ${{ steps.push_web.outputs.digest }}
           MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
           POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
+          MAUTIC_DIGEST: ${{ steps.push_mautic.outputs.digest }}
         run: |
           set -Eeuo pipefail
           docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-gateway@${GATEWAY_DIGEST}"
           docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-web@${WEB_DIGEST}"
           docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-migrate@${MIGRATE_DIGEST}"
           docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-postal-provisioner@${POSTAL_PROVISIONER_DIGEST}"
+          docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-mautic@${MAUTIC_DIGEST}"
 
       - name: Scan exact backend digest
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -471,6 +530,16 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
 
+      - name: Scan exact Mautic digest
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/klyrow-mautic@${{ steps.push_mautic.outputs.digest }}
+          format: json
+          output: publish-trivy-mautic.json
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
       - name: Generate exact backend SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
@@ -503,15 +572,24 @@ jobs:
           output-file: publish-sbom-postal-provisioner.spdx.json
           upload-artifact: false
 
+      - name: Generate exact Mautic SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/klyrow-mautic@${{ steps.push_mautic.outputs.digest }}
+          format: spdx-json
+          output-file: publish-sbom-mautic.spdx.json
+          upload-artifact: false
+
       - name: Bind vulnerability, provenance, and SBOM evidence
         env:
           GATEWAY_DIGEST: ${{ steps.push_gateway.outputs.digest }}
           WEB_DIGEST: ${{ steps.push_web.outputs.digest }}
           MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
           POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
+          MAUTIC_DIGEST: ${{ steps.push_mautic.outputs.digest }}
         run: |
           set -Eeuo pipefail
-          for image in gateway web migrate postal-provisioner; do
+          for image in gateway web migrate postal-provisioner mautic; do
             test "$(jq '[.Results[].Vulnerabilities[]?] | length' "publish-trivy-${image}.json")" = 0
             jq -e '.spdxVersion == "SPDX-2.3" and (.packages | length > 0)' \
               "publish-sbom-${image}.spdx.json"
@@ -520,7 +598,8 @@ jobs:
             "gateway|$GATEWAY_DIGEST" \
             "web|$WEB_DIGEST" \
             "migrate|$MIGRATE_DIGEST" \
-            "postal-provisioner|$POSTAL_PROVISIONER_DIGEST"; do
+            "postal-provisioner|$POSTAL_PROVISIONER_DIGEST" \
+            "mautic|$MAUTIC_DIGEST"; do
             IFS='|' read -r image digest <<< "$item"
             jq -n \
               --arg repository "https://github.com/${GITHUB_REPOSITORY}" \
@@ -558,13 +637,15 @@ jobs:
           WEB_DIGEST: ${{ steps.push_web.outputs.digest }}
           MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
           POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
+          MAUTIC_DIGEST: ${{ steps.push_mautic.outputs.digest }}
         run: |
           set -Eeuo pipefail
           for item in \
             "gateway|$GATEWAY_DIGEST" \
             "web|$WEB_DIGEST" \
             "migrate|$MIGRATE_DIGEST" \
-            "postal_provisioner|$POSTAL_PROVISIONER_DIGEST"; do
+            "postal_provisioner|$POSTAL_PROVISIONER_DIGEST" \
+            "mautic|$MAUTIC_DIGEST"; do
             IFS='|' read -r key digest <<< "$item"
             image="${key//_/-}"
             final_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}:${KLYROW_SOURCE_SHA}"
@@ -585,10 +666,12 @@ jobs:
           WEB_DIGEST: ${{ steps.push_web.outputs.digest }}
           MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
           POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
+          MAUTIC_DIGEST: ${{ steps.push_mautic.outputs.digest }}
           GATEWAY_EXISTS: ${{ steps.release_state.outputs.gateway_exists }}
           WEB_EXISTS: ${{ steps.release_state.outputs.web_exists }}
           MIGRATE_EXISTS: ${{ steps.release_state.outputs.migrate_exists }}
           POSTAL_PROVISIONER_EXISTS: ${{ steps.release_state.outputs.postal_provisioner_exists }}
+          MAUTIC_EXISTS: ${{ steps.release_state.outputs.mautic_exists }}
           SIGNING_IDENTITY: https://github.com/appolon1908-hue/klyrow.com/.github/workflows/ci.yml@refs/heads/main
           OIDC_ISSUER: https://token.actions.githubusercontent.com
         run: |
@@ -597,7 +680,8 @@ jobs:
             "gateway|$GATEWAY_DIGEST|$GATEWAY_EXISTS" \
             "web|$WEB_DIGEST|$WEB_EXISTS" \
             "migrate|$MIGRATE_DIGEST|$MIGRATE_EXISTS" \
-            "postal-provisioner|$POSTAL_PROVISIONER_DIGEST|$POSTAL_PROVISIONER_EXISTS"; do
+            "postal-provisioner|$POSTAL_PROVISIONER_DIGEST|$POSTAL_PROVISIONER_EXISTS" \
+            "mautic|$MAUTIC_DIGEST|$MAUTIC_EXISTS"; do
             IFS='|' read -r image digest published <<< "$item"
             exact_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}@${digest}"
             test "$published" != true || continue
@@ -630,6 +714,7 @@ jobs:
           WEB_DIGEST: ${{ steps.push_web.outputs.digest }}
           MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
           POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
+          MAUTIC_DIGEST: ${{ steps.push_mautic.outputs.digest }}
           SIGNING_IDENTITY: https://github.com/appolon1908-hue/klyrow.com/.github/workflows/ci.yml@refs/heads/main
           OIDC_ISSUER: https://token.actions.githubusercontent.com
         run: |
@@ -638,7 +723,8 @@ jobs:
             "gateway|$GATEWAY_DIGEST" \
             "web|$WEB_DIGEST" \
             "migrate|$MIGRATE_DIGEST" \
-            "postal-provisioner|$POSTAL_PROVISIONER_DIGEST"; do
+            "postal-provisioner|$POSTAL_PROVISIONER_DIGEST" \
+            "mautic|$MAUTIC_DIGEST"; do
             IFS='|' read -r image digest <<< "$item"
             exact_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}@${digest}"
             cosign verify --certificate-identity "$SIGNING_IDENTITY" \
@@ -666,13 +752,15 @@ jobs:
           WEB_DIGEST: ${{ steps.push_web.outputs.digest }}
           MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
           POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
+          MAUTIC_DIGEST: ${{ steps.push_mautic.outputs.digest }}
         run: |
           set -Eeuo pipefail
           for item in \
             "gateway|$GATEWAY_DIGEST" \
             "web|$WEB_DIGEST" \
             "migrate|$MIGRATE_DIGEST" \
-            "postal-provisioner|$POSTAL_PROVISIONER_DIGEST"; do
+            "postal-provisioner|$POSTAL_PROVISIONER_DIGEST" \
+            "mautic|$MAUTIC_DIGEST"; do
             IFS='|' read -r image digest <<< "$item"
             exact_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}@${digest}"
             final_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}:${KLYROW_SOURCE_SHA}"
@@ -690,6 +778,7 @@ jobs:
           WEB_DIGEST: ${{ steps.push_web.outputs.digest }}
           MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
           POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
+          MAUTIC_DIGEST: ${{ steps.push_mautic.outputs.digest }}
         run: |
           set -Eeuo pipefail
           echo "$KLYROW_SOURCE_SHA" > PUBLISH_SOURCE_SHA
@@ -698,7 +787,8 @@ jobs:
             --arg web "$WEB_DIGEST" \
             --arg migrate "$MIGRATE_DIGEST" \
             --arg postal_provisioner "$POSTAL_PROVISIONER_DIGEST" \
-            '{gateway: $gateway, web: $web, migrate: $migrate, postal_provisioner: $postal_provisioner}' \
+            --arg mautic "$MAUTIC_DIGEST" \
+            '{gateway: $gateway, web: $web, migrate: $migrate, postal_provisioner: $postal_provisioner, mautic: $mautic}' \
             > PUBLISH_IMAGE_DIGESTS.json
           sha256sum PUBLISH_SOURCE_SHA PUBLISH_IMAGE_DIGESTS.json \
             publish-trivy-*.json publish-sbom-*.spdx.json publish-provenance-*.json \

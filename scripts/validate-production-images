@@ -31,6 +31,7 @@ expected_repositories = {
     "gateway-migrate": "ghcr.io/appolon1908-hue/klyrow-migrate",
     "web": "ghcr.io/appolon1908-hue/klyrow-web",
     "postal-provisioner": "ghcr.io/appolon1908-hue/klyrow-postal-provisioner",
+    "mautic": "ghcr.io/appolon1908-hue/klyrow-mautic",
 }
 for service_name, repository in expected_repositories.items():
     image = services.get(service_name, {}).get("image", "")
@@ -48,6 +49,11 @@ for service_name in (
 ):
     if services.get(service_name, {}).get("image") != gateway_image:
         raise SystemExit(f"{service_name}: must use the exact gateway digest")
+
+mautic_image = services["mautic"]["image"]
+for service_name in ("mautic-cron", "mautic-worker"):
+    if services.get(service_name, {}).get("image") != mautic_image:
+        raise SystemExit(f"{service_name}: must use the exact Mautic digest")
 
 print(f"Validated {len(services)} digest-pinned production service images.")
 ' <<<"$rendered"

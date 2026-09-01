@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+umask 077
+
+fail() {
+  printf '%s\n' "$1" >&2
+  exit 2
+}
+
+[[ "$EUID" -eq 0 ]] || fail "Mautic volume migration requires root"
+[[ "$#" -eq 3 ]] || fail \
+  "Usage: scripts/migrate-mautic-volumes LEGACY_VOLUME MAUTIC_IMAGE CHECKPOINT_DIRECTORY"
+[[ "${CONFIRM_MAUTIC_VOLUME_MIGRATION:-}" == "MIGRATE_PERSISTENT_DATA_ONLY" ]] || fail \
+  "Set CONFIRM_MAUTIC_VOLUME_MIGRATION=MIGRATE_PERSISTENT_DATA_ONLY"
+
+legacy_volume="$1"
+mautic_image="$2"
+checkpoint_directory="$3"
+volume_pattern='^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$'
+digest_image_pattern='^ghcr\.io/appolon1908-hue/klyrow-mautic@sha256:[0-9a-f]{64}$'
+
+[[ "$legacy_volume" =~ $volume_pattern ]] || fail "Invalid legacy volume name"
+[[ "$mautic_image" =~ $digest_image_pattern ]] || fail \
+  "Mautic migration image must be the canonical immutable GHCR digest"
+[[ "$checkpoint_directory" == /* && "$checkpoint_directory" != / ]] || fail \
+  "Checkpoint directory must be a bounded absolute path"
+[[ ! -L "$checkpoint_directory" ]] || fail "Checkpoint directory must not be a symlink"
+
+for command in awk date docker find gpg install jq mktemp realpath sha256sum shred stat tar; do
+  command -v "$command" >/dev/null || fail "Required command unavailable: $command"
+done
+
+recipient_file="${KLYROW_BACKUP_RECIPIENT_FILE:-/etc/klyrow/backup-recipient-public.asc}"
+staging_root="${KLYROW_BACKUP_STAGING_ROOT:-/dev/shm}"
+[[ -f "$recipient_file" && ! -L "$recipient_file" && -r "$recipient_file" ]] || fail \
+  "Independent backup recipient public key unavailable"
+[[ "$(stat -f -c %T "$staging_root")" == "tmpfs" ]] || fail \
+  "Mautic migration staging must be tmpfs"
+
+install -d -o root -g root -m 0700 "$checkpoint_directory"
+checkpoint_directory="$(realpath "$checkpoint_directory")"
+[[ "$checkpoint_directory" != / ]] || fail "Unsafe checkpoint directory"
+[[ "$(stat -c '%U:%G:%a' "$checkpoint_directory")" == "root:root:700" ]] || fail \
+  "Checkpoint directory ownership or mode is unsafe"
+docker image inspect "$mautic_image" >/dev/null
+source_sha="$(docker image inspect \
+  --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
+  "$mautic_image")"
+[[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || fail "Mautic image source revision is invalid"
+docker volume inspect "$legacy_volume" >/dev/null
+[[ -z "$(docker ps -q --filter "volume=$legacy_volume")" ]] || fail \
+  "A container still uses the legacy Mautic volume"
+
+declare -A destinations=(
+  [config]="${KLYROW_MAUTIC_CONFIG_VOLUME:-klyrow_mautic_config}"
+  [var/logs]="${KLYROW_MAUTIC_LOGS_VOLUME:-klyrow_mautic_logs}"
+  [docroot/media/files]="${KLYROW_MAUTIC_MEDIA_FILES_VOLUME:-klyrow_mautic_media_files}"
+  [docroot/media/images]="${KLYROW_MAUTIC_MEDIA_IMAGES_VOLUME:-klyrow_mautic_media_images}"
+)
+
+seen="$legacy_volume"
+for destination in "${destinations[@]}"; do
+  [[ "$destination" =~ $volume_pattern ]] || fail "Invalid destination volume name"
+  [[ " $seen " != *" $destination "* ]] || fail "Mautic volume names must be distinct"
+  seen+=" $destination"
+  [[ -z "$(docker ps -q --filter "volume=$destination")" ]] || fail \
+    "A container still uses destination volume $destination"
+done
+
+container_flags=(
+  --rm
+  --network none
+  --read-only
+  --cap-drop ALL
+  --security-opt no-new-privileges
+  --entrypoint /bin/sh
+)
+
+tree_digest() {
+  local volume="$1"
+  local relative="$2"
+  docker run "${container_flags[@]}" \
+    --volume "$volume:/data:ro" \
+    "$mautic_image" -ceu '
+      relative="$1"
+      root="/data${relative:+/$relative}"
+      test -d "$root"
+      test ! -L "$root"
+      cd "$root"
+      tar --sort=name --mtime="UTC 1970-01-01" --owner=0 --group=0 \
+        --numeric-owner -cf - .
+    ' migration-hash "$relative" | sha256sum | awk '{print $1}'
+}
+
+stage="$(mktemp -d "$staging_root/klyrow-mautic-volume.XXXXXX")"
+[[ "$stage" == "$staging_root"/klyrow-mautic-volume.* ]] || fail \
+  "Unsafe Mautic migration staging path"
+cleanup() {
+  find "$stage" -type f -exec shred -u {} + 2>/dev/null || true
+  rm -rf -- "$stage"
+}
+trap cleanup EXIT
+
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+checkpoint_name="mautic-persistent-data-${source_sha}-${stamp}.tar.gpg"
+manifest_name="mautic-volume-migration-${source_sha}-${stamp}.json"
+[[ ! -e "$checkpoint_directory/$checkpoint_name" ]] || fail \
+  "Checkpoint evidence already exists"
+[[ ! -e "$checkpoint_directory/$manifest_name" ]] || fail \
+  "Migration manifest already exists"
+docker run "${container_flags[@]}" \
+  --volume "$legacy_volume:/legacy:ro" \
+  --volume "$stage:/checkpoint" \
+  "$mautic_image" -ceu '
+    for path in config var/logs docroot/media/files docroot/media/images; do
+      test -d "/legacy/$path"
+      test ! -L "/legacy/$path"
+    done
+    tar --numeric-owner -C /legacy -cf /checkpoint/mautic-persistent-data.tar \
+      config var/logs docroot/media/files docroot/media/images
+  '
+sha256sum "$stage/mautic-persistent-data.tar" > "$stage/MANIFEST.sha256"
+
+gpg_home="$stage/gnupg"
+install -d -m 0700 "$gpg_home"
+gpg --batch --homedir "$gpg_home" --import "$recipient_file" >/dev/null 2>&1
+recipient="$(gpg --batch --homedir "$gpg_home" --with-colons --list-keys |
+  awk -F: '$1=="fpr"{print $10;exit}')"
+[[ "$recipient" =~ ^[A-F0-9]{40,64}$ ]] || fail "Backup recipient fingerprint invalid"
+tar -C "$stage" -cf - mautic-persistent-data.tar MANIFEST.sha256 |
+  gpg --batch --yes --homedir "$gpg_home" --trust-model always \
+    --recipient "$recipient" --output "$checkpoint_directory/$checkpoint_name" --encrypt
+sha256sum "$checkpoint_directory/$checkpoint_name" > \
+  "$checkpoint_directory/$checkpoint_name.sha256"
+chmod 0600 "$checkpoint_directory/$checkpoint_name" \
+  "$checkpoint_directory/$checkpoint_name.sha256"
+
+manifest_entries='[]'
+for relative in config var/logs docroot/media/files docroot/media/images; do
+  destination="${destinations[$relative]}"
+  source_digest="$(tree_digest "$legacy_volume" "$relative")"
+  if ! docker volume inspect "$destination" >/dev/null 2>&1; then
+    docker volume create \
+      --label codestra.component=mautic \
+      --label codestra.source-sha="$source_sha" \
+      --label codestra.migration-checkpoint="$checkpoint_name" \
+      "$destination" >/dev/null
+  fi
+  if [[ -n "$(docker run "${container_flags[@]}" \
+    --volume "$destination:/data:ro" "$mautic_image" \
+    -ceu 'find /data -mindepth 1 -print -quit')" ]]; then
+    [[ "$(tree_digest "$destination" "")" == "$source_digest" ]] || fail \
+      "Destination volume $destination is nonempty and differs from its source"
+  else
+    docker run "${container_flags[@]}" \
+      --volume "$legacy_volume:/legacy:ro" \
+      --volume "$destination:/destination" \
+      "$mautic_image" -ceu '
+        source="/legacy/$1"
+        test -d "$source"
+        test ! -L "$source"
+        cp -a "$source"/. /destination/
+      ' migration-copy "$relative"
+  fi
+  destination_digest="$(tree_digest "$destination" "")"
+  [[ "$destination_digest" == "$source_digest" ]] || fail \
+    "Destination volume verification failed for $destination"
+  manifest_entries="$(jq -c \
+    --arg path "$relative" \
+    --arg volume "$destination" \
+    --arg digest "$destination_digest" \
+    '. + [{source_path:$path,destination_volume:$volume,content_sha256:$digest}]' \
+    <<< "$manifest_entries")"
+done
+
+jq -n \
+  --arg schema_version "klyrow.mautic-volume-migration.v1" \
+  --arg created_at_utc "$stamp" \
+  --arg source_sha "$source_sha" \
+  --arg image "$mautic_image" \
+  --arg legacy_volume "$legacy_volume" \
+  --arg checkpoint "$checkpoint_name" \
+  --argjson persistent_volumes "$manifest_entries" \
+  '{schema_version:$schema_version,created_at_utc:$created_at_utc,
+    source_sha:$source_sha,image:$image,legacy_volume:$legacy_volume,
+    encrypted_checkpoint:$checkpoint,persistent_volumes:$persistent_volumes,
+    legacy_volume_removed:false}' > \
+  "$checkpoint_directory/$manifest_name"
+chmod 0600 "$checkpoint_directory/$manifest_name"
+sha256sum "$checkpoint_directory/$manifest_name" > \
+  "$checkpoint_directory/$manifest_name.sha256"
+chmod 0600 "$checkpoint_directory/$manifest_name.sha256"
+
+printf 'Mautic persistent-volume migration verified; legacy volume preserved. Evidence: %s\n' \
+  "$checkpoint_directory/$manifest_name"
