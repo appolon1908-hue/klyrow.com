@@ -44,6 +44,40 @@ def test_every_container_build_stage_pins_its_base_manifest_digest():
         assert "apk upgrade" not in dockerfile
 
 
+def test_postal_runtime_is_patched_from_immutable_os_and_gem_inputs():
+    dockerfile = (ROOT / "docker/postal-provisioner.Dockerfile").read_text(
+        encoding="utf-8"
+    )
+    sources = (ROOT / "docker/postal-security/debian.sources.list").read_text(
+        encoding="utf-8"
+    )
+    gemfile = (ROOT / "docker/postal-security/Gemfile").read_text(encoding="utf-8")
+    lock = (ROOT / "docker/postal-security/Gemfile.lock").read_text(encoding="utf-8")
+    assert sources.count("snapshot.debian.org/") == 3
+    assert sources.count("20260901T000000Z") == 3
+    assert "rm -f /etc/apt/sources.list.d/*" in dockerfile
+    assert "apt-get dist-upgrade -y" in dockerfile
+    os_patch_layer = dockerfile.split(
+        "COPY docker/postal-security/Gemfile", maxsplit=1
+    )[0]
+    assert "rm -f" in os_patch_layer
+    assert "/var/cache/ldconfig/aux-cache" in os_patch_layer
+    assert "bundle config set deployment true" in dockerfile
+    assert "bundle config set without 'development test'" in dockerfile
+    assert "bundle clean --force" in dockerfile
+    assert "/usr/local/bundle/gems/{activestorage-7.1.6" in dockerfile
+    assert "-name gem_make.out -o -name mkmf.log" in dockerfile
+    assert "find /opt/postal/app/vendor/bundle -type d -exec chmod 0755" in dockerfile
+    assert "rm -rf /root/.bundle/cache" in dockerfile
+    assert 'gem "rails", "= 7.2.3.2"' in gemfile
+    assert 'gem "jwt", "= 2.10.3"' in gemfile
+    assert 'gem "puma", "= 7.2.1"' in gemfile
+    assert 'gem "zlib", "= 3.2.3"' in gemfile
+    assert "CHECKSUMS" in lock
+    assert "rails (7.2.3.2) sha256=" in lock
+    assert "zlib (3.2.3) sha256=" in lock
+
+
 def test_ci_compares_two_timestamp_rewritten_oci_exports_before_publish():
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" in workflow
