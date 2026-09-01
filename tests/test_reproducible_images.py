@@ -62,7 +62,7 @@ def test_every_container_build_stage_pins_its_base_manifest_digest():
         dockerfile = (ROOT / relative_path).read_text(encoding="utf-8")
         from_lines = [line for line in dockerfile.splitlines() if line.startswith("FROM ")]
         assert from_lines
-        assert all("@sha256:" in line for line in from_lines)
+        assert all("@sha256:" in line or line.startswith("FROM scratch") for line in from_lines)
         assert "apk upgrade" not in dockerfile
 
 
@@ -107,7 +107,8 @@ def test_mautic_runtime_is_patched_from_immutable_inputs():
     )
     assert dockerfile.startswith(
         "FROM mirror.gcr.io/mautic/mautic@sha256:"
-        "373a3de08dfce296e31fe0b7caf269594c43020454628f445c169990b9af4d5e\n"
+        "373a3de08dfce296e31fe0b7caf269594c43020454628f445c169990b9af4d5e "
+        "AS patched\n"
     )
     assert "docker/postal-security/debian.sources.list" in dockerfile
     assert "patch --batch --forward --fuzz=0 -p0" in dockerfile
@@ -124,6 +125,31 @@ def test_mautic_runtime_is_patched_from_immutable_inputs():
     assert '+            "version": "5.9.0"' in patch
     assert '"name": "studio-42/elfinder"' in patch
     assert '+            "version": "2.1.70"' in patch
+
+
+def test_mautic_runtime_removes_generated_twig_cache_after_console_validation():
+    dockerfile = (ROOT / "docker/mautic.Dockerfile").read_text(encoding="utf-8")
+    console = dockerfile.index("php bin/console --version")
+    purge = dockerfile.index("find /var/www/html/var/tmp -mindepth 1 -delete")
+    empty = dockerfile.index(
+        'test -z "$(find /var/www/html/var/tmp -mindepth 1 -print -quit)"'
+    )
+    assert console < purge < empty
+    assert "FROM scratch AS runtime" in dockerfile
+    assert "COPY --from=patched / /" in dockerfile
+    assert "recoverable from image history" in dockerfile
+    assert 'ENTRYPOINT ["/entrypoint.sh"]' in dockerfile
+    assert "STOPSIGNAL SIGWINCH" in dockerfile
+    assert "PHP_VERSION=8.3.32" in dockerfile
+    assert "APACHE_DOCUMENT_ROOT=/var/www/html/docroot" in dockerfile
+
+
+def test_all_image_gates_scan_vulnerabilities_and_embedded_secrets():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    trivy_actions = workflow.count("uses: aquasecurity/trivy-action@")
+    explicit_scanners = workflow.count("scanners: vuln,secret")
+    assert trivy_actions >= 10
+    assert explicit_scanners == trivy_actions
 
 
 def test_ci_compares_two_timestamp_rewritten_oci_exports_before_publish():
