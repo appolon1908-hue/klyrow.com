@@ -1,4 +1,4 @@
-import asyncio, base64, hashlib, hmac, ipaddress, json, os, secrets, socket, ssl, time, uuid
+import asyncio, base64, hashlib, hmac, ipaddress, json, os, re, secrets, socket, ssl, time, uuid
 from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,11 +16,30 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
-from pydantic import BaseModel, EmailStr, Field, model_validator
+from pydantic import BaseModel, EmailStr, Field, ValidationError, model_validator
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 DATABASE_URL=os.getenv("KLYROW_DATABASE_URL", "sqlite:///./klyrow.db")
+def runtime_secret(name:str)->str:
+    """Read a rotatable secret without permitting production env injection."""
+
+    path_value=os.getenv(name+"_FILE","").strip()
+    if path_value:
+        path=Path(path_value)
+        if os.getenv("KLYROW_ENV","development").lower()=="production" and (not path.is_absolute() or path.is_symlink()):
+            raise RuntimeError(name+" secret file must be absolute and not a symlink")
+        try:
+            value=path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError(name+" secret file unavailable") from exc
+        if not value or len(value)>65536:raise RuntimeError(name+" secret file is empty or oversized")
+        return value
+    value=os.getenv(name,"")
+    if os.getenv("KLYROW_ENV","development").lower()=="production" and value:
+        raise RuntimeError("production requires "+name+"_FILE")
+    return value
+
 def required_session_secret():
     path=os.getenv("KLYROW_SESSION_SECRET_FILE","")
     if path:
@@ -41,20 +60,49 @@ AUTH_WEB_DIST=Path(__file__).with_name("auth_web")
 if not AUTH_WEB_DIST.exists():
     AUTH_WEB_DIST=Path(__file__).parents[2]/"web"/"dist"
 app.mount("/auth-assets",StaticFiles(directory=AUTH_WEB_DIST,check_dir=False),name="auth-assets")
-REQUESTS=Counter("klyrow_http_requests_total","Requests",["path","status"])
-MAIL=Counter("klyrow_mail_total","Mail lifecycle",["event"])
-LATENCY=Histogram("klyrow_http_request_duration_seconds","Request latency",["path"])
-PROVIDER_QUEUE=Gauge("klyrow_provider_queue_messages","Provider messages by status",["status"])
-PROVIDER_EVENTS=Gauge("klyrow_provider_events","Provider events by state",["state"])
-PROVIDER_USAGE=Gauge("klyrow_provider_usage_events","Provider usage events by state",["state"])
-OUTBOX_OLDEST=Gauge("klyrow_email_outbox_oldest_seconds","Age of oldest active email outbox item")
-INTEGRATION_QUEUE=Gauge("klyrow_integration_outbox_items","Integration outbox items",["target","state"])
-WEBHOOK_QUEUE=Gauge("klyrow_webhook_attempts","Customer webhook attempts",["state"])
-DELIVERY_RATE=Gauge("klyrow_delivery_ratio","Delivery outcome ratio",["outcome"])
-DNS_INVALID=Gauge("klyrow_domain_dns_invalid","Domains not currently verified for sending")
-BILLING_DRIFT=Gauge("klyrow_billing_reconciliation_drift","Invoices whose ledger state disagrees with confirmed payments")
+class PlatformMetric:
+    def __init__(self,collector):
+        self.collector=collector
+        self.platform_values=("klyrow-email","klyrow.com",os.getenv("KLYROW_SERVICE","gateway"),os.getenv("KLYROW_ENV","development"),os.getenv("CODESTRA_SERVER","provider-communications"),os.getenv("CODESTRA_REGION","eu-central"),os.getenv("CODESTRA_DEPLOYMENT","unknown"))
+        self.dynamic_count=len(collector._labelnames)-len(self.platform_values)
+    def labels(self,*args,**kwargs):
+        if kwargs:raise ValueError("platform metrics require positional bounded labels")
+        return self.collector.labels(*(self.platform_values+args))
+    def __getattr__(self,name):
+        target=self.collector.labels(*self.platform_values) if self.dynamic_count==0 else self.collector
+        return getattr(target,name)
+def platform_metric(collector):return PlatformMetric(collector)
+REQUESTS=platform_metric(Counter("klyrow_http_requests_total","Requests",["codestra_business","application","service","environment","server","region","deployment","path","status"]))
+MAIL=platform_metric(Counter("klyrow_mail_total","Mail lifecycle",["codestra_business","application","service","environment","server","region","deployment","event"]))
+LATENCY=platform_metric(Histogram("klyrow_http_request_duration_seconds","Request latency",["codestra_business","application","service","environment","server","region","deployment","path"]))
+PROVIDER_QUEUE=platform_metric(Gauge("klyrow_provider_queue_messages","Provider messages by status",["codestra_business","application","service","environment","server","region","deployment","status"]))
+PROVIDER_EVENTS=platform_metric(Gauge("klyrow_provider_events","Provider events by state",["codestra_business","application","service","environment","server","region","deployment","state"]))
+PROVIDER_USAGE=platform_metric(Gauge("klyrow_provider_usage_events","Provider usage events by state",["codestra_business","application","service","environment","server","region","deployment","state"]))
+OUTBOX_OLDEST=platform_metric(Gauge("klyrow_email_outbox_oldest_seconds","Age of oldest active email outbox item",["codestra_business","application","service","environment","server","region","deployment"]))
+INTEGRATION_QUEUE=platform_metric(Gauge("klyrow_integration_outbox_items","Integration outbox items",["codestra_business","application","service","environment","server","region","deployment","target","state"]))
+WEBHOOK_QUEUE=platform_metric(Gauge("klyrow_webhook_attempts","Customer webhook attempts",["codestra_business","application","service","environment","server","region","deployment","state"]))
+DELIVERY_RATE=platform_metric(Gauge("klyrow_delivery_ratio","Delivery outcome ratio",["codestra_business","application","service","environment","server","region","deployment","outcome"]))
+DNS_INVALID=platform_metric(Gauge("klyrow_domain_dns_invalid","Domains not currently verified for sending",["codestra_business","application","service","environment","server","region","deployment"]))
+BILLING_DRIFT=platform_metric(Gauge("klyrow_billing_reconciliation_drift","Invoices whose ledger state disagrees with confirmed payments",["codestra_business","application","service","environment","server","region","deployment"]))
 rate_buckets=defaultdict(deque)
 _jwks_clients={}
+
+SMTP_EVENT_MAP={
+    "email.queued":"klyrow.email.queued","email.sent":"klyrow.email.sent",
+    "email.delivered":"klyrow.email.delivered","email.deferred":"klyrow.email.deferred",
+    "email.bounced":"klyrow.email.bounced","email.complained":"klyrow.email.complained",
+    "email.opened":"klyrow.email.opened","email.clicked":"klyrow.email.clicked",
+    "email.unsubscribed":"klyrow.email.unsubscribed","email.inbound_received":"klyrow.email.inbound_received",
+    "message.submitted":"klyrow.email.submitted","message.delivered":"klyrow.email.delivered",
+    "message.opened":"klyrow.email.opened","message.clicked":"klyrow.email.clicked",
+    "inbound.received":"klyrow.email.inbound_received",
+}
+CANONICAL_SMTP_STATUSES={"accepted","queued","submitted","provider_accepted","delivered","deferred","bounced","complained","suppressed","failed","cancelled","indeterminate"}
+MIDDLEWARE_ALLOWED_COMMANDS={"email.message.send.v1","email.message.cancel.v1","email.domain.verify.v1","email.suppression.upsert.v1","email.reputation.snapshot.request.v1"}
+
+def set_core_message_status(message,value:str)->None:
+    if value not in CANONICAL_SMTP_STATUSES:raise RuntimeError("noncanonical_message_status")
+    message.status=value
 
 class Base(DeclarativeBase): pass
 class Tenant(Base):
@@ -92,7 +140,9 @@ class Campaign(Base):
 class Idempotency(Base):
     __tablename__="idempotency_keys"; id:Mapped[str]=mapped_column(String,primary_key=True,default=lambda:str(uuid.uuid4())); key:Mapped[str]=mapped_column(String); tenant_id:Mapped[str]=mapped_column(String,index=True); request_hash:Mapped[str]=mapped_column(String); resource_id:Mapped[str]=mapped_column(String); response_json:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); __table_args__=(UniqueConstraint("tenant_id","key",name="uq_idempotency_tenant_key"),)
 class EmailOutbox(Base):
-    __tablename__="email_outbox"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); message_id:Mapped[str]=mapped_column(String,unique=True,index=True); payload:Mapped[str]=mapped_column(Text); state:Mapped[str]=mapped_column(String,default="pending",index=True); attempts:Mapped[int]=mapped_column(Integer,default=0); provider_message_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True); next_attempt_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+    __tablename__="email_outbox"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); message_id:Mapped[str]=mapped_column(String,unique=True,index=True); payload:Mapped[str]=mapped_column(Text); priority:Mapped[int]=mapped_column(Integer,default=20,index=True); state:Mapped[str]=mapped_column(String,default="pending",index=True); attempts:Mapped[int]=mapped_column(Integer,default=0); provider_message_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True); next_attempt_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+class MiddlewareCommandOperation(Base):
+    __tablename__="middleware_command_operations";command_id:Mapped[str]=mapped_column(String,primary_key=True);tenant_id:Mapped[str]=mapped_column(String,index=True);command:Mapped[str]=mapped_column(String,index=True);idempotency_key:Mapped[str]=mapped_column(String,index=True);correlation_id:Mapped[str]=mapped_column(String,index=True);state:Mapped[str]=mapped_column(String,default="accepted",index=True);request_hash:Mapped[str]=mapped_column(String);result_json:Mapped[str]=mapped_column(Text,default="{}");error:Mapped[Optional[str]]=mapped_column(String,nullable=True);created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc));updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc));__table_args__=(UniqueConstraint("tenant_id","idempotency_key",name="uq_middleware_command_tenant_idempotency"),)
 class ProductionCanaryGate(Base):
     __tablename__="production_canary_gate"; gate_key:Mapped[str]=mapped_column(String,primary_key=True); reserved_deliveries:Mapped[int]=mapped_column(Integer,default=0); claimed_deliveries:Mapped[int]=mapped_column(Integer,default=0); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class WebhookEndpoint(Base):
@@ -119,16 +169,20 @@ def auth_rate(request:Request,action:str):
     limit=int(os.getenv("KLYROW_AUTH_RATE_PER_MINUTE","10"))
     if len(bucket)>=limit:raise HTTPException(429,"rate_limit_exceeded")
     bucket.append(now)
-def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id:Optional[str]=Header(default=None),s:Session=Depends(db)):
+def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id:Optional[str]=Header(default=None),x_tenant_id:Optional[str]=Header(default=None,alias="X-Tenant-ID"),s:Session=Depends(db)):
     if not authorization.startswith("Bearer "): raise HTTPException(401,"authentication_required")
     raw=authorization[7:]
+    if x_klyrow_tenant_id and x_tenant_id and x_klyrow_tenant_id!=x_tenant_id:raise HTTPException(403,"tenant_header_mismatch")
+    requested_tenant=x_klyrow_tenant_id or x_tenant_id
     try:
         resolver=os.getenv("KLYROW_TENANT_RESOLVER_URL","").strip()
         if resolver:
             if any(name.lower() in {"x-codestra-tenant-id","x-codestra-identity-id","x-codestra-tenant","x-codestra-subject"} for name in request.headers):raise HTTPException(403,"not_found")
-            permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send" if request.method not in {"GET","HEAD","OPTIONS"} else "klyrow.read"
+            if request.url.path=="/v1/commands":permission="klyrow.middleware.command.write"
+            elif request.url.path.startswith("/v1/operations/"):permission="klyrow.middleware.operation.read"
+            else:permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send" if request.method not in {"GET","HEAD","OPTIONS"} else "klyrow.read"
             headers={"Authorization":"Bearer "+raw,"X-Codestra-Required-Permission":permission}
-            if x_klyrow_tenant_id:headers["X-Klyrow-Tenant-Id"]=x_klyrow_tenant_id
+            if requested_tenant:headers["X-Klyrow-Tenant-Id"]=requested_tenant
             try:
                 response=httpx.get(resolver,headers=headers,timeout=5,follow_redirects=False)
             except httpx.RequestError:
@@ -145,9 +199,9 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
             tenant=s.get(Tenant,ctx["tenant"])
             if not tenant or not tenant.enabled:raise HTTPException(403,"tenant_suspended")
         else:
-            middleware_key=os.getenv("KLYROW_MIDDLEWARE_API_KEY","")
+            middleware_key=runtime_secret("KLYROW_MIDDLEWARE_API_KEY")
             if middleware_key and hmac.compare_digest(raw.encode(),middleware_key.encode()):
-                tenant=s.get(Tenant,x_klyrow_tenant_id) if x_klyrow_tenant_id else None
+                tenant=s.get(Tenant,requested_tenant) if requested_tenant else None
                 if not tenant or not tenant.enabled:raise HTTPException(403,"valid_tenant_required")
                 ctx={"sub":"middleware-service","tenant":tenant.id,"role":"tenant_admin","service":True}
             elif raw.startswith("kly_"):
@@ -174,7 +228,7 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
                     from .tenancy import OidcIdentity,TenantMember
                     identity=s.scalar(select(OidcIdentity).where(OidcIdentity.issuer==issuer,OidcIdentity.subject==claims["sub"],OidcIdentity.enabled==True))
                     if not identity:raise HTTPException(403,"oidc_identity_not_registered")
-                    tenant_id=x_klyrow_tenant_id or identity.default_tenant_id
+                    tenant_id=requested_tenant or identity.default_tenant_id
                     membership=s.scalar(select(TenantMember).where(TenantMember.tenant_id==tenant_id,TenantMember.user_id==identity.user_id,TenantMember.active==True)) if tenant_id else None
                     if not membership:raise HTTPException(403,"tenant_membership_required")
                     ctx={"sub":identity.user_id,"oidc_sub":claims["sub"],"tenant":tenant_id,"role":membership.role,"identity_type":identity.identity_type,"scopes":set(str(claims.get("scope","")).split())}
@@ -205,6 +259,11 @@ def require(*roles):
         if ctx["role"] not in roles: raise HTTPException(403,"insufficient_role")
         return ctx
     return inner
+
+def require_middleware_command_scope(ctx:dict):
+    scopes=set(ctx.get("scopes") or [])|set(ctx.get("permissions") or [])
+    if ctx.get("sub")=="middleware-service" or "klyrow.middleware.command.write" in scopes:return
+    raise HTTPException(403,"middleware_command_scope_required")
 
 def canary_configuration()->tuple[str,str,str,int]:
     try:maximum=int(os.getenv("KLYROW_CANARY_MAX_DELIVERIES","0"))
@@ -306,9 +365,11 @@ class CampaignIn(BaseModel): name:str=Field(min_length=1,max_length=200); subjec
 class TenantIn(BaseModel): name:str=Field(min_length=1,max_length=200); quota:int=Field(default=10000,ge=0,le=10000000)
 class QuotaIn(BaseModel): quota:int=Field(ge=0,le=10000000)
 class WebhookIn(BaseModel): url:str=Field(pattern=r"^https://")
+class MiddlewareCommandIn(BaseModel):
+    command:str=Field(min_length=1,max_length=120);payload:dict=Field(default_factory=dict);target:Optional[str]=Field(default=None,max_length=120);tenant_id:Optional[str]=Field(default=None,max_length=120);correlation_id:Optional[str]=Field(default=None,max_length=200)
 
 async def emit_middleware(event_type:str,payload:dict)->bool:
-    base=os.getenv("KLYROW_MIDDLEWARE_URL","").rstrip("/"); key=os.getenv("KLYROW_MIDDLEWARE_API_KEY",""); secret=os.getenv("KLYROW_WEBHOOK_SECRET","")
+    base=os.getenv("KLYROW_MIDDLEWARE_URL","").rstrip("/"); key=runtime_secret("KLYROW_MIDDLEWARE_API_KEY"); secret=runtime_secret("KLYROW_WEBHOOK_SECRET")
     if not base or not key or not secret:return False
     event_id=payload.get("event_id") or str(uuid.uuid4())
     if event_type.startswith(("klyrow.email.", "klyrow.message.")):
@@ -321,7 +382,8 @@ async def emit_middleware(event_type:str,payload:dict)->bool:
             "attempt":max(1,int(payload.get("attempt") or 1)),"metadata":payload.get("metadata") if isinstance(payload.get("metadata"),dict) else {}}
     else:payload={"event_id":event_id,"source_system":"klyrow","event_type":event_type,"timestamp":datetime.now(timezone.utc).isoformat(),**payload}
     body=json.dumps(payload,separators=(",",":"),sort_keys=True).encode(); ts=str(int(time.time())); canonical=ts.encode()+b"\n"+event_id.encode()+b"\nklyrow\n"+body
-    signature=hmac.new(secret.encode(),canonical,hashlib.sha256).hexdigest(); headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","X-Source-System":"klyrow","X-Klyrow-Timestamp":ts,"X-Klyrow-Event-Id":event_id,"X-Klyrow-Signature":"sha256="+signature}
+    tenant_id=str(payload.get("tenant_id") or payload.get("customer_id") or "");correlation_id=str(payload.get("correlation_id") or event_id)
+    signature=hmac.new(secret.encode(),canonical,hashlib.sha256).hexdigest(); headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","X-Source-System":"klyrow","X-Tenant-ID":tenant_id,"X-Correlation-ID":correlation_id,"Idempotency-Key":"klyrow:event:"+event_id,"X-Klyrow-Timestamp":ts,"X-Klyrow-Event-Id":event_id,"X-Klyrow-Signature":"sha256="+signature}
     email_target=os.getenv("KLYROW_EMAIL_EVENT_URL","").strip()
     # Email lifecycle events have one canonical callback authority.  Do not
     # send them through the legacy generic route first: a failure there used
@@ -357,37 +419,54 @@ async def emit_middleware(event_type:str,payload:dict)->bool:
 POSTAL_EVENTS={
     "MessageSent":"email.delivered", "MessageDeliveryFailed":"email.bounced",
     "MessageBounced":"email.bounced", "MessageDelayed":"email.deferred",
-    "MessageHeld":"email.held", "MessageLoaded":"email.opened",
+    "MessageHeld":"email.deferred", "MessageLoaded":"email.opened",
     "MessageLinkClicked":"email.clicked",
 }
 
 TERMINAL_MESSAGE_STATUSES={
-    "email.sent":"sent", "email.delivered":"delivered", "email.soft_bounce":"soft_bounce",
-    "email.deferred":"soft_bounce",
-    "email.hard_bounce":"hard_bounce", "email.bounced":"hard_bounce",
-    "email.complained":"complaint", "email.complaint":"complaint",
-    "email.rejected":"rejected", "email.failed":"failed",
+    "email.sent":"provider_accepted", "email.delivered":"delivered", "email.soft_bounce":"deferred",
+    "email.deferred":"deferred",
+    "email.hard_bounce":"bounced", "email.bounced":"bounced",
+    "email.complained":"complained", "email.complaint":"complained",
+    "email.rejected":"failed", "email.failed":"failed",
 }
-SUPPRESSION_STATUSES={"hard_bounce", "complaint"}
+SUPPRESSION_STATUSES={"bounced", "complained"}
+
+
+def classify_bounce(raw_status:Optional[str])->tuple[str,bool]:
+    """Classify enhanced SMTP status without suppressing policy/spam failures."""
+    value=(raw_status or "").lower()
+    match=re.search(r"\b([245]\.\d\.\d)\b",value)
+    code=match.group(1) if match else ""
+    if code=="5.7.1":return "failed",False
+    if code.startswith("4.") or code in {"5.2.2","5.3.0","5.4.0"}:return "deferred",False
+    if code.startswith("5."):return "bounced",True
+    return "bounced",True
+
+def reputation_signal(raw_status:Optional[str])->bool:
+    return bool(re.search(r"\b5\.7\.1\b",(raw_status or "").lower()))
+
 
 def persist_email_event(s:Session, *, event_id:str, tenant_id:str, message_id:str, correlation_id:str, event_type:str, recipient:Optional[str], raw_status:Optional[str], payload:str):
     canonical_status=TERMINAL_MESSAGE_STATUSES.get(event_type,event_type.rsplit(".",1)[-1])
+    suppress_recipient=canonical_status in SUPPRESSION_STATUSES
+    if canonical_status=="bounced":canonical_status,suppress_recipient=classify_bounce(raw_status)
     local_message=s.get(Message,message_id) or s.get(Message,correlation_id)
-    if local_message:local_message.status=canonical_status
+    if local_message:set_core_message_status(local_message,canonical_status)
     from .provider import ProviderMessage
     provider_message=s.scalar(select(ProviderMessage).where(ProviderMessage.tenant_id==tenant_id,
         or_(ProviderMessage.id==message_id,ProviderMessage.provider_message_id==message_id,
             ProviderMessage.correlation_id==correlation_id)))
     if provider_message:
-        provider_status={"sent":"SENT","delivered":"DELIVERED","soft_bounce":"BOUNCED_SOFT",
-            "hard_bounce":"BOUNCED_HARD","complaint":"COMPLAINED","failed":"FAILED",
-            "rejected":"FAILED"}.get(canonical_status,canonical_status.upper())
+        provider_status={"provider_accepted":"SENT","delivered":"DELIVERED","deferred":"DEFERRED",
+            "bounced":"BOUNCED_HARD","complained":"COMPLAINED","failed":"FAILED"}.get(canonical_status,canonical_status.upper())
         if provider_status in {"SENT","DELIVERED","BOUNCED_SOFT","BOUNCED_HARD","COMPLAINED","FAILED","DEFERRED"}:
             provider_message.status=provider_status;provider_message.updated_at=datetime.now(timezone.utc)
     if not s.get(Event,event_id):
         s.add(Event(id=event_id,tenant_id=tenant_id,message_id=local_message.id if local_message else message_id,kind="klyrow."+event_type,payload=payload))
         s.add(Audit(id=str(uuid.uuid4()),tenant_id=tenant_id,actor="provider:postal",action="email.status."+canonical_status))
-    if canonical_status in SUPPRESSION_STATUSES and recipient:
+        if reputation_signal(raw_status):s.add(Audit(id=str(uuid.uuid4()),tenant_id=tenant_id,actor="provider:postal",action="email.reputation_signal.policy_rejection"))
+    if suppress_recipient and recipient:
         email=recipient.lower()
         suppression=s.scalar(select(Suppression).where(Suppression.tenant_id==tenant_id,Suppression.email==email))
         if not suppression:s.add(Suppression(id=str(uuid.uuid4()),tenant_id=tenant_id,email=email,reason=canonical_status))
@@ -432,7 +511,9 @@ async def postal_native_hook(request:Request,x_postal_signature_256:str=Header(d
     item.attempts=(item.attempts or 0)+1; item.updated_at=datetime.now(timezone.utc); s.commit()
     canonical_status=persist_email_event(s,event_id=event_id,tenant_id=tenant,message_id=message_id,correlation_id=correlation,event_type=canonical,recipient=normalized.get("recipient"),raw_status=normalized.get("status"),payload=item.payload)
     item=s.get(PostalEvent,event_id);item.payload=json.dumps(normalized,separators=(",",":"),sort_keys=True);s.commit()
-    delivered=await emit_middleware("klyrow."+canonical,{**normalized,"customer_id":tenant})
+    canonical_event=SMTP_EVENT_MAP.get(canonical)
+    if not canonical_event:raise HTTPException(422,"unsupported_postal_event")
+    delivered=await emit_middleware(canonical_event,{**normalized,"customer_id":tenant})
     item=s.get(PostalEvent,event_id)
     if delivered:
         item.state="delivered"; item.last_error=None; s.commit(); MAIL.labels(canonical.rsplit(".",1)[-1]).inc(); return {"accepted":True}
@@ -466,7 +547,9 @@ async def postal_retry_loop():
                 if updated.tzinfo is None:updated=updated.replace(tzinfo=timezone.utc)
                 if (datetime.now(timezone.utc)-updated).total_seconds()<min(60,2**max(snapshot.attempts,1)):continue
                 payload=json.loads(snapshot.payload)
-                delivered=await emit_middleware("klyrow."+snapshot.event_type,{**payload,"customer_id":snapshot.tenant_id})
+                canonical_event=SMTP_EVENT_MAP.get(snapshot.event_type)
+                if not canonical_event:raise RuntimeError("undeclared_postal_event")
+                delivered=await emit_middleware(canonical_event,{**payload,"customer_id":snapshot.tenant_id})
                 with DB() as s:
                     item=s.get(PostalEvent,snapshot.id)
                     if not item or item.state!="retry":continue
@@ -488,7 +571,14 @@ async def email_outbox_loop():
             with DB() as s:
                 stale=datetime.now(timezone.utc)-timedelta(minutes=5)
                 current=datetime.now(timezone.utc)
-                item=s.scalar(select(EmailOutbox).where(or_(EmailOutbox.state=="pending",(EmailOutbox.state=="retry") & (or_(EmailOutbox.next_attempt_at.is_(None),EmailOutbox.next_attempt_at<=current)),(EmailOutbox.state=="sending") & (EmailOutbox.updated_at<stale)),EmailOutbox.attempts<5).order_by(EmailOutbox.created_at).with_for_update(skip_locked=True))
+                from .provider_outcome import INDETERMINATE,reconcile_before_retry
+                abandoned=s.scalar(select(EmailOutbox).where(EmailOutbox.state=="sending",EmailOutbox.updated_at<stale).order_by(EmailOutbox.updated_at).with_for_update(skip_locked=True))
+                if abandoned and not reconcile_before_retry(state=INDETERMINATE,provider_message_id=abandoned.provider_message_id,provider_absence_confirmed=False):
+                    abandoned.state=INDETERMINATE;abandoned.last_error="abandoned_submission_requires_reconciliation";abandoned.next_attempt_at=None;abandoned.updated_at=current
+                    message=s.get(Message,abandoned.message_id)
+                    if message:set_core_message_status(message,"indeterminate")
+                    s.commit();continue
+                item=s.scalar(select(EmailOutbox).where(or_(EmailOutbox.state=="pending",(EmailOutbox.state=="retry") & (or_(EmailOutbox.next_attempt_at.is_(None),EmailOutbox.next_attempt_at<=current))),EmailOutbox.attempts<5).order_by(EmailOutbox.priority,EmailOutbox.created_at).with_for_update(skip_locked=True))
                 if not item:continue
                 try:payload=json.loads(item.payload)
                 except (TypeError,ValueError):
@@ -507,11 +597,14 @@ async def email_outbox_loop():
                 if not payload_allowed or reservation_denied:
                     item.state="quarantined";item.last_error="production_canary_policy_denied";item.updated_at=current
                     message=s.get(Message,item.message_id)
-                    if message:message.status="quarantined"
+                    if message:set_core_message_status(message,"suppressed")
                     s.commit();continue
                 if first_attempt:
                     if gate:gate.claimed_deliveries+=1;gate.updated_at=current
-                item.state="sending";item.attempts+=1;item.next_attempt_at=None;item.updated_at=current;snapshot=(item.id,item.message_id,item.payload);s.commit()
+                item.state="sending";item.attempts+=1;item.next_attempt_at=None;item.updated_at=current
+                message=s.get(Message,item.message_id)
+                if message:set_core_message_status(message,"submitted")
+                snapshot=(item.id,item.message_id,item.payload);s.commit()
             key_file=os.getenv("KLYROW_POSTAL_API_KEY_FILE","")
             key=Path(key_file).read_text(encoding="utf-8").strip() if key_file else ""
             if not key:raise RuntimeError("postal credential unavailable")
@@ -523,18 +616,25 @@ async def email_outbox_loop():
             with DB() as s:
                 item=s.get(EmailOutbox,snapshot[0]);message=s.get(Message,snapshot[1])
                 if item:item.state="delivered";item.provider_message_id=provider_id;item.last_error=None;item.updated_at=datetime.now(timezone.utc)
-                if message:message.status="accepted"
+                if message:set_core_message_status(message,"provider_accepted")
                 s.commit()
         except Exception as exc:
             with DB() as s:
                 if snapshot is not None:
                     item=s.get(EmailOutbox,snapshot[0])
                     if item:
-                        failed=item.attempts>=5;item.state="failed" if failed else "retry";item.last_error=type(exc).__name__;item.updated_at=datetime.now(timezone.utc);item.next_attempt_at=None if failed else item.updated_at+timedelta(seconds=min(300,2**max(item.attempts,1)))
-                        if failed:
+                        from .provider_outcome import INDETERMINATE,provider_outcome_is_ambiguous,reconcile_before_retry
+                        if provider_outcome_is_ambiguous(exc) and not reconcile_before_retry(state=INDETERMINATE,provider_message_id=item.provider_message_id,provider_absence_confirmed=False):
+                            item.state=INDETERMINATE;item.last_error=type(exc).__name__;item.updated_at=datetime.now(timezone.utc);item.next_attempt_at=None
                             message=s.get(Message,item.message_id)
-                            if message:message.status="failed"
-                            s.add(Event(id=str(uuid.uuid4()),tenant_id=item.tenant_id,message_id=item.message_id,kind="klyrow.email.failed",payload=json.dumps({"reason":"provider_retry_exhausted"})))
+                            if message:set_core_message_status(message,"indeterminate")
+                        else:
+                            failed=item.attempts>=5;item.state="failed" if failed else "retry";item.last_error=type(exc).__name__;item.updated_at=datetime.now(timezone.utc);item.next_attempt_at=None if failed else item.updated_at+timedelta(seconds=min(300,2**max(item.attempts,1)))
+                            message=s.get(Message,item.message_id)
+                            if message and not failed:set_core_message_status(message,"deferred")
+                            if failed:
+                                if message:set_core_message_status(message,"failed")
+                                s.add(Event(id=str(uuid.uuid4()),tenant_id=item.tenant_id,message_id=item.message_id,kind="klyrow.email.failed",payload=json.dumps({"reason":"provider_retry_exhausted"})))
                         s.commit()
             print(json.dumps({"level":"warning","system":"klyrow","event":"email_outbox_delivery_failed","error":type(exc).__name__}))
 
@@ -679,26 +779,19 @@ async def beyvra_send(x:MailIn,ctx=Depends(beyvra_service_auth),s:Session=Depend
 
 async def _send(x:MailIn,ctx,s,idempotency_key):
     if not idempotency_key: raise HTTPException(400,"idempotency_key_required")
-    from .operations import enforce_tenant_send_gate
-    enforce_tenant_send_gate(s,ctx["tenant"])
-    from .agent_mailboxes import authorize_agent_sender
-    authorize_agent_sender(s,ctx,x.sender,x.campaign_id,x.reply_to)
     request_hash=sha(x.model_dump_json())
     prior=s.scalar(select(Idempotency).where(Idempotency.key==idempotency_key,Idempotency.tenant_id==ctx["tenant"]))
     if prior:
         if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
         return json.loads(prior.response_json)
+    from .operations import enforce_tenant_send_gate
+    enforce_tenant_send_gate(s,ctx["tenant"])
+    from .agent_mailboxes import authorize_agent_sender
+    authorize_agent_sender(s,ctx,x.sender,x.campaign_id,x.reply_to)
+    from .guards import authorize_send
+    authorization=authorize_send(s,tenant_id=ctx["tenant"],sender=str(x.sender),recipient=str(x.to),stream=x.stream,sandbox=SAFE_MODE,campaign_id=x.campaign_id,topic=x.topic)
     enforce_production_canary(x,s)
-    from .preferences import enforce_suppression
-    enforce_suppression(s,ctx["tenant"],x.to.lower(),x.stream,x.campaign_id)
-    from .saas import Consent,Preference,Profile,UsageLedger
-    profile=s.scalar(select(Profile).where(Profile.tenant_id==ctx["tenant"],Profile.email==x.to.lower()))
-    if x.stream=="marketing":
-        if not profile:raise HTTPException(422,"marketing_consent_required")
-        pref=s.scalar(select(Preference).where(Preference.tenant_id==ctx["tenant"],Preference.profile_id==profile.id,Preference.topic==x.topic))
-        latest=s.scalar(select(Consent).where(Consent.tenant_id==ctx["tenant"],Consent.profile_id==profile.id,Consent.topic==x.topic).order_by(Consent.occurred_at.desc()))
-        if not pref or not pref.subscribed or not latest or latest.status!="granted":raise HTTPException(422,"marketing_consent_required")
-        if x.campaign_id or not SAFE_MODE:enforce_campaign_canary(x,ctx,s)
+    if x.stream=="marketing" and (x.campaign_id or not SAFE_MODE):enforce_campaign_canary(x,ctx,s)
     sender=x.sender.lower();domain=sender.rsplit("@",1)[1]
     from .delivery_controls import enforce_delivery_controls
     enforce_delivery_controls(s,ctx["tenant"],sender,x.stream)
@@ -709,10 +802,82 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
         if not exact:raise HTTPException(403,"sender_address_not_allowed")
     since=datetime.now(timezone.utc)-timedelta(days=1); count=len(s.scalars(select(Message).where(Message.tenant_id==ctx["tenant"],Message.created_at>=since)).all()); tenant=s.get(Tenant,ctx["tenant"])
     if count>=tenant.quota: raise HTTPException(429,"daily_quota_exceeded")
-    mid=str(uuid.uuid4()); status="accepted_test" if SAFE_MODE else "queued"
-    result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=x.to.lower(),sender=x.sender.lower(),subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload=json.dumps({"stream":x.stream}))); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageLedger(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],kind="message."+x.stream,quantity=1,reference=mid))
-    if not SAFE_MODE:s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,payload=json.dumps({"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text,"campaign_id":x.campaign_id,"stream":x.stream},separators=(",",":"),sort_keys=True)))
+    from .billing import UsageEvent
+    from .guards import billing_identity
+    subscription_id,price_id=billing_identity(s,ctx["tenant"],sandbox=SAFE_MODE)
+    mid=str(uuid.uuid4()); status="accepted" if SAFE_MODE else "queued"
+    result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=authorization["recipient"],sender=authorization["sender"],subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload=json.dumps({"stream":x.stream}))); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],subscription_id=subscription_id,message_id=mid,event_key="accepted:api:"+idempotency_key,unit="accepted_message",quantity=1,price_id=price_id))
+    if not SAFE_MODE:
+        from .preferences import one_click_unsubscribe_headers
+        delivery_payload={"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text,"campaign_id":x.campaign_id,"stream":x.stream}
+        if x.stream=="marketing":delivery_payload["headers"]=one_click_unsubscribe_headers(ctx["tenant"],str(x.to))
+        from .guards import stream_priority
+        s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,payload=json.dumps(delivery_payload,separators=(",",":"),sort_keys=True),priority=stream_priority(x.stream)))
     s.commit(); MAIL.labels("queued").inc(); await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{"stream":x.stream}}); return result
+
+def command_payload(x:MiddlewareCommandIn)->dict:
+    payload=dict(x.payload or {})
+    if "from" in payload and "sender" not in payload:payload["sender"]=payload["from"]
+    return payload
+
+def command_request_hash(x:MiddlewareCommandIn)->str:
+    return sha(json.dumps({"command":x.command,"payload":x.payload,"target":x.target,"tenant_id":x.tenant_id},separators=(",",":"),sort_keys=True))
+
+def command_response(item:MiddlewareCommandOperation)->dict:
+    return {"command_id":item.command_id,"tenant_id":item.tenant_id,"command":item.command,"state":item.state,"correlation_id":item.correlation_id,"result":json.loads(item.result_json or "{}"),"error":item.error}
+
+def ensure_command_tenant(ctx:dict,tenant_id:str):
+    if not tenant_id or tenant_id!=ctx["tenant"]:raise HTTPException(403,"tenant_mismatch")
+
+@app.post("/v1/commands",status_code=202)
+async def middleware_command(x:MiddlewareCommandIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:str=Header(alias="Idempotency-Key",min_length=8,max_length=200),x_tenant_id:str=Header(alias="X-Tenant-ID",min_length=1,max_length=120),x_correlation_id:str=Header(alias="X-Correlation-ID",min_length=8,max_length=200)):
+    ensure_command_tenant(ctx,x_tenant_id);require_middleware_command_scope(ctx)
+    if x.tenant_id and x.tenant_id!=x_tenant_id:raise HTTPException(403,"tenant_mismatch")
+    if x.correlation_id and x.correlation_id!=x_correlation_id:raise HTTPException(409,"correlation_id_mismatch")
+    if x.command not in MIDDLEWARE_ALLOWED_COMMANDS:raise HTTPException(422,"unsupported_command")
+    request_hash=command_request_hash(x)
+    prior=s.scalar(select(MiddlewareCommandOperation).where(MiddlewareCommandOperation.tenant_id==ctx["tenant"],MiddlewareCommandOperation.idempotency_key==idempotency_key))
+    if prior:
+        if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
+        return command_response(prior)
+    item=MiddlewareCommandOperation(command_id=str(uuid.uuid4()),tenant_id=ctx["tenant"],command=x.command,idempotency_key=idempotency_key,correlation_id=x_correlation_id,request_hash=request_hash,state="accepted")
+    s.add(item);s.commit()
+    try:
+        payload=command_payload(x)
+        if x.command=="email.message.send.v1":
+            result=await _send(MailIn(**payload),ctx,s,idempotency_key);item.state="queued";item.result_json=json.dumps(result,separators=(",",":"),sort_keys=True)
+        elif x.command=="email.message.cancel.v1":
+            message_id=str(payload.get("message_id") or "");message=s.scalar(select(Message).where(Message.id==message_id,Message.tenant_id==ctx["tenant"]).with_for_update())
+            if not message:raise HTTPException(404,"not_found")
+            if message.status in {"cancelled","delivered","bounced","complained","failed"}:raise HTTPException(409,"terminal_message_cannot_cancel")
+            outbox=s.scalar(select(EmailOutbox).where(EmailOutbox.message_id==message.id,EmailOutbox.tenant_id==ctx["tenant"]).with_for_update())
+            if outbox and outbox.state not in {"pending","retry"}:raise HTTPException(409,"provider_submission_requires_reconciliation")
+            if not outbox and message.status!="accepted":raise HTTPException(409,"message_not_cancellable")
+            if outbox:outbox.state="cancelled";outbox.last_error="cancelled_by_middleware_command";outbox.updated_at=datetime.now(timezone.utc)
+            set_core_message_status(message,"cancelled");item.state="cancelled";item.result_json=json.dumps({"message_id":message.id,"status":"cancelled","outbox_state":outbox.state if outbox else None})
+        elif x.command=="email.domain.verify.v1":
+            domain_id=str(payload.get("domain_id") or "");domain=s.scalar(select(Domain).where(Domain.id==domain_id,Domain.tenant_id==ctx["tenant"]))
+            if not domain:raise HTTPException(404,"not_found")
+            domain_verify(domain.id,ctx,s);item.state="completed";item.result_json=json.dumps({"domain_id":domain.id,"verified":domain.verified})
+        elif x.command=="email.suppression.upsert.v1":
+            email=str(payload.get("email") or payload.get("recipient") or "").lower();reason=str(payload.get("reason") or "policy")[:100]
+            if not email or "@" not in email:raise HTTPException(422,"email_required")
+            suppression=s.scalar(select(Suppression).where(Suppression.tenant_id==ctx["tenant"],Suppression.email==email)) or Suppression(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],email=email,reason=reason)
+            suppression.reason=reason;s.add(suppression);item.state="completed";item.result_json=json.dumps({"email":email,"reason":reason})
+        elif x.command=="email.reputation.snapshot.request.v1":
+            item.state="completed";item.result_json=json.dumps({"status":"accepted","safe_mode":SAFE_MODE})
+        item.updated_at=datetime.now(timezone.utc);s.commit();return command_response(item)
+    except HTTPException as exc:
+        item.state="failed";item.error=str(exc.detail);item.updated_at=datetime.now(timezone.utc);s.commit();raise
+    except ValidationError:
+        item.state="failed";item.error="invalid_command_payload";item.updated_at=datetime.now(timezone.utc);s.commit();raise HTTPException(422,"invalid_command_payload")
+
+@app.get("/v1/operations/{command_id}")
+def middleware_operation(command_id:str,ctx=Depends(auth),s:Session=Depends(db),x_tenant_id:str=Header(alias="X-Tenant-ID",min_length=1,max_length=120)):
+    ensure_command_tenant(ctx,x_tenant_id)
+    item=s.scalar(select(MiddlewareCommandOperation).where(MiddlewareCommandOperation.command_id==command_id,MiddlewareCommandOperation.tenant_id==ctx["tenant"]))
+    if not item:raise HTTPException(404,"not_found")
+    return command_response(item)
 
 @app.post("/v1/email/bulk",status_code=202)
 async def bulk(x:BulkMailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
@@ -738,7 +903,7 @@ def messages(ctx=Depends(auth),s:Session=Depends(db),status:Optional[str]=None,l
 def events(mid:str,ctx=Depends(auth),s:Session=Depends(db)): return s.scalars(select(Event).where(Event.message_id==mid,Event.tenant_id==ctx["tenant"])).all()
 @app.post("/v1/webhooks/postal",status_code=202)
 async def postal_hook(request:Request,x_klyrow_timestamp:str=Header(),x_klyrow_event_id:str=Header(),x_klyrow_signature:str=Header(),s:Session=Depends(db)):
-    body=await request.body(); secret=os.environ.get("KLYROW_WEBHOOK_SECRET","").encode()
+    body=await request.body(); secret=runtime_secret("KLYROW_WEBHOOK_SECRET").encode()
     try: ts=int(x_klyrow_timestamp)
     except: raise HTTPException(401,"invalid_timestamp")
     if abs(time.time()-ts)>300: raise HTTPException(401,"expired_signature")
@@ -746,7 +911,9 @@ async def postal_hook(request:Request,x_klyrow_timestamp:str=Header(),x_klyrow_e
     if not secret or not hmac.compare_digest(expected,x_klyrow_signature): raise HTTPException(401,"invalid_signature")
     if s.get(Replay,x_klyrow_event_id): return {"accepted":True,"duplicate":True}
     s.add(Replay(id=x_klyrow_event_id)); payload=json.loads(body); mid=str(payload.get("message_id") or ""); tenant=payload.get("tenant_id")
-    event_type=payload.get("event","klyrow.email.unknown"); event_type=event_type if event_type.startswith("klyrow.") else "klyrow."+event_type
+    supplied_event=str(payload.get("event") or "");local_event=supplied_event.removeprefix("klyrow.")
+    event_type=SMTP_EVENT_MAP.get(local_event)
+    if not event_type:raise HTTPException(422,"unsupported_postal_event")
     local_type=event_type.removeprefix("klyrow.")
     correlation=str(payload.get("correlation_id") or mid or x_klyrow_event_id)
     if tenant:persist_email_event(s,event_id=x_klyrow_event_id,tenant_id=tenant,message_id=mid,correlation_id=correlation,event_type=local_type,recipient=payload.get("recipient"),raw_status=payload.get("status"),payload=body.decode())

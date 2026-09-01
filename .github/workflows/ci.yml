@@ -10,6 +10,9 @@ permissions:
   contents: read
   pull-requests: read
 
+env:
+  KLYROW_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
 jobs:
   frontend:
     runs-on: ubuntu-latest
@@ -17,13 +20,14 @@ jobs:
       run:
         working-directory: apps/web
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          ref: ${{ env.KLYROW_SOURCE_SHA }}
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
           version: 10.32.1
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: "22"
           cache: pnpm
@@ -52,10 +56,11 @@ jobs:
           --health-timeout 5s
           --health-retries 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          ref: ${{ env.KLYROW_SOURCE_SHA }}
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
@@ -88,11 +93,12 @@ jobs:
   secrets:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          ref: ${{ env.KLYROW_SOURCE_SHA }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -103,38 +109,64 @@ jobs:
       actions: read
       contents: read
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          ref: ${{ env.KLYROW_SOURCE_SHA }}
           persist-credentials: false
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Bind reproducible build epoch to source commit
+        run: echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct)" >> "$GITHUB_ENV"
 
       - name: Build backend candidate
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: apps/gateway/Dockerfile
           load: true
-          tags: klyrow-gateway:${{ github.sha }}
+          tags: klyrow-gateway:${{ env.KLYROW_SOURCE_SHA }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
+
+      - name: Build migration candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/migrate.Dockerfile
+          load: true
+          tags: klyrow-migrate:${{ env.KLYROW_SOURCE_SHA }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
+
+      - name: Build Postal provisioner candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/postal-provisioner.Dockerfile
+          load: true
+          tags: klyrow-postal-provisioner:${{ env.KLYROW_SOURCE_SHA }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
 
       - name: Build frontend candidate
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: apps/web/Dockerfile
           load: true
-          tags: klyrow-web:${{ github.sha }}
+          tags: klyrow-web:${{ env.KLYROW_SOURCE_SHA }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
 
       - name: Verify composed browser edge and canonical callback
         env:
           EDGE_NETWORK: klyrow-auth-edge-ci
-          GATEWAY_IMAGE: klyrow-gateway:${{ github.sha }}
-          WEB_IMAGE: klyrow-web:${{ github.sha }}
+          GATEWAY_IMAGE: klyrow-gateway:${{ env.KLYROW_SOURCE_SHA }}
+          WEB_IMAGE: klyrow-web:${{ env.KLYROW_SOURCE_SHA }}
         run: |
           set -euo pipefail
           cleanup() {
@@ -182,7 +214,7 @@ jobs:
       - name: Scan backend candidate
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: klyrow-gateway:${{ github.sha }}
+          image-ref: klyrow-gateway:${{ env.KLYROW_SOURCE_SHA }}
           format: sarif
           output: trivy-gateway.sarif
           severity: CRITICAL,HIGH
@@ -193,7 +225,7 @@ jobs:
       - name: Scan frontend candidate
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: klyrow-web:${{ github.sha }}
+          image-ref: klyrow-web:${{ env.KLYROW_SOURCE_SHA }}
           format: sarif
           output: trivy-web.sarif
           severity: CRITICAL,HIGH
@@ -201,91 +233,492 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
 
+      - name: Scan migration candidate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: klyrow-migrate:${{ env.KLYROW_SOURCE_SHA }}
+          format: sarif
+          output: trivy-migrate.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Scan Postal provisioner candidate
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: klyrow-postal-provisioner:${{ env.KLYROW_SOURCE_SHA }}
+          format: sarif
+          output: trivy-postal-provisioner.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: "1"
+          ignore-unfixed: true
+
       - name: Retain Trivy scan evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: trivy-${{ github.sha }}
+          name: trivy-${{ env.KLYROW_SOURCE_SHA }}
           path: |
             trivy-gateway.sarif
             trivy-web.sarif
+            trivy-migrate.sarif
+            trivy-postal-provisioner.sarif
           if-no-files-found: error
           retention-days: 30
 
       - name: Generate backend CycloneDX SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          image: klyrow-gateway:${{ github.sha }}
+          image: klyrow-gateway:${{ env.KLYROW_SOURCE_SHA }}
           format: cyclonedx-json
-          output-file: klyrow-gateway-${{ github.sha }}.cdx.json
+          output-file: klyrow-gateway-${{ env.KLYROW_SOURCE_SHA }}.cdx.json
           upload-artifact: true
 
       - name: Generate frontend CycloneDX SBOM
-        uses: anchore/sbom-action@v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
-          image: klyrow-web:${{ github.sha }}
+          image: klyrow-web:${{ env.KLYROW_SOURCE_SHA }}
           format: cyclonedx-json
-          output-file: klyrow-web-${{ github.sha }}.cdx.json
+          output-file: klyrow-web-${{ env.KLYROW_SOURCE_SHA }}.cdx.json
           upload-artifact: true
 
+      - name: Generate migration CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: klyrow-migrate:${{ env.KLYROW_SOURCE_SHA }}
+          format: cyclonedx-json
+          output-file: klyrow-migrate-${{ env.KLYROW_SOURCE_SHA }}.cdx.json
+          upload-artifact: true
+
+      - name: Generate Postal provisioner CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: klyrow-postal-provisioner:${{ env.KLYROW_SOURCE_SHA }}
+          format: cyclonedx-json
+          output-file: klyrow-postal-provisioner-${{ env.KLYROW_SOURCE_SHA }}.cdx.json
+          upload-artifact: true
+
+      - name: Verify reproducible OCI image bytes
+        run: |
+          set -euo pipefail
+          declare -A dockerfiles=(
+            [gateway]="apps/gateway/Dockerfile"
+            [web]="apps/web/Dockerfile"
+            [migrate]="docker/migrate.Dockerfile"
+            [postal-provisioner]="docker/postal-provisioner.Dockerfile"
+          )
+          for image in gateway web migrate postal-provisioner; do
+            dockerfile="${dockerfiles[$image]}"
+            for copy in a b; do
+              docker buildx build \
+                --no-cache \
+                --provenance=false \
+                --sbom=false \
+                --build-arg "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" \
+                --output "type=oci,dest=${RUNNER_TEMP}/klyrow-${image}-${copy}.tar,rewrite-timestamp=true" \
+                --file "${dockerfile}" \
+                .
+            done
+            cmp \
+              "${RUNNER_TEMP}/klyrow-${image}-a.tar" \
+              "${RUNNER_TEMP}/klyrow-${image}-b.tar"
+            sha256sum "${RUNNER_TEMP}/klyrow-${image}-a.tar"
+          done
+
   publish:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && github.ref_protected == true
     needs: [image]
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-      attestations: write
       id-token: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          ref: ${{ env.KLYROW_SOURCE_SHA }}
           persist-credentials: false
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - id: source
+        name: Bind reproducible build epoch to protected source commit
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_REPOSITORY" = 'appolon1908-hue/klyrow.com'
+          test "$GITHUB_REF" = 'refs/heads/main'
+          test "$GITHUB_REF_PROTECTED" = 'true'
+          test "$(git rev-parse HEAD)" = "$KLYROW_SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          echo "epoch=$(git log -1 --pretty=%ct)" >> "$GITHUB_OUTPUT"
 
       - id: push_gateway
-        name: Publish backend image
-        uses: docker/build-push-action@v6
+        name: Publish backend candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: apps/gateway/Dockerfile
-          push: true
-          tags: ghcr.io/${{ github.repository_owner }}/klyrow-gateway:${{ github.sha }}
-          provenance: mode=max
-          sbom: true
+          outputs: type=registry,rewrite-timestamp=true
+          tags: ghcr.io/${{ github.repository_owner }}/klyrow-gateway:candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          build-args: SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          provenance: false
+          sbom: false
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
 
       - id: push_web
-        name: Publish frontend image
-        uses: docker/build-push-action@v6
+        name: Publish frontend candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: apps/web/Dockerfile
-          push: true
-          tags: ghcr.io/${{ github.repository_owner }}/klyrow-web:${{ github.sha }}
-          provenance: mode=max
-          sbom: true
+          outputs: type=registry,rewrite-timestamp=true
+          tags: ghcr.io/${{ github.repository_owner }}/klyrow-web:candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          build-args: SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          provenance: false
+          sbom: false
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
 
-      - name: Attest backend digest
-        uses: actions/attest-build-provenance@v3
+      - id: push_migrate
+        name: Publish migration candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          subject-name: ghcr.io/${{ github.repository_owner }}/klyrow-gateway
-          subject-digest: ${{ steps.push_gateway.outputs.digest }}
-          push-to-registry: true
+          context: .
+          file: docker/migrate.Dockerfile
+          outputs: type=registry,rewrite-timestamp=true
+          tags: ghcr.io/${{ github.repository_owner }}/klyrow-migrate:candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          build-args: SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
 
-      - name: Attest frontend digest
-        uses: actions/attest-build-provenance@v3
+      - id: push_postal_provisioner
+        name: Publish Postal provisioner candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          subject-name: ghcr.io/${{ github.repository_owner }}/klyrow-web
-          subject-digest: ${{ steps.push_web.outputs.digest }}
-          push-to-registry: true
+          context: .
+          file: docker/postal-provisioner.Dockerfile
+          outputs: type=registry,rewrite-timestamp=true
+          tags: ghcr.io/${{ github.repository_owner }}/klyrow-postal-provisioner:candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          build-args: SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
+
+      - name: Pull exact candidates for release evidence
+        env:
+          GATEWAY_DIGEST: ${{ steps.push_gateway.outputs.digest }}
+          WEB_DIGEST: ${{ steps.push_web.outputs.digest }}
+          MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
+          POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
+        run: |
+          set -Eeuo pipefail
+          docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-gateway@${GATEWAY_DIGEST}"
+          docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-web@${WEB_DIGEST}"
+          docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-migrate@${MIGRATE_DIGEST}"
+          docker pull "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-postal-provisioner@${POSTAL_PROVISIONER_DIGEST}"
+
+      - name: Scan exact backend digest
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/klyrow-gateway@${{ steps.push_gateway.outputs.digest }}
+          format: json
+          output: publish-trivy-gateway.json
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Scan exact frontend digest
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/klyrow-web@${{ steps.push_web.outputs.digest }}
+          format: json
+          output: publish-trivy-web.json
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Scan exact migration digest
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/klyrow-migrate@${{ steps.push_migrate.outputs.digest }}
+          format: json
+          output: publish-trivy-migrate.json
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Scan exact Postal provisioner digest
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/klyrow-postal-provisioner@${{ steps.push_postal_provisioner.outputs.digest }}
+          format: json
+          output: publish-trivy-postal-provisioner.json
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+
+      - name: Generate exact backend SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/klyrow-gateway@${{ steps.push_gateway.outputs.digest }}
+          format: spdx-json
+          output-file: publish-sbom-gateway.spdx.json
+          upload-artifact: false
+
+      - name: Generate exact frontend SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/klyrow-web@${{ steps.push_web.outputs.digest }}
+          format: spdx-json
+          output-file: publish-sbom-web.spdx.json
+          upload-artifact: false
+
+      - name: Generate exact migration SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/klyrow-migrate@${{ steps.push_migrate.outputs.digest }}
+          format: spdx-json
+          output-file: publish-sbom-migrate.spdx.json
+          upload-artifact: false
+
+      - name: Generate exact Postal provisioner SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: ghcr.io/${{ github.repository_owner }}/klyrow-postal-provisioner@${{ steps.push_postal_provisioner.outputs.digest }}
+          format: spdx-json
+          output-file: publish-sbom-postal-provisioner.spdx.json
+          upload-artifact: false
+
+      - name: Bind vulnerability, provenance, and SBOM evidence
+        env:
+          GATEWAY_DIGEST: ${{ steps.push_gateway.outputs.digest }}
+          WEB_DIGEST: ${{ steps.push_web.outputs.digest }}
+          MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
+          POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
+        run: |
+          set -Eeuo pipefail
+          for image in gateway web migrate postal-provisioner; do
+            test "$(jq '[.Results[].Vulnerabilities[]?] | length' "publish-trivy-${image}.json")" = 0
+            jq -e '.spdxVersion == "SPDX-2.3" and (.packages | length > 0)' \
+              "publish-sbom-${image}.spdx.json"
+          done
+          for item in \
+            "gateway|$GATEWAY_DIGEST" \
+            "web|$WEB_DIGEST" \
+            "migrate|$MIGRATE_DIGEST" \
+            "postal-provisioner|$POSTAL_PROVISIONER_DIGEST"; do
+            IFS='|' read -r image digest <<< "$item"
+            jq -n \
+              --arg repository "https://github.com/${GITHUB_REPOSITORY}" \
+              --arg source "$KLYROW_SOURCE_SHA" \
+              --arg image "ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}" \
+              --arg digest "$digest" \
+              --arg invocation "$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT" \
+              '{
+                buildDefinition: {
+                  buildType: "https://codestra.co/build-types/github-protected-main/v1",
+                  externalParameters: {
+                    repository: $repository,
+                    sourceCommit: $source,
+                    registryImage: $image,
+                    registryDigest: $digest
+                  },
+                  internalParameters: {protectedRef: "refs/heads/main"},
+                  resolvedDependencies: [{
+                    uri: ("git+" + $repository + "@refs/heads/main"),
+                    digest: {gitCommit: $source}
+                  }]
+                },
+                runDetails: {
+                  builder: {id: ($repository + "/actions")},
+                  metadata: {invocationId: $invocation},
+                  byproducts: []
+                }
+              }' > "publish-provenance-${image}.json"
+          done
+
+      - id: release_state
+        name: Reject immutable source-tag collisions before signing
+        env:
+          GATEWAY_DIGEST: ${{ steps.push_gateway.outputs.digest }}
+          WEB_DIGEST: ${{ steps.push_web.outputs.digest }}
+          MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
+          POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
+        run: |
+          set -Eeuo pipefail
+          for item in \
+            "gateway|$GATEWAY_DIGEST" \
+            "web|$WEB_DIGEST" \
+            "migrate|$MIGRATE_DIGEST" \
+            "postal_provisioner|$POSTAL_PROVISIONER_DIGEST"; do
+            IFS='|' read -r key digest <<< "$item"
+            image="${key//_/-}"
+            final_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}:${KLYROW_SOURCE_SHA}"
+            if existing="$(docker buildx imagetools inspect "$final_image" --format '{{.Manifest.Digest}}' 2>/dev/null)"; then
+              test "$existing" = "$digest"
+              echo "${key}_exists=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "${key}_exists=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+      - name: Install pinned Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v3
+
+      - name: Sign and attest only unpublished exact digests
+        env:
+          GATEWAY_DIGEST: ${{ steps.push_gateway.outputs.digest }}
+          WEB_DIGEST: ${{ steps.push_web.outputs.digest }}
+          MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
+          POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
+          GATEWAY_EXISTS: ${{ steps.release_state.outputs.gateway_exists }}
+          WEB_EXISTS: ${{ steps.release_state.outputs.web_exists }}
+          MIGRATE_EXISTS: ${{ steps.release_state.outputs.migrate_exists }}
+          POSTAL_PROVISIONER_EXISTS: ${{ steps.release_state.outputs.postal_provisioner_exists }}
+          SIGNING_IDENTITY: https://github.com/appolon1908-hue/klyrow.com/.github/workflows/ci.yml@refs/heads/main
+          OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -Eeuo pipefail
+          for item in \
+            "gateway|$GATEWAY_DIGEST|$GATEWAY_EXISTS" \
+            "web|$WEB_DIGEST|$WEB_EXISTS" \
+            "migrate|$MIGRATE_DIGEST|$MIGRATE_EXISTS" \
+            "postal-provisioner|$POSTAL_PROVISIONER_DIGEST|$POSTAL_PROVISIONER_EXISTS"; do
+            IFS='|' read -r image digest published <<< "$item"
+            exact_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}@${digest}"
+            test "$published" != true || continue
+            if ! cosign verify --certificate-identity "$SIGNING_IDENTITY" \
+              --certificate-oidc-issuer "$OIDC_ISSUER" "$exact_image" >/dev/null 2>&1; then
+              cosign sign --yes "$exact_image"
+            fi
+            if ! cosign verify-attestation --type slsaprovenance1 \
+              --certificate-identity "$SIGNING_IDENTITY" --certificate-oidc-issuer "$OIDC_ISSUER" \
+              "$exact_image" 2>/dev/null | jq -e --arg source "$KLYROW_SOURCE_SHA" --arg digest "$digest" '
+                any(.[];
+                  ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.sourceCommit == $source) and
+                  ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.registryDigest == $digest)
+                )' >/dev/null; then
+              cosign attest --yes --type slsaprovenance1 \
+                --predicate "publish-provenance-${image}.json" "$exact_image"
+            fi
+            if ! cosign verify-attestation --type spdxjson \
+              --certificate-identity "$SIGNING_IDENTITY" --certificate-oidc-issuer "$OIDC_ISSUER" \
+              "$exact_image" 2>/dev/null | \
+              jq -e 'any(.[]; ((.payload | @base64d | fromjson).predicate.spdxVersion == "SPDX-2.3"))' >/dev/null; then
+              cosign attest --yes --type spdxjson \
+                --predicate "publish-sbom-${image}.spdx.json" "$exact_image"
+            fi
+          done
+
+      - name: Verify signatures, provenance, and SBOM attestations
+        env:
+          GATEWAY_DIGEST: ${{ steps.push_gateway.outputs.digest }}
+          WEB_DIGEST: ${{ steps.push_web.outputs.digest }}
+          MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
+          POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
+          SIGNING_IDENTITY: https://github.com/appolon1908-hue/klyrow.com/.github/workflows/ci.yml@refs/heads/main
+          OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -Eeuo pipefail
+          for item in \
+            "gateway|$GATEWAY_DIGEST" \
+            "web|$WEB_DIGEST" \
+            "migrate|$MIGRATE_DIGEST" \
+            "postal-provisioner|$POSTAL_PROVISIONER_DIGEST"; do
+            IFS='|' read -r image digest <<< "$item"
+            exact_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}@${digest}"
+            cosign verify --certificate-identity "$SIGNING_IDENTITY" \
+              --certificate-oidc-issuer "$OIDC_ISSUER" "$exact_image" \
+              > "publish-signature-verification-${image}.json"
+            cosign verify-attestation --type slsaprovenance1 \
+              --certificate-identity "$SIGNING_IDENTITY" --certificate-oidc-issuer "$OIDC_ISSUER" \
+              "$exact_image" > "publish-provenance-verification-${image}.json"
+            cosign verify-attestation --type spdxjson \
+              --certificate-identity "$SIGNING_IDENTITY" --certificate-oidc-issuer "$OIDC_ISSUER" \
+              "$exact_image" > "publish-sbom-verification-${image}.json"
+            jq -e 'length > 0' "publish-signature-verification-${image}.json"
+            jq -e --arg source "$KLYROW_SOURCE_SHA" --arg digest "$digest" '
+              any(.[];
+                ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.sourceCommit == $source) and
+                ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.registryDigest == $digest)
+              )' "publish-provenance-verification-${image}.json"
+            jq -e 'any(.[]; ((.payload | @base64d | fromjson).predicate.spdxVersion == "SPDX-2.3"))' \
+              "publish-sbom-verification-${image}.json"
+          done
+
+      - name: Promote only fully certified digests to immutable source tags
+        env:
+          GATEWAY_DIGEST: ${{ steps.push_gateway.outputs.digest }}
+          WEB_DIGEST: ${{ steps.push_web.outputs.digest }}
+          MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
+          POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
+        run: |
+          set -Eeuo pipefail
+          for item in \
+            "gateway|$GATEWAY_DIGEST" \
+            "web|$WEB_DIGEST" \
+            "migrate|$MIGRATE_DIGEST" \
+            "postal-provisioner|$POSTAL_PROVISIONER_DIGEST"; do
+            IFS='|' read -r image digest <<< "$item"
+            exact_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}@${digest}"
+            final_image="ghcr.io/${GITHUB_REPOSITORY_OWNER}/klyrow-${image}:${KLYROW_SOURCE_SHA}"
+            if existing="$(docker buildx imagetools inspect "$final_image" --format '{{.Manifest.Digest}}' 2>/dev/null)"; then
+              test "$existing" = "$digest"
+            else
+              docker buildx imagetools create --prefer-index=false --tag "$final_image" "$exact_image"
+            fi
+            test "$(docker buildx imagetools inspect "$final_image" --format '{{.Manifest.Digest}}')" = "$digest"
+          done
+
+      - name: Checksum and retain exact release evidence
+        env:
+          GATEWAY_DIGEST: ${{ steps.push_gateway.outputs.digest }}
+          WEB_DIGEST: ${{ steps.push_web.outputs.digest }}
+          MIGRATE_DIGEST: ${{ steps.push_migrate.outputs.digest }}
+          POSTAL_PROVISIONER_DIGEST: ${{ steps.push_postal_provisioner.outputs.digest }}
+        run: |
+          set -Eeuo pipefail
+          echo "$KLYROW_SOURCE_SHA" > PUBLISH_SOURCE_SHA
+          jq -n \
+            --arg gateway "$GATEWAY_DIGEST" \
+            --arg web "$WEB_DIGEST" \
+            --arg migrate "$MIGRATE_DIGEST" \
+            --arg postal_provisioner "$POSTAL_PROVISIONER_DIGEST" \
+            '{gateway: $gateway, web: $web, migrate: $migrate, postal_provisioner: $postal_provisioner}' \
+            > PUBLISH_IMAGE_DIGESTS.json
+          sha256sum PUBLISH_SOURCE_SHA PUBLISH_IMAGE_DIGESTS.json \
+            publish-trivy-*.json publish-sbom-*.spdx.json publish-provenance-*.json \
+            publish-signature-verification-*.json publish-provenance-verification-*.json \
+            publish-sbom-verification-*.json > PUBLISH_SHA256SUMS
+          sha256sum -c PUBLISH_SHA256SUMS
+
+      - name: Upload checksummed release evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: klyrow-release-${{ env.KLYROW_SOURCE_SHA }}
+          if-no-files-found: error
+          retention-days: 90
+          path: |
+            PUBLISH_SOURCE_SHA
+            PUBLISH_IMAGE_DIGESTS.json
+            PUBLISH_SHA256SUMS
+            publish-trivy-*.json
+            publish-sbom-*.spdx.json
+            publish-provenance-*.json
+            publish-signature-verification-*.json
+            publish-provenance-verification-*.json
+            publish-sbom-verification-*.json

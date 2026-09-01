@@ -16,16 +16,24 @@ umask 077
 secret 32 | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/session-secret"
 install -o root -g root -m 0600 /dev/null "$runtime_secret_dir/postal-api-key"
 secret 32 | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/metrics-token"
+secret 32 | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/middleware-api-key"
+secret 32 | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/webhook-secret"
+secret 32 | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/provider-credential-key"
+secret 32 | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/postal-provisioner-token"
+openssl rand -base64 32 | tr '+/' '-_' | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/security-payload-key"
 postgres_password="$(secret 24)"
 sed -i \
   -e "s|KLYROW_SESSION_SECRET_FILE=.*|KLYROW_SESSION_SECRET_FILE=$runtime_secret_dir/session-secret|" \
   -e "s|KLYROW_POSTAL_API_KEY_FILE=.*|KLYROW_POSTAL_API_KEY_FILE=$runtime_secret_dir/postal-api-key|" \
   -e "s|KLYROW_METRICS_TOKEN_FILE=.*|KLYROW_METRICS_TOKEN_FILE=$runtime_secret_dir/metrics-token|" \
+  -e "s|KLYROW_MIDDLEWARE_API_KEY_FILE=.*|KLYROW_MIDDLEWARE_API_KEY_FILE=$runtime_secret_dir/middleware-api-key|" \
+  -e "s|KLYROW_WEBHOOK_SECRET_FILE=.*|KLYROW_WEBHOOK_SECRET_FILE=$runtime_secret_dir/webhook-secret|" \
+  -e "s|KLYROW_PROVIDER_CREDENTIAL_KEY_FILE=.*|KLYROW_PROVIDER_CREDENTIAL_KEY_FILE=$runtime_secret_dir/provider-credential-key|" \
+  -e "s|KLYROW_POSTAL_PROVISIONER_TOKEN_FILE=.*|KLYROW_POSTAL_PROVISIONER_TOKEN_FILE=$runtime_secret_dir/postal-provisioner-token|" \
+  -e "s|KLYROW_SECURITY_PAYLOAD_KEY_FILE=.*|KLYROW_SECURITY_PAYLOAD_KEY_FILE=$runtime_secret_dir/security-payload-key|" \
   -e "s|KLYROW_DATABASE_URL=postgresql+psycopg://klyrow:CHANGE_ME@postgres:5432/klyrow|KLYROW_DATABASE_URL=postgresql+psycopg://klyrow:$postgres_password@postgres:5432/klyrow|" \
   -e "s|KLYROW_ADMIN_EMAIL=admin@klyrow.com|KLYROW_ADMIN_EMAIL=$admin_email|" \
   -e "s|KLYROW_ADMIN_PASSWORD=CHANGE_ME_20_CHARS|KLYROW_ADMIN_PASSWORD=$admin_password|" \
-  -e "s|KLYROW_MIDDLEWARE_API_KEY=CHANGE_ME_64_HEX|KLYROW_MIDDLEWARE_API_KEY=$(secret 32)|" \
-  -e "s|KLYROW_WEBHOOK_SECRET=CHANGE_ME_64_HEX|KLYROW_WEBHOOK_SECRET=$(secret 32)|" \
   -e "s|POSTGRES_PASSWORD=CHANGE_ME|POSTGRES_PASSWORD=$postgres_password|" \
   -e "s|MAUTIC_DB_PASSWORD=CHANGE_ME|MAUTIC_DB_PASSWORD=$(secret 24)|" \
   -e "s|MAUTIC_DB_ROOT_PASSWORD=CHANGE_ME|MAUTIC_DB_ROOT_PASSWORD=$(secret 24)|" \

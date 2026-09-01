@@ -102,7 +102,12 @@ def dkim_rotate(item_id:str,ctx=Depends(auth),s:Session=Depends(db)):
     item=tenant_get(s,DomainClaim,item_id,ctx["tenant"])
     if item.state not in {"VERIFIED","SENDING_ENABLED"}:raise HTTPException(409,"domain_not_verified")
     for key in s.scalars(select(DkimKeyVersion).where(DkimKeyVersion.domain_claim_id==item.id,DkimKeyVersion.active==True)).all():key.active=False;key.retired_at=now()
-    item.dkim_version+=1;item.dkim_selector="kly"+secrets.token_hex(4);public="v=DKIM1; k=rsa; p=SIMULATED_PUBLIC_KEY_"+secrets.token_urlsafe(32);key=DkimKeyVersion(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],domain_claim_id=item.id,selector=item.dkim_selector,version=item.dkim_version,public_key=public,private_key_reference="secret://dkim/"+item.id+"/"+str(item.dkim_version));s.add(key);audit(s,ctx,"domain.dkim_rotated");s.commit();return {"selector":key.selector,"version":key.version,"public_record":key.public_key,"private_key_exported":False}
+    item.dkim_version+=1
+    from .provider import generate_dkim_material
+    selector,public,private_reference=generate_dkim_material(item,item.dkim_version)
+    item.dkim_selector=selector
+    key=DkimKeyVersion(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],domain_claim_id=item.id,selector=selector,version=item.dkim_version,public_key=public,private_key_reference=private_reference)
+    s.add(key);audit(s,ctx,"domain.dkim_rotated");s.commit();return {"selector":key.selector,"version":key.version,"public_record":key.public_key,"private_key_exported":False}
 @router.post("/senders",status_code=201)
 def sender_create(x:SenderIn,ctx=Depends(auth),s:Session=Depends(db)):
     claim=tenant_get(s,DomainClaim,x.domain_claim_id,ctx["tenant"]);kind=x.stream.upper()

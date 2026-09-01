@@ -1,14 +1,12 @@
 services:
   gateway:
     environment:
-      KLYROW_REQUIRED_SCHEMA_VERSION: 2026082703_postal_tenant_provisioning.sql
+      KLYROW_REQUIRED_SCHEMA_VERSION: 2026090101_mail_contract_and_command_plane.sql
       KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED: "true"
       KLYROW_ALLOW_LEGACY_GLOBAL_POSTAL_KEY: "false"
 
   postal-provisioner:
-    build:
-      context: .
-      dockerfile: docker/postal-provisioner.Dockerfile
+    image: '${KLYROW_POSTAL_PROVISIONER_IMAGE:?set the exact protected Postal provisioner image by digest}'
     environment:
       KLYROW_ADMIN_EMAIL: ${KLYROW_ADMIN_EMAIL:?required}
       KLYROW_POSTAL_PROVISIONER_TOKEN_FILE: /run/secrets/klyrow_postal_provisioner_token
@@ -29,9 +27,7 @@ services:
       retries: 5
 
   provisioning-worker:
-    build:
-      context: .
-      dockerfile: apps/gateway/Dockerfile
+    image: '${KLYROW_GATEWAY_IMAGE:?set the exact protected gateway image by digest}'
     env_file: '${KLYROW_ENV_FILE:-.env}'
     environment:
       KLYROW_ENV: production

@@ -35,6 +35,7 @@ from .main import (
     canary_gate_key,
     canary_payload_allowed,
     db,
+    set_core_message_status,
 )
 from .tenancy_onboarding import resolve_identity_context
 
@@ -278,85 +279,17 @@ def tenant_postal_api_key(s: Session, tenant_id: str) -> str:
 
 
 async def tenant_email_outbox_loop() -> None:
-    """Existing safe delivery policy with tenant-specific Postal credentials."""
-    while True:
-        await asyncio.sleep(2)
-        if SAFE_MODE:
-            continue
-        snapshot = None
-        try:
-            with DB() as s:
-                stale = now() - timedelta(minutes=5)
-                current = now()
-                item = s.scalar(
-                    select(EmailOutbox)
-                    .where(
-                        or_(
-                            EmailOutbox.state == "pending",
-                            (EmailOutbox.state == "retry") & or_(EmailOutbox.next_attempt_at.is_(None), EmailOutbox.next_attempt_at <= current),
-                            (EmailOutbox.state == "sending") & (EmailOutbox.updated_at < stale),
-                        ),
-                        EmailOutbox.attempts < 5,
-                    )
-                    .order_by(EmailOutbox.created_at)
-                    .with_for_update(skip_locked=True)
-                )
-                if not item:
-                    continue
-                try:
-                    payload = json.loads(item.payload)
-                except (TypeError, ValueError):
-                    item.state = "quarantined"; item.last_error = "invalid_outbox_payload"; item.updated_at = current; s.commit(); continue
-                if not isinstance(payload, dict):
-                    item.state = "quarantined"; item.last_error = "invalid_outbox_payload"; item.updated_at = current; s.commit(); continue
-                campaign_payload = payload.get("stream") == "marketing"
-                campaign_production = campaign_payload and campaign_execution_mode() == "CAMPAIGN_PRODUCTION_ENABLED"
-                gate_key = ("campaign:" + str(payload.get("campaign_id"))) if campaign_payload else canary_gate_key()
-                gate = None if campaign_production else s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key == gate_key).with_for_update())
-                maximum = 1 if campaign_payload else canary_configuration()[3]
-                first_attempt = (item.attempts or 0) == 0
-                reservation_denied = False if campaign_production else (not gate or (first_attempt and (gate.claimed_deliveries >= gate.reserved_deliveries or gate.claimed_deliveries >= maximum)))
-                payload_allowed = campaign_worker_payload_allowed(payload, item.tenant_id) if campaign_payload else canary_payload_allowed(payload)
-                if not payload_allowed or reservation_denied:
-                    item.state = "quarantined"; item.last_error = "production_canary_policy_denied"; item.updated_at = current
-                    message = s.get(Message, item.message_id)
-                    if message: message.status = "quarantined"
-                    s.commit(); continue
-                if first_attempt and gate:
-                    gate.claimed_deliveries += 1; gate.updated_at = current
-                key = tenant_postal_api_key(s, item.tenant_id)
-                item.state = "sending"; item.attempts += 1; item.next_attempt_at = None; item.updated_at = current
-                snapshot = (item.id, item.message_id, item.tenant_id, item.payload, key)
-                s.commit()
-            headers = {"X-Server-API-Key": snapshot[4], "Idempotency-Key": "klyrow:" + snapshot[1]}
-            postal_host = os.getenv("KLYROW_POSTAL_API_HOST_HEADER", "").strip()
-            if postal_host:
-                headers["Host"] = postal_host
-            async with httpx.AsyncClient(timeout=10, trust_env=False, follow_redirects=False) as client:
-                response = await client.post(os.environ["KLYROW_POSTAL_API_URL"] + "/api/v1/send/message", headers=headers, json=json.loads(snapshot[3]))
-                response.raise_for_status()
-                provider_id = str(response.json().get("data", {}).get("message_id") or snapshot[1])
-            with DB() as s:
-                item = s.get(EmailOutbox, snapshot[0]); message = s.get(Message, snapshot[1])
-                if item: item.state = "delivered"; item.provider_message_id = provider_id; item.last_error = None; item.updated_at = now()
-                if message: message.status = "accepted"
-                s.commit()
-        except Exception as exc:
-            with DB() as s:
-                if snapshot is not None:
-                    item = s.get(EmailOutbox, snapshot[0])
-                    if item:
-                        failed = item.attempts >= 5
-                        item.state = "failed" if failed else "retry"
-                        item.last_error = type(exc).__name__
-                        item.updated_at = now()
-                        item.next_attempt_at = None if failed else item.updated_at + timedelta(seconds=min(300, 2 ** max(item.attempts, 1)))
-                        if failed:
-                            message = s.get(Message, item.message_id)
-                            if message: message.status = "failed"
-                            s.add(Event(id=str(uuid.uuid4()), tenant_id=item.tenant_id, message_id=item.message_id, kind="klyrow.email.failed", payload=json.dumps({"reason": "provider_retry_exhausted"})))
-                        s.commit()
-            print(json.dumps({"level": "warning", "system": "klyrow", "event": "tenant_email_outbox_delivery_failed", "error": type(exc).__name__}))
+    """Delegate to the sole hardened delivery implementation.
+
+    The import is intentionally deferred because the canonical worker imports
+    ``tenant_postal_api_key`` from this module. Keeping one implementation
+    prevents the web and service worker entrypoints from diverging on lease,
+    cancellation, priority, and ambiguous provider-outcome behavior.
+    """
+
+    from .tenant_postal_delivery import tenant_email_outbox_loop as hardened_loop
+
+    await hardened_loop()
 
 
 def _mapping_status(s: Session, tenant_id: str) -> dict:

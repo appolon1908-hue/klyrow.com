@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/lib.sh"; require_env
+[[ "$EUID" -eq 0 ]] || { echo "Run deployment with sudo." >&2; exit 1; }
 [[ -e secrets/postal/postal.yml ]] || scripts/render-postal-config
-COMPOSE=(docker compose -f docker-compose.yml -f deploy/docker-compose.security-mail.yml -f docker-compose.web.yml)
+COMPOSE=(docker compose -f docker-compose.yml -f deploy/docker-compose.security-mail.yml -f docker-compose.postal-provisioning.yml -f docker-compose.web.yml)
 "${COMPOSE[@]}" config --quiet
-"${COMPOSE[@]}" up -d --build
+scripts/validate-production-images "${COMPOSE[@]}"
+"${COMPOSE[@]}" pull
+"${COMPOSE[@]}" up -d

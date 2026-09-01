@@ -1,4 +1,6 @@
+import os
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -23,9 +25,11 @@ def claim_domain(tid="a",domain="tenant-a.example"):
     record=created.json()["dns"]["ownership"]["value"];messaging.resolve_txt=lambda _name:[record];verified=client.post(f"/v1/domains/claims/{created.json()['id']}/verify",headers=h,json={"challenge":record.split("=",1)[1]});assert verified.status_code==200
     return h,created.json()["id"]
 
-def test_domain_global_ownership_dkim_rotation_and_sender_spoof_denial():
+def test_domain_global_ownership_dkim_rotation_and_sender_spoof_denial(tmp_path):
     h,claim=claim_domain();assert client.post("/v1/domains/claims",headers=headers("b"),json={"domain":"tenant-a.example"}).status_code==409
-    rotated=client.post(f"/v1/domains/claims/{claim}/dkim/rotate",headers=h);assert rotated.status_code==201 and rotated.json()["private_key_exported"] is False
+    with patch.dict(os.environ,{"KLYROW_DKIM_KEY_DIR":str(tmp_path)}):
+        rotated=client.post(f"/v1/domains/claims/{claim}/dkim/rotate",headers=h)
+    assert rotated.status_code==201 and rotated.json()["private_key_exported"] is False
     denied=client.post("/v1/senders",headers=h,json={"domain_claim_id":claim,"email":"spoof@other.example","display_name":"Spoof","stream":"MARKETING"});assert denied.status_code==403
     sender=client.post("/v1/senders",headers=h,json={"domain_claim_id":claim,"email":"news@tenant-a.example","display_name":"News","stream":"MARKETING"});assert sender.status_code==201
     with DB() as s:assert s.scalar(__import__('sqlalchemy').select(AllowedSender).where(AllowedSender.tenant_id=="a",AllowedSender.address=="news@tenant-a.example",AllowedSender.enabled==True))

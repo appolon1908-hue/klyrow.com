@@ -1,5 +1,6 @@
 """One-click unsubscribe and purpose-scoped suppression controls."""
 import hashlib
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -21,6 +22,15 @@ class ScopedSuppression(Base):
 
 
 class TokenIn(BaseModel):email:EmailStr;scope:str=Field(pattern="^(TENANT_MARKETING|LIST)$");scope_id:Optional[str]=Field(default=None,max_length=200);expires_days:int=Field(default=90,ge=1,le=365)
+
+
+def one_click_unsubscribe_headers(tenant_id:str,email:str,expires_days:int=90)->dict[str,str]:
+    """Issue a tenant-scoped RFC 8058 one-click unsubscribe capability."""
+    claims={"aud":"klyrow-unsubscribe","tenant":tenant_id,"email":email.lower(),"scope":"TENANT_MARKETING","scope_id":"*","jti":str(uuid.uuid4()),"iat":datetime.now(timezone.utc),"exp":datetime.now(timezone.utc)+timedelta(days=expires_days)}
+    token=jwt.encode(claims,key,algorithm="HS256")
+    base=os.getenv("KLYROW_PUBLIC_BASE_URL","https://klyrow.co").rstrip("/")
+    url=base+"/v1/unsubscribe?token="+token
+    return {"List-Unsubscribe":"<"+url+">","List-Unsubscribe-Post":"List-Unsubscribe=One-Click"}
 
 
 @router.post("/unsubscribe/tokens",status_code=201)
