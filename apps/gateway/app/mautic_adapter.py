@@ -298,7 +298,11 @@ def _success(session: Session, item_id: str, response: dict[str, Any]) -> None:
     item.updated_at = current
     result_key = "mautic:" + item.id
     if not session.scalar(
-        select(IntegrationResult).where(IntegrationResult.result_key == result_key)
+        select(IntegrationResult).where(
+            IntegrationResult.tenant_id == item.tenant_id,
+            IntegrationResult.source == "MAUTIC",
+            IntegrationResult.result_key == result_key,
+        )
     ):
         session.add(
             IntegrationResult(

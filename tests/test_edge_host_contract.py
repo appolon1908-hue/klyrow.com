@@ -43,6 +43,7 @@ def test_frontend_container_serves_only_the_canonical_application_host():
 
 def test_provider_edge_keeps_app_api_and_tracking_on_distinct_upstreams():
     source = (ROOT / "docker/proxy/klyrow.conf").read_text(encoding="utf-8")
+    assert "map $http_upgrade $connection_upgrade" in source
     app = _https_block(source, "app.klyrow.com")
     api = _https_block(source, "api.klyrow.com")
     tracking = _https_block(source, "track.klyrow.com")

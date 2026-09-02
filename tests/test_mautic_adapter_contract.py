@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 
 import httpx
 import pytest
@@ -21,6 +22,8 @@ from apps.gateway.app.production_api import (
     mautic_command,
     operation_cancel,
 )
+
+ROOT = Path(__file__).parents[1]
 
 
 @pytest.mark.parametrize(
@@ -166,6 +169,16 @@ def test_completed_operation_returns_its_tenant_scoped_persisted_result():
     response = _operation_json(outbox, ResultSession())
     assert response["status"] == "SUCCEEDED"
     assert response["result"] == {"contacts": {"total": 1}}
+
+
+def test_mautic_provider_result_idempotency_uses_full_composite_scope():
+    source = (ROOT / "apps/gateway/app/mautic_adapter.py").read_text()
+    lookup = source.split('result_key = "mautic:" + item.id', 1)[1].split(
+        "session.add(", 1
+    )[0]
+    assert "IntegrationResult.tenant_id == item.tenant_id" in lookup
+    assert 'IntegrationResult.source == "MAUTIC"' in lookup
+    assert "IntegrationResult.result_key == result_key" in lookup
 
 
 def test_oauth_client_credentials_token_is_strictly_validated():
