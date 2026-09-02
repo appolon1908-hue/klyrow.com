@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -201,12 +202,12 @@ def test_health_counts_outbox_and_reflects_durable_canary_capacity():
 def test_every_long_running_production_service_has_meaningful_health():
     compose = (ROOT / "docker-compose.yml").read_text()
     for service in ("mautic-cron", "mautic-worker"):
-        block = compose.split(f"  {service}:", 1)[1].split("\n  ", 1)[0]
+        block = re.split(r"\n  [a-z0-9][a-z0-9_-]*:\n", compose.split(f"  {service}:\n", 1)[1], maxsplit=1)[0]
         assert "doctrine:query:sql" in block and "healthcheck:" in block
     postal_worker = compose.split("  postal-worker:", 1)[1].split("\n  postal-smtp:", 1)[0]
     assert "rabbitmq" in postal_worker and "postal-db" in postal_worker
     for service in ("prometheus", "grafana", "node-exporter"):
-        block = compose.split(f"  {service}:", 1)[1].split("\n  ", 1)[0]
+        block = re.split(r"\n  [a-z0-9][a-z0-9_-]*:\n", compose.split(f"  {service}:\n", 1)[1], maxsplit=1)[0]
         assert "healthcheck:" in block
 
 
