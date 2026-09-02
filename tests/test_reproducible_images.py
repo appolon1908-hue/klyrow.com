@@ -76,6 +76,9 @@ def test_postal_runtime_is_patched_from_immutable_os_and_gem_inputs():
     assert "CHECKSUMS" in lock
     assert "rails (7.2.3.2) sha256=" in lock
     assert "zlib (3.2.3) sha256=" in lock
+    assert 'ARG SOURCE_SHA' in dockerfile
+    assert 'org.opencontainers.image.revision=$SOURCE_SHA' in dockerfile
+    assert 'wc -c)" -eq 40' in dockerfile
 
 
 def test_ci_compares_two_timestamp_rewritten_oci_exports_before_publish():
@@ -142,6 +145,8 @@ def test_pull_request_images_and_evidence_bind_to_exact_head_sha():
     assert "org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}" in workflow
     assert "trivy-${{ env.KLYROW_SOURCE_SHA }}" in workflow
     assert "klyrow-gateway-${{ env.KLYROW_SOURCE_SHA }}.cdx.json" in workflow
+    assert workflow.count("SOURCE_SHA=${{ env.KLYROW_SOURCE_SHA }}") == 2
+    assert '--build-arg "SOURCE_SHA=${KLYROW_SOURCE_SHA}"' in workflow
 
 
 def test_all_third_party_workflow_actions_are_commit_pinned():
