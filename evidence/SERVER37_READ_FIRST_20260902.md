@@ -91,10 +91,14 @@ mailer/database variable names. No value was copied into this evidence.
   independent DNS and SMTP transport read-back is recorded in
   `SERVER37_DOMAIN_DNS_20260902.md`; active-selector exposure/rotation history
   still prevents mail-domain certification.
-- Migration `2026090208_runtime_database_least_privilege.sql` has replaced the
-  application authority with `klyrow_runtime`; current read-back reports no
+- Migration `2026090208_runtime_database_least_privilege.sql` was applied to the
+  live database at `2026-09-02T17:08:45Z` and created `klyrow_runtime` with no
   superuser, role-creation, database-creation, replication, or RLS-bypass
-  privileges.
+  privileges. The old gateway and worker containers have not been replaced and
+  still use legacy role `klyrow`, which remains cluster-privileged. Runtime
+  least-privilege certification therefore remains `FAIL` until an immutable
+  release switches the application role and current connection read-back
+  proves it.
 - A same-day local backup exists and its local manifest verifies, but the active
   backup job is the legacy plaintext workflow. The approved encrypted backup
   recipient is not installed and current off-host/restore evidence is absent.
