@@ -87,11 +87,14 @@ mailer/database variable names. No value was copied into this evidence.
 
 - Existing live delivery gates are open on the gateway and worker. This was a
   pre-existing state. Postal has active credentials and an empty current queue.
-- Fourteen managed Postal domains report enabled inbound/outbound and historical
-  internal DNS checks as passing. Fresh independent DNS evidence is still
-  required; historical provider status is not certification.
-- The Klyrow PostgreSQL runtime role is currently `SUPERUSER`, `CREATEROLE`,
-  and `CREATEDB`. Least-privilege database certification therefore fails.
+- Fourteen managed Postal domains report enabled inbound/outbound. Current
+  independent DNS and SMTP transport read-back is recorded in
+  `SERVER37_DOMAIN_DNS_20260902.md`; active-selector exposure/rotation history
+  still prevents mail-domain certification.
+- Migration `2026090208_runtime_database_least_privilege.sql` has replaced the
+  application authority with `klyrow_runtime`; current read-back reports no
+  superuser, role-creation, database-creation, replication, or RLS-bypass
+  privileges.
 - A same-day local backup exists and its local manifest verifies, but the active
   backup job is the legacy plaintext workflow. The approved encrypted backup
   recipient is not installed and current off-host/restore evidence is absent.
