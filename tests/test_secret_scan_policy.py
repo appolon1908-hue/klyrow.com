@@ -15,3 +15,16 @@ def test_secret_scan_policy_allows_only_exact_non_secret_values():
     assert "1198C0117593497A5EC5C199286AF1F9897469DC" in policy
     assert "C28D937575603EB4ABB725861C0779DC5C0A9DE4" in policy
     assert "AFD8691FDAEDF03BDF6E460563F15A9B715376CA" in policy
+
+
+def test_full_history_suppressions_are_exact_reviewed_fingerprints():
+    ignored = (ROOT / ".gitleaksignore").read_text(encoding="utf-8").splitlines()
+    fingerprints = [line for line in ignored if line and not line.startswith("#")]
+
+    assert fingerprints == [
+        "ca9fd1a23b32e745b42fb0fcce2945e8d6e9f0e3:docker/mautic.Dockerfile:generic-api-key:61",
+        "95301ef4f2a709c50d2297f022f17af37c8aae90:apps/web/e2e/auth.spec.ts:generic-api-key:35",
+        "e5b8791d0d9c652b084943c5b5fb765b2b32e811:apps/web/e2e/auth.spec.ts:generic-api-key:35",
+        "c5b36f73929d7078d4633e80498fce5be921fa57:apps/web/e2e/auth.spec.ts:generic-api-key:35",
+    ]
+    assert all(len(line.split(":", 1)[0]) == 40 for line in fingerprints)
