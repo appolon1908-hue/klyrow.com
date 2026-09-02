@@ -35,6 +35,12 @@ MAUTIC_SYNC_ROUTES: dict[str, tuple[str, str | None]] = {
     "users_self": ("/api/users/self", None),
 }
 
+MAUTIC_ORIGIN_HEADERS = {
+    "Host": "app.klyrow.com",
+    "X-Forwarded-Proto": "https",
+    "X-Forwarded-Prefix": "/mautic",
+}
+
 
 class MauticAdapterState(Base):
     __tablename__ = "mautic_adapter_state"
@@ -307,7 +313,10 @@ async def dispatch_mautic_outbox(limit: int = 20) -> dict[str, int]:
         return {"completed": 0, "failed": 0, "disabled": 1}
     timeout = httpx.Timeout(10.0, connect=3.0)
     async with httpx.AsyncClient(
-        base_url=base_url, timeout=timeout, follow_redirects=False
+        base_url=base_url,
+        timeout=timeout,
+        follow_redirects=False,
+        headers=MAUTIC_ORIGIN_HEADERS,
     ) as client:
         try:
             token = await _oauth_access_token(client, client_id, client_secret)

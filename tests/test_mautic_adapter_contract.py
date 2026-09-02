@@ -3,7 +3,11 @@ import asyncio
 import httpx
 import pytest
 
-from apps.gateway.app.mautic_adapter import _oauth_access_token, mautic_request
+from apps.gateway.app.mautic_adapter import (
+    MAUTIC_ORIGIN_HEADERS,
+    _oauth_access_token,
+    mautic_request,
+)
 
 
 @pytest.mark.parametrize(
@@ -97,3 +101,11 @@ def test_oauth_client_credentials_token_is_strictly_validated():
             return await _oauth_access_token(client, "client-id", "client-secret")
 
     assert asyncio.run(exercise()) == "t" * 64
+
+
+def test_private_mautic_adapter_preserves_the_canonical_origin():
+    assert MAUTIC_ORIGIN_HEADERS == {
+        "Host": "app.klyrow.com",
+        "X-Forwarded-Proto": "https",
+        "X-Forwarded-Prefix": "/mautic",
+    }
