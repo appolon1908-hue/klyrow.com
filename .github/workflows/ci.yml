@@ -320,6 +320,7 @@ jobs:
                 --no-cache \
                 --provenance=false \
                 --sbom=false \
+                --build-arg "SOURCE_COMMIT_SHA=${KLYROW_SOURCE_SHA}" \
                 --build-arg "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" \
                 --output "type=oci,dest=${RUNNER_TEMP}/klyrow-${image}-${copy}.tar,rewrite-timestamp=true" \
                 --file "${dockerfile}" \
