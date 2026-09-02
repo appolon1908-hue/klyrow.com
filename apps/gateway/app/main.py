@@ -18,10 +18,23 @@ from fastapi.staticfiles import StaticFiles
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
 from pydantic import BaseModel, EmailStr, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
-DATABASE_URL=os.getenv("KLYROW_DATABASE_URL", "sqlite:///./klyrow.db")
+def database_url():
+    value=os.getenv("KLYROW_DATABASE_URL", "sqlite:///./klyrow.db")
+    password_file=os.getenv("KLYROW_DATABASE_PASSWORD_FILE","").strip()
+    production=os.getenv("KLYROW_ENV","development").lower()=="production"
+    if production and not password_file:raise RuntimeError("production requires KLYROW_DATABASE_PASSWORD_FILE")
+    if not password_file:return value
+    path=Path(password_file)
+    if production and (not path.is_absolute() or path.is_symlink()):raise RuntimeError("database password file must be absolute and not a symlink")
+    try:password=path.read_text(encoding="utf-8").strip()
+    except OSError as exc:raise RuntimeError("database password file unavailable") from exc
+    if not password or len(password)>1024:raise RuntimeError("database password file is empty or oversized")
+    return make_url(value).set(password=password)
+
 def runtime_secret(name:str)->str:
     """Read a rotatable secret without permitting production env injection."""
 
@@ -52,6 +65,7 @@ def required_session_secret():
     return value
 SECRET=required_session_secret()
 if len(SECRET) < 32: raise RuntimeError("KLYROW_SESSION_SECRET must contain at least 32 characters")
+DATABASE_URL=database_url()
 SAFE_MODE=safe_mode_enabled()
 engine=create_engine(DATABASE_URL, pool_pre_ping=True)
 DB=sessionmaker(engine, expire_on_commit=False)
@@ -546,6 +560,10 @@ def startup():
         if not required:raise RuntimeError("production requires KLYROW_REQUIRED_SCHEMA_VERSION")
         with engine.connect() as connection:
             present=connection.execute(text("SELECT count(*) FROM klyrow_schema_migrations WHERE version=:version"),{"version":required}).scalar_one()
+            if os.getenv("KLYROW_REQUIRE_LEAST_PRIVILEGE_DB","true").lower()=="true":
+                role, *privileges=connection.execute(text("SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls FROM pg_roles WHERE rolname=current_user")).one()
+                if role!=os.getenv("KLYROW_DATABASE_RUNTIME_ROLE","klyrow_runtime"):raise RuntimeError("unexpected runtime database role")
+                if any(bool(value) for value in privileges):raise RuntimeError("runtime database role has cluster-level privileges")
         if present!=1:raise RuntimeError("required database migration is not applied")
     else:
         Base.metadata.create_all(engine)

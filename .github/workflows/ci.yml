@@ -71,17 +71,32 @@ jobs:
         run: pip-audit --requirement apps/gateway/requirements.txt
       - name: Apply migrations twice and verify the ledger
         env:
-          KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:ci-only-password@127.0.0.1:5432/klyrow_ci
+          KLYROW_DATABASE_URL: postgresql+psycopg://klyrow@127.0.0.1:5432/klyrow_ci
+          KLYROW_DATABASE_OWNER_PASSWORD_FILE: ${{ runner.temp }}/klyrow-db-owner-password
+          KLYROW_DATABASE_RUNTIME_PASSWORD_FILE: ${{ runner.temp }}/klyrow-db-runtime-password
         run: |
+          umask 077
+          printf '%s' 'ci-only-password' > "$KLYROW_DATABASE_OWNER_PASSWORD_FILE"
+          printf '%s' 'ci-runtime-only-password' > "$KLYROW_DATABASE_RUNTIME_PASSWORD_FILE"
+          cleanup() { shred -u "$KLYROW_DATABASE_OWNER_PASSWORD_FILE" "$KLYROW_DATABASE_RUNTIME_PASSWORD_FILE"; }
+          trap cleanup EXIT
           python scripts/migrate
           python scripts/migrate
           python - <<'PY'
           import os
+          from pathlib import Path
           from sqlalchemy import create_engine, text
-          with create_engine(os.environ["KLYROW_DATABASE_URL"]).connect() as connection:
+          from sqlalchemy.engine import make_url
+          runtime_url = make_url(os.environ["KLYROW_DATABASE_URL"]).set(
+              username="klyrow_runtime",
+              password=Path(os.environ["KLYROW_DATABASE_RUNTIME_PASSWORD_FILE"]).read_text(),
+          )
+          with create_engine(runtime_url).connect() as connection:
               count = connection.execute(text("SELECT count(*) FROM klyrow_schema_migrations")).scalar_one()
               expected = sum(1 for _ in __import__("pathlib").Path("migrations").glob("*.sql"))
               assert count == expected, (count, expected)
+              role = connection.execute(text("SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls FROM pg_roles WHERE rolname=current_user")).one()
+              assert role[0] == "klyrow_runtime" and not any(role[1:]), role
           PY
       - name: Compile and test
         env:

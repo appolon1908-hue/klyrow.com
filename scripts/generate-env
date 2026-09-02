@@ -22,6 +22,8 @@ secret 32 | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/prov
 secret 32 | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/postal-provisioner-token"
 openssl rand -base64 32 | tr '+/' '-_' | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/security-payload-key"
 postgres_password="$(secret 24)"
+printf '%s' "$postgres_password" | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/database-owner-password"
+secret 24 | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/database-runtime-password"
 sed -i \
   -e "s|KLYROW_SESSION_SECRET_FILE=.*|KLYROW_SESSION_SECRET_FILE=$runtime_secret_dir/session-secret|" \
   -e "s|KLYROW_POSTAL_API_KEY_FILE=.*|KLYROW_POSTAL_API_KEY_FILE=$runtime_secret_dir/postal-api-key|" \
@@ -31,10 +33,11 @@ sed -i \
   -e "s|KLYROW_PROVIDER_CREDENTIAL_KEY_FILE=.*|KLYROW_PROVIDER_CREDENTIAL_KEY_FILE=$runtime_secret_dir/provider-credential-key|" \
   -e "s|KLYROW_POSTAL_PROVISIONER_TOKEN_FILE=.*|KLYROW_POSTAL_PROVISIONER_TOKEN_FILE=$runtime_secret_dir/postal-provisioner-token|" \
   -e "s|KLYROW_SECURITY_PAYLOAD_KEY_FILE=.*|KLYROW_SECURITY_PAYLOAD_KEY_FILE=$runtime_secret_dir/security-payload-key|" \
-  -e "s|KLYROW_DATABASE_URL=postgresql+psycopg://klyrow:CHANGE_ME@postgres:5432/klyrow|KLYROW_DATABASE_URL=postgresql+psycopg://klyrow:$postgres_password@postgres:5432/klyrow|" \
+  -e "s|KLYROW_DATABASE_OWNER_PASSWORD_FILE=.*|KLYROW_DATABASE_OWNER_PASSWORD_FILE=$runtime_secret_dir/database-owner-password|" \
+  -e "s|KLYROW_DATABASE_RUNTIME_PASSWORD_FILE=.*|KLYROW_DATABASE_RUNTIME_PASSWORD_FILE=$runtime_secret_dir/database-runtime-password|" \
+  -e "s|KLYROW_DATABASE_PASSWORD_FILE=.*|KLYROW_DATABASE_PASSWORD_FILE=$runtime_secret_dir/database-runtime-password|" \
   -e "s|KLYROW_ADMIN_EMAIL=admin@klyrow.com|KLYROW_ADMIN_EMAIL=$admin_email|" \
   -e "s|KLYROW_ADMIN_PASSWORD=CHANGE_ME_20_CHARS|KLYROW_ADMIN_PASSWORD=$admin_password|" \
-  -e "s|POSTGRES_PASSWORD=CHANGE_ME|POSTGRES_PASSWORD=$postgres_password|" \
   -e "s|MAUTIC_DB_PASSWORD=CHANGE_ME|MAUTIC_DB_PASSWORD=$(secret 24)|" \
   -e "s|MAUTIC_DB_ROOT_PASSWORD=CHANGE_ME|MAUTIC_DB_ROOT_PASSWORD=$(secret 24)|" \
   -e "s|POSTAL_DB_PASSWORD=CHANGE_ME|POSTAL_DB_PASSWORD=$(secret 24)|" \

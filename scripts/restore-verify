@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/lib.sh"; require_env
+
+umask 077
+archive="${1:?usage: scripts/restore-verify ENCRYPTED_BACKUP.tar.gz.gpg}"
+private_key="${KLYROW_BACKUP_PRIVATE_KEY_FILE:-}"
+staging_root="${KLYROW_BACKUP_STAGING_ROOT:-/dev/shm}"
+suffix="$$"
+pg_name="klyrow-restore-pg-$suffix"
+mautic_name="klyrow-restore-mautic-$suffix"
+postal_name="klyrow-restore-postal-$suffix"
+rabbit_name="klyrow-restore-rabbit-$suffix"
+gateway_name="klyrow-restore-gateway-$suffix"
+
+[[ -f "$archive" && -f "$archive.sha256" ]] || { echo "Encrypted backup or checksum missing" >&2; exit 1; }
+(cd "$(dirname "$archive")" && sha256sum -c "$(basename "$archive").sha256")
+[[ "$(stat -f -c %T "$staging_root")" == "tmpfs" ]] || { echo "Restore verification staging must be tmpfs" >&2; exit 2; }
+for image in "${KLYROW_GATEWAY_IMAGE:-}" "${KLYROW_POSTGRES_IMAGE:-}" "${KLYROW_MARIADB_IMAGE:-}" "${KLYROW_RABBITMQ_IMAGE:-}"; do
+  [[ "$image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || { echo "Restore verification requires exact image digests" >&2; exit 2; }
+done
+
+stage="$(mktemp -d "$staging_root/klyrow-restore-verify.XXXXXX")"
+[[ "$stage" == "$staging_root"/klyrow-restore-verify.* ]] || { echo "Unsafe restore verification staging path" >&2; exit 2; }
+cleanup(){
+  docker rm -f "$gateway_name" "$rabbit_name" "$postal_name" "$mautic_name" "$pg_name" >/dev/null 2>&1 || true
+  find "$stage" -type f -exec shred -u {} + 2>/dev/null || true
+  rm -rf -- "$stage"
+}
+trap cleanup EXIT
+
+gpg_home="${KLYROW_BACKUP_GNUPGHOME:-$stage/gnupg}"
+if [[ "$gpg_home" == "$stage/gnupg" ]]; then
+  [[ -r "$private_key" ]] || { echo "Backup private key unavailable" >&2; exit 2; }
+  install -d -m 0700 "$gpg_home"
+  gpg --batch --homedir "$gpg_home" --import "$private_key" >/dev/null 2>&1
+fi
+gpg --batch --homedir "$gpg_home" --decrypt "$archive" | tar -xz -C "$stage"
+(cd "$stage" && sha256sum -c MANIFEST.sha256)
+printf '%s\n' 'restore-verification-session-secret-not-for-production' >"$stage/session-secret"
+printf '%s\n' 'restore-runtime-verification-password' >"$stage/database-runtime-password"
+
+docker run --detach --name "$pg_name" --network none --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid \
+  -e POSTGRES_DB=klyrow -e POSTGRES_USER=klyrow -e POSTGRES_PASSWORD=restore-verification \
+  "$KLYROW_POSTGRES_IMAGE" >/dev/null
+docker run --detach --name "$mautic_name" --network none --tmpfs /var/lib/mysql:rw,noexec,nosuid \
+  -e MARIADB_DATABASE=mautic -e MARIADB_USER=mautic -e MARIADB_PASSWORD=restore-verification \
+  -e MARIADB_ROOT_PASSWORD=restore-verification "$KLYROW_MARIADB_IMAGE" >/dev/null
+docker run --detach --name "$postal_name" --network none --tmpfs /var/lib/mysql:rw,noexec,nosuid \
+  -e MARIADB_DATABASE=postal -e MARIADB_USER=postal -e MARIADB_PASSWORD=restore-verification \
+  -e MARIADB_ROOT_PASSWORD=restore-verification "$KLYROW_MARIADB_IMAGE" >/dev/null
+docker run --detach --name "$rabbit_name" --network none --tmpfs /var/lib/rabbitmq:rw,noexec,nosuid \
+  "$KLYROW_RABBITMQ_IMAGE" >/dev/null
+
+ready(){
+  local attempts="$1"; shift
+  for _attempt in $(seq 1 "$attempts"); do
+    if "$@" >/dev/null 2>&1; then return 0; fi
+    sleep 2
+  done
+  return 1
+}
+ready 45 docker exec "$pg_name" pg_isready -U klyrow -d klyrow
+ready 60 docker exec "$mautic_name" healthcheck.sh --connect --innodb_initialized
+ready 60 docker exec "$postal_name" healthcheck.sh --connect --innodb_initialized
+ready 60 docker exec "$rabbit_name" rabbitmq-diagnostics -q ping
+
+docker exec "$pg_name" psql -U klyrow -d klyrow -v ON_ERROR_STOP=1 -c \
+  "CREATE ROLE klyrow_runtime LOGIN PASSWORD 'restore-runtime-verification-password' NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS" >/dev/null
+docker exec -i "$pg_name" pg_restore -U klyrow --clean --if-exists -d klyrow <"$stage/klyrow.dump"
+gzip -dc "$stage/mautic.sql.gz" | docker exec -i "$mautic_name" sh -lc 'MYSQL_PWD=restore-verification exec mariadb -uroot mautic'
+gzip -dc "$stage/postal.sql.gz" | docker exec -i "$postal_name" sh -lc 'MYSQL_PWD=restore-verification exec mariadb -uroot postal'
+docker exec -i "$rabbit_name" rabbitmqctl -q import_definitions - <"$stage/rabbitmq-definitions.json"
+
+docker exec "$pg_name" psql -U klyrow -d klyrow -v ON_ERROR_STOP=1 -Atqc \
+  "SELECT 1 FROM klyrow_schema_migrations WHERE version='2026090208_runtime_database_least_privilege.sql'" | grep -qx 1
+docker exec "$mautic_name" sh -lc "MYSQL_PWD=restore-verification mariadb -uroot mautic -Nse 'SHOW TABLES' | grep -q ."
+docker exec "$postal_name" sh -lc "MYSQL_PWD=restore-verification mariadb -uroot postal -Nse 'SHOW TABLES' | grep -q ."
+docker exec "$rabbit_name" rabbitmqctl -q list_queues name messages --formatter json >"$stage/restored-rabbitmq-queues.json"
+
+docker run --detach --name "$gateway_name" --network "container:$pg_name" --read-only --tmpfs /tmp:rw,noexec,nosuid \
+  -v "$stage/session-secret:/run/secrets/session-secret:ro" \
+  -v "$stage/database-runtime-password:/run/secrets/database-runtime-password:ro" \
+  -e KLYROW_ENV=production -e KLYROW_SAFE_MODE=true -e LIVE_EMAIL_DELIVERY=false \
+  -e EXTERNAL_EMAIL_DELIVERY=false -e PRODUCTION_PROVIDER_ROUTING=false \
+  -e KLYROW_EMBEDDED_WORKERS=false -e KLYROW_SESSION_SECRET_FILE=/run/secrets/session-secret \
+  -e KLYROW_DATABASE_URL=postgresql+psycopg://klyrow_runtime@127.0.0.1:5432/klyrow \
+  -e KLYROW_DATABASE_PASSWORD_FILE=/run/secrets/database-runtime-password \
+  -e KLYROW_REQUIRED_SCHEMA_VERSION=2026090208_runtime_database_least_privilege.sql \
+  "$KLYROW_GATEWAY_IMAGE" >/dev/null
+ready 45 docker exec "$gateway_name" python -c \
+  "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readiness',timeout=2).read()"
+docker exec "$gateway_name" python -c \
+  "import json,urllib.request; p=json.load(urllib.request.urlopen('http://127.0.0.1:8000/capabilities')); assert p['external_delivery_enabled'] is False"
+
+printf 'SERVER37_RESTORE=PASS isolation=network_none delivery=false\n'

@@ -35,7 +35,7 @@ set -Eeuo pipefail
 printf '%s\\n' "$*" >>"$MOCK_DOCKER_LOG"
 case "$*" in
   *"pg_dump"*) printf 'postgres-dump-fixture' ;;
-  *"mariadb-dump"*"--all-databases"*) printf 'postal-dump-fixture' ;;
+  *"postal-db"*"mariadb-dump"*) printf 'postal-dump-fixture' ;;
   *"mariadb-dump"*) printf 'mautic-dump-fixture' ;;
   *"mautic tar"*) printf 'mautic-files-fixture' ;;
   *"export_definitions"*) printf '[]' ;;

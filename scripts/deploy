@@ -6,6 +6,8 @@ COMPOSE=(docker compose -f docker-compose.yml -f deploy/docker-compose.security-
 "${COMPOSE[@]}" config --quiet
 scripts/render-postal-config
 scripts/validate-production-images "${COMPOSE[@]}"
+scripts/verify-release-authority pre-pull "${COMPOSE[@]}"
 "${COMPOSE[@]}" pull
+scripts/verify-release-authority post-pull "${COMPOSE[@]}"
 "${COMPOSE[@]}" up -d --remove-orphans
 scripts/health
