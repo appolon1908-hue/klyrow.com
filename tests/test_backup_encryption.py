@@ -93,6 +93,7 @@ esac
     assert "pg_restore" in calls
     assert calls.count("mariadb -uroot") == 2
     assert "import_definitions" in calls
+    assert "import_definitions -" not in calls
 
 
 def test_backup_scripts_fail_closed_contract():

@@ -28,5 +28,5 @@ docker compose exec -T postgres pg_restore -U klyrow --clean --if-exists -d klyr
 gzip -dc "$stage/mautic.sql.gz" | docker compose exec -T mautic-db sh -lc 'MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb -uroot "$MARIADB_DATABASE"'
 gzip -dc "$stage/postal.sql.gz" | docker compose exec -T postal-db sh -lc 'MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb -uroot "$MARIADB_DATABASE"'
 docker compose exec -T mautic tar -xz -C /var/www/html <"$stage/mautic-files.tar.gz"
-docker compose exec -T rabbitmq rabbitmqctl -q import_definitions - <"$stage/rabbitmq-definitions.json"
+docker compose exec -T rabbitmq rabbitmqctl -q import_definitions <"$stage/rabbitmq-definitions.json"
 printf 'Klyrow databases, Mautic files, and RabbitMQ definitions restored from encrypted backup; configuration was not overwritten.\n'
