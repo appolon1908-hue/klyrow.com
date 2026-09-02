@@ -170,3 +170,15 @@ def test_all_third_party_workflow_actions_are_commit_pinned():
     ]
     assert uses
     assert all(len(reference.rsplit("@", 1)[1]) == 40 for reference in uses)
+
+
+def test_full_history_secret_scan_uses_only_exact_reviewed_fingerprints():
+    ignored = (ROOT / ".gitleaksignore").read_text(encoding="utf-8").splitlines()
+    assert ignored == [
+        "ca9fd1a23b32e745b42fb0fcce2945e8d6e9f0e3:docker/mautic.Dockerfile:generic-api-key:61",
+        "95301ef4f2a709c50d2297f022f17af37c8aae90:apps/web/e2e/auth.spec.ts:generic-api-key:35",
+        "e5b8791d0d9c652b084943c5b5fb765b2b32e811:apps/web/e2e/auth.spec.ts:generic-api-key:35",
+        "c5b36f73929d7078d4633e80498fce5be921fa57:apps/web/e2e/auth.spec.ts:generic-api-key:35",
+    ]
+    assert all(len(line.split(":", 1)[0]) == 40 for line in ignored)
+    assert all(line.endswith(":generic-api-key:35") for line in ignored[1:])
