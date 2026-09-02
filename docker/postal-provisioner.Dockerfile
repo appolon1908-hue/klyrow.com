@@ -1,8 +1,10 @@
 FROM ghcr.io/postalserver/postal:3.3.7@sha256:e54b4a7eb106ee15eda5664311c4b9415546d4196f5c4336d23a78d6ce57b819
 ARG SOURCE_SHA
+ARG SOURCE_DATE_EPOCH
 ARG SOURCE_REPOSITORY=https://github.com/appolon1908-hue/klyrow.com
 RUN test "$(printf '%s' "$SOURCE_SHA" | wc -c)" -eq 40 \
-    && case "$SOURCE_SHA" in *[!0-9a-f]*) exit 1 ;; *) : ;; esac
+    && case "$SOURCE_SHA" in *[!0-9a-f]*) exit 1 ;; *) : ;; esac \
+    && case "$SOURCE_DATE_EPOCH" in ''|*[!0-9]*) exit 1 ;; *) : ;; esac
 LABEL org.opencontainers.image.source=$SOURCE_REPOSITORY \
       org.opencontainers.image.revision=$SOURCE_SHA \
       org.opencontainers.image.version=$SOURCE_SHA
@@ -25,9 +27,10 @@ RUN rm -f /etc/apt/sources.list.d/* \
         /var/cache/ldconfig/aux-cache
 COPY docker/postal-security/Gemfile /opt/postal/app/Gemfile
 COPY docker/postal-security/Gemfile.lock /opt/postal/app/Gemfile.lock
-RUN bundle config set deployment true \
+RUN export SOURCE_DATE_EPOCH \
+    && bundle config set deployment true \
     && bundle config set without 'development test' \
-    && bundle install --jobs 4 --retry 3 \
+    && bundle install --jobs 1 --retry 3 \
     && bundle clean --force \
     && rm -rf \
         /usr/local/bundle/gems/{activestorage-7.1.6,activesupport-7.1.6,addressable-2.8.6,bcrypt-3.1.20,concurrent-ruby-1.3.6,faraday-2.9.0,jwt-2.8.1,net-imap-0.5.8,puma-7.0.4,resolv-0.6.2,uri-1.0.3,websocket-driver-0.8.0} \

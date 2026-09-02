@@ -79,6 +79,9 @@ def test_postal_runtime_is_patched_from_immutable_os_and_gem_inputs():
     assert "rails (7.2.3.2) sha256=" in lock
     assert "zlib (3.2.3) sha256=" in lock
     assert 'ARG SOURCE_SHA' in dockerfile
+    assert 'ARG SOURCE_DATE_EPOCH' in dockerfile
+    assert 'export SOURCE_DATE_EPOCH' in dockerfile
+    assert 'bundle install --jobs 1 --retry 3' in dockerfile
     assert 'org.opencontainers.image.revision=$SOURCE_SHA' in dockerfile
     assert 'wc -c)" -eq 40' in dockerfile
 
@@ -95,6 +98,10 @@ def test_ci_compares_two_timestamp_rewritten_oci_exports_before_publish():
     assert "type=oci,dest=${RUNNER_TEMP}/klyrow-${image}-${copy}.tar,rewrite-timestamp=true" in workflow
     assert "cmp \\\n" in workflow
     assert workflow.count("outputs: type=registry,rewrite-timestamp=true") == 4
+    initial_postal_build = workflow.split(
+        "- name: Build Postal provisioner candidate", maxsplit=1
+    )[1].split("- name: Build frontend candidate", maxsplit=1)[0]
+    assert "SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}" in initial_postal_build
 
 
 def test_protected_publication_covers_every_production_owned_image():

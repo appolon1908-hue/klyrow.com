@@ -164,7 +164,9 @@ jobs:
           file: docker/postal-provisioner.Dockerfile
           load: true
           tags: klyrow-postal-provisioner:${{ env.KLYROW_SOURCE_SHA }}
-          build-args: SOURCE_SHA=${{ env.KLYROW_SOURCE_SHA }}
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+            SOURCE_SHA=${{ env.KLYROW_SOURCE_SHA }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
