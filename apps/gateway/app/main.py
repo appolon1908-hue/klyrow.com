@@ -136,7 +136,7 @@ class Contact(Base):
     __tablename__="contacts"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); email:Mapped[str]=mapped_column(String,index=True); name:Mapped[Optional[str]]=mapped_column(String,nullable=True); subscribed:Mapped[bool]=mapped_column(Boolean,default=True); metadata_json:Mapped[str]=mapped_column(Text,default="{}")
     __table_args__=(UniqueConstraint("tenant_id","email",name="uq_contact_tenant_email"),)
 class Campaign(Base):
-    __tablename__="campaigns"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); name:Mapped[str]=mapped_column(String); status:Mapped[str]=mapped_column(String,default="draft"); subject:Mapped[Optional[str]]=mapped_column(String,nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+    __tablename__="campaigns"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); name:Mapped[str]=mapped_column(String); status:Mapped[str]=mapped_column(String,default="draft"); subject:Mapped[Optional[str]]=mapped_column(String,nullable=True); scheduled_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class Idempotency(Base):
     __tablename__="idempotency_keys"; id:Mapped[str]=mapped_column(String,primary_key=True,default=lambda:str(uuid.uuid4())); key:Mapped[str]=mapped_column(String); tenant_id:Mapped[str]=mapped_column(String,index=True); request_hash:Mapped[str]=mapped_column(String); resource_id:Mapped[str]=mapped_column(String); response_json:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); __table_args__=(UniqueConstraint("tenant_id","key",name="uq_idempotency_tenant_key"),)
 class EmailOutbox(Base):
@@ -876,8 +876,12 @@ async def middleware_command(x:MiddlewareCommandIn,ctx=Depends(auth),s:Session=D
 def middleware_operation(command_id:str,ctx=Depends(auth),s:Session=Depends(db),x_tenant_id:str=Header(alias="X-Tenant-ID",min_length=1,max_length=120)):
     ensure_command_tenant(ctx,x_tenant_id)
     item=s.scalar(select(MiddlewareCommandOperation).where(MiddlewareCommandOperation.command_id==command_id,MiddlewareCommandOperation.tenant_id==ctx["tenant"]))
-    if not item:raise HTTPException(404,"not_found")
-    return command_response(item)
+    if item:return command_response(item)
+    from .operations import IntegrationOutbox
+    integration=s.scalar(select(IntegrationOutbox).where(IntegrationOutbox.id==command_id,IntegrationOutbox.tenant_id==ctx["tenant"]))
+    if not integration:raise HTTPException(404,"not_found")
+    state={"PENDING":"QUEUED","PROCESSING":"PROCESSING","COMPLETED":"SUCCEEDED","RETRY":"FAILED","DEAD_LETTER":"RECONCILIATION_REQUIRED","CANCELLED":"CANCELLED"}.get(integration.state,integration.state)
+    return {"operation_id":integration.id,"status":state,"resource_version":integration.updated_at,"result":{},"error":integration.last_error,"retryability":integration.state in {"RETRY","DEAD_LETTER"},"reconciliation_required":integration.state=="DEAD_LETTER","correlation_id":integration.idempotency_key}
 
 @app.post("/v1/email/bulk",status_code=202)
 async def bulk(x:BulkMailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
@@ -1013,6 +1017,8 @@ from .messaging import router as messaging_router
 app.include_router(messaging_router)
 from .operations import router as operations_router
 app.include_router(operations_router)
+from .production_api import router as production_api_router
+app.include_router(production_api_router)
 from .reseller import router as reseller_router
 app.include_router(reseller_router)
 from .delivery_controls import router as delivery_controls_router

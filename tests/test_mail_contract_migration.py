@@ -19,6 +19,6 @@ def test_mail_contract_migration_is_forward_only_and_fail_closed():
 
 
 def test_production_compose_requires_latest_mail_contract_migration():
-    required = "KLYROW_REQUIRED_SCHEMA_VERSION: 2026090101_mail_contract_and_command_plane.sql"
+    required = "KLYROW_REQUIRED_SCHEMA_VERSION: 2026090201_full_platform_api.sql"
     assert required in Path("docker-compose.yml").read_text(encoding="utf-8")
     assert required in Path("docker-compose.postal-provisioning.yml").read_text(encoding="utf-8")

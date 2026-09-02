@@ -1,7 +1,7 @@
 services:
   gateway:
     environment:
-      KLYROW_REQUIRED_SCHEMA_VERSION: 2026090101_mail_contract_and_command_plane.sql
+      KLYROW_REQUIRED_SCHEMA_VERSION: 2026090201_full_platform_api.sql
       KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED: "true"
       KLYROW_ALLOW_LEGACY_GLOBAL_POSTAL_KEY: "false"
 

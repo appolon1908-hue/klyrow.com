@@ -19,7 +19,7 @@ services:
       KLYROW_CANARY_ALLOWED_SENDER: ${KLYROW_CANARY_ALLOWED_SENDER:-}
       KLYROW_CANARY_ALLOWED_RECIPIENT: ${KLYROW_CANARY_ALLOWED_RECIPIENT:-}
       KLYROW_CANARY_MAX_DELIVERIES: ${KLYROW_CANARY_MAX_DELIVERIES:-0}
-      KLYROW_REQUIRED_SCHEMA_VERSION: 2026090101_mail_contract_and_command_plane.sql
+      KLYROW_REQUIRED_SCHEMA_VERSION: 2026090201_full_platform_api.sql
       KLYROW_BULK_DELIVERY_ENABLED: "false"
       KLYROW_CAMPAIGN_DELIVERY_ENABLED: "false"
       KLYROW_CAMPAIGN_EXECUTION_MODE: "${KLYROW_CAMPAIGN_EXECUTION_MODE:-CAMPAIGN_EXECUTION_DISABLED}"
@@ -109,14 +109,18 @@ services:
   scheduler:
     image: '${KLYROW_GATEWAY_IMAGE:?set the exact protected gateway image by digest}'
     environment:
+      KLYROW_ENV: production
       KLYROW_WORKER_ROLE: scheduler
       KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
+      KLYROW_MAUTIC_API_URL: http://mautic
+      KLYROW_MAUTIC_API_TOKEN_FILE: /run/secrets/klyrow_mautic_api_token
     command: ["python", "-m", "app.service_worker"]
-    secrets: [klyrow_session_secret]
+    secrets: [klyrow_session_secret, klyrow_mautic_api_token]
     depends_on:
       postgres: {condition: service_healthy}
       gateway-migrate: {condition: service_completed_successfully}
+      mautic: {condition: service_healthy}
     networks: [backend]
     restart: unless-stopped
     read_only: true
@@ -417,3 +421,5 @@ secrets:
     file: '${KLYROW_MIDDLEWARE_API_KEY_FILE:?set the root-owned Middleware API key path}'
   klyrow_webhook_secret:
     file: '${KLYROW_WEBHOOK_SECRET_FILE:?set the root-owned webhook secret path}'
+  klyrow_mautic_api_token:
+    file: '${KLYROW_MAUTIC_API_TOKEN_FILE:?set the root-owned Mautic API token path}'
