@@ -8,11 +8,12 @@ RUN pnpm install --frozen-lockfile
 COPY apps/web/ ./
 RUN pnpm build
 
-FROM nginxinc/nginx-unprivileged:1.30.4-alpine3.24@sha256:45ce1e2e699234253d1def7baa96218a5d00b498d1ba0cbb1a17b6bdf73d1351
-# Pin an exact published patched Nginx runtime rather than a moving minor tag.
-# Assert the exact pinned runtime patch level, then return to non-root UID 101.
+FROM nginxinc/nginx-unprivileged:1.30.4-alpine-slim@sha256:11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200
+# Pin the exact minimal Nginx runtime that omits libexpat entirely. Keeping the
+# fix in the immutable base manifest avoids a mutable Alpine repository lookup.
 USER root
-RUN nginx -v 2>&1 | grep -q 'nginx/1.30.4'
+RUN nginx -v 2>&1 | grep -q 'nginx/1.30.4' \
+    && ! apk info -e libexpat
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /build/dist /usr/share/nginx/html
 USER 101

@@ -25,9 +25,15 @@ def test_python_dependency_closure_is_exactly_pinned():
     assert "psycopg-binary==3.2.9" in specifications
 
 
-def test_web_runtime_does_not_retain_nondeterministic_package_log():
+def test_web_runtime_uses_pinned_slim_base_without_libexpat():
     dockerfile = (ROOT / "apps/web/Dockerfile").read_text(encoding="utf-8")
     assert "apk upgrade" not in dockerfile
+    assert "apk add" not in dockerfile
+    assert (
+        "nginxinc/nginx-unprivileged:1.30.4-alpine-slim@sha256:"
+        "11f3f6249b4ae3d7a4ec2a51797060107b88ead52b33b6ed3c6c33f55ca96200"
+    ) in dockerfile
+    assert "! apk info -e libexpat" in dockerfile
 
 
 def test_every_container_build_stage_pins_its_base_manifest_digest():
