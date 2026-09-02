@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import Boolean, DateTime, String, Text, UniqueConstraint, func, select, text
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -36,6 +36,7 @@ from .main import (
     db,
 )
 from .messaging import Template, TemplateUpdate, TemplateVersion, template_update, validate_html
+from .mautic_contract import SUPPORTED_MAUTIC_COMMANDS
 from .operations import IntegrationOutbox, IntegrationResult
 from .tenancy import (
     Organization,
@@ -105,15 +106,20 @@ class SuppressionIn(BaseModel):
 
 
 class MauticCommand(BaseModel):
-    command: str = Field(
-        pattern=r"^(contact\.(upsert|delete)|segment\.(upsert|delete)|campaign\.(upsert|publish|pause)|campaign_membership\.(add|remove)|email_campaign\.state|event\.record|webhook\.register|sync\.request)\.v1$"
-    )
+    command: str = Field(min_length=1, max_length=120)
     aggregate_id: str = Field(min_length=1, max_length=200)
     payload: dict[str, Any] = Field(default_factory=dict)
     request_id: str = Field(min_length=8, max_length=200)
     operation_id: Optional[str] = None
     timestamp: datetime
     trace_context: Optional[str] = Field(default=None, max_length=512)
+
+    @field_validator("command")
+    @classmethod
+    def command_is_implemented(cls, value: str) -> str:
+        if value not in SUPPORTED_MAUTIC_COMMANDS:
+            raise ValueError("mautic_command_unsupported")
+        return value
 
 
 def _tenant_item(s: Session, model: Any, item_id: str, tenant_id: str) -> Any:
@@ -123,7 +129,9 @@ def _tenant_item(s: Session, model: Any, item_id: str, tenant_id: str) -> Any:
     return item
 
 
-def _operation_json(item: MiddlewareCommandOperation | IntegrationOutbox) -> dict[str, Any]:
+def _operation_json(
+    item: MiddlewareCommandOperation | IntegrationOutbox, s: Session
+) -> dict[str, Any]:
     if isinstance(item, MiddlewareCommandOperation):
         state = {
             "accepted": "QUEUED",
@@ -150,10 +158,28 @@ def _operation_json(item: MiddlewareCommandOperation | IntegrationOutbox) -> dic
         "DEAD_LETTER": "RECONCILIATION_REQUIRED",
         "CANCELLED": "CANCELLED",
     }.get(item.state, item.state)
+    persisted_result = None
+    if item.state == "COMPLETED":
+        persisted_result = s.scalar(
+            select(IntegrationResult)
+            .where(
+                IntegrationResult.outbox_id == item.id,
+                IntegrationResult.tenant_id == item.tenant_id,
+            )
+            .order_by(IntegrationResult.created_at.desc())
+        )
+    result: dict[str, Any] = {}
+    if persisted_result is not None:
+        try:
+            candidate = json.loads(persisted_result.payload_json)
+            if isinstance(candidate, dict):
+                result = candidate
+        except (TypeError, ValueError):
+            result = {}
     return {
         "operation_id": item.id,
         "status": state,
-        "result": {},
+        "result": result,
         "error": item.last_error,
         "retryability": item.state in {"RETRY", "DEAD_LETTER"},
         "reconciliation_required": item.state == "DEAD_LETTER",
@@ -658,7 +684,7 @@ def operations(ctx: dict = Depends(auth), s: Session = Depends(db), limit: int =
     limit = max(1, min(limit, 500))
     command_rows = s.scalars(select(MiddlewareCommandOperation).where(MiddlewareCommandOperation.tenant_id == ctx["tenant"]).order_by(MiddlewareCommandOperation.created_at.desc()).limit(limit)).all()
     integration_rows = s.scalars(select(IntegrationOutbox).where(IntegrationOutbox.tenant_id == ctx["tenant"]).order_by(IntegrationOutbox.created_at.desc()).limit(limit)).all()
-    items = [_operation_json(item) for item in [*command_rows, *integration_rows]]
+    items = [_operation_json(item, s) for item in [*command_rows, *integration_rows]]
     items.sort(key=lambda value: value["resource_version"], reverse=True)
     return {"items": items[:limit]}
 
@@ -666,7 +692,7 @@ def operations(ctx: dict = Depends(auth), s: Session = Depends(db), limit: int =
 @router.get("/v1/operations/{operation_id}/events")
 def operation_events(operation_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
     item = _find_operation(s, operation_id, ctx["tenant"])
-    events: list[dict[str, Any]] = [{"status": _operation_json(item)["status"], "at": item.updated_at}]
+    events: list[dict[str, Any]] = [{"status": _operation_json(item, s)["status"], "at": item.updated_at}]
     if isinstance(item, IntegrationOutbox):
         for result in s.scalars(select(IntegrationResult).where(IntegrationResult.outbox_id == item.id, IntegrationResult.tenant_id == ctx["tenant"]).order_by(IntegrationResult.created_at)).all():
             events.append({"status": "SUCCEEDED", "at": result.created_at, "result_id": result.id})
@@ -695,7 +721,7 @@ def operation_cancel(operation_id: str, ctx: dict = Depends(auth), s: Session = 
         item.updated_at = now()
     audit(s, ctx, "operation.cancelled")
     s.commit()
-    return _operation_json(item)
+    return _operation_json(item, s)
 
 
 @router.post("/v1/operations/{operation_id}/reconcile")
@@ -703,20 +729,20 @@ def operation_reconcile(operation_id: str, ctx: dict = Depends(auth), s: Session
     item = _find_operation(s, operation_id, ctx["tenant"])
     if isinstance(item, MiddlewareCommandOperation):
         if item.state != "failed":
-            return _operation_json(item)
+            return _operation_json(item, s)
         item.state = "accepted"
         item.error = None
         item.updated_at = now()
     else:
         if item.state not in {"RETRY", "DEAD_LETTER"}:
-            return _operation_json(item)
+            return _operation_json(item, s)
         item.state = "PENDING"
         item.last_error = None
         item.next_attempt_at = now()
         item.updated_at = now()
     audit(s, ctx, "operation.reconciliation_requested")
     s.commit()
-    return _operation_json(item)
+    return _operation_json(item, s)
 
 
 @router.get("/v1/providers/postal/health")
@@ -748,19 +774,19 @@ def mautic_command(
         prior_payload = json.loads(prior.payload_json)
         if prior_payload.get("semantic_sha256") != digest:
             raise HTTPException(409, "idempotency_key_payload_mismatch")
-        return _operation_json(prior)
+        return _operation_json(prior, s)
     payload = {"envelope": {"request_id": body.request_id, "correlation_id": x_correlation_id, "tenant_id": ctx["tenant"], "actor": ctx["sub"], "operation_id": body.operation_id, "idempotency_key": idempotency_key, "api_version": "v1", "timestamp": body.timestamp.isoformat(), "trace_context": body.trace_context}, "command": body.command, "payload": body.payload, "semantic_sha256": digest}
     item = IntegrationOutbox(id=body.operation_id or str(uuid.uuid4()), tenant_id=ctx["tenant"], target="MAUTIC", event_type=body.command, aggregate_id=body.aggregate_id, payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True), idempotency_key=idempotency_key)
     s.add(item)
     audit(s, ctx, "mautic.command.queued")
     s.commit()
-    return _operation_json(item)
+    return _operation_json(item, s)
 
 
 @router.get("/v1/integrations/mautic/operations")
 def mautic_operations(ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
     rows = s.scalars(select(IntegrationOutbox).where(IntegrationOutbox.tenant_id == ctx["tenant"], IntegrationOutbox.target == "MAUTIC").order_by(IntegrationOutbox.created_at.desc()).limit(200)).all()
-    return {"items": [_operation_json(item) for item in rows]}
+    return {"items": [_operation_json(item, s) for item in rows]}
 
 
 @router.get("/v1/integrations/mautic/operations/{operation_id}")
@@ -768,7 +794,7 @@ def mautic_operation(operation_id: str, ctx: dict = Depends(auth), s: Session = 
     item = _tenant_item(s, IntegrationOutbox, operation_id, ctx["tenant"])
     if item.target != "MAUTIC":
         raise HTTPException(404, "not_found")
-    return _operation_json(item)
+    return _operation_json(item, s)
 
 
 @router.post("/v1/integrations/mautic/operations/{operation_id}/reconcile")

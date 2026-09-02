@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
-from pydantic import BaseModel, EmailStr, Field, ValidationError, model_validator
+from pydantic import BaseModel, EmailStr, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -353,12 +353,19 @@ class Reset(BaseModel): token:str; password:str=Field(min_length=14)
 class KeyIn(BaseModel): name:str=Field(min_length=1,max_length=80)
 class DomainIn(BaseModel): domain:str=Field(pattern=r"^[a-z0-9][a-z0-9.-]+$")
 class MailIn(BaseModel):
-    customer_id:Optional[str]=None; to:EmailStr; sender:EmailStr; reply_to:Optional[EmailStr]=None; subject:str=Field(max_length=998); html:str=Field(max_length=100000); text:Optional[str]=None; template_id:Optional[str]=None; campaign_id:Optional[str]=None; tags:list[str]=Field(default_factory=list,max_length=50); tracking:dict=Field(default_factory=dict); callback_metadata:dict=Field(default_factory=dict); stream:str=Field(default="transactional",pattern="^(marketing|transactional|security|system|bulk)$"); topic:str="marketing"
+    customer_id:Optional[str]=None; to:EmailStr; sender:EmailStr; reply_to:Optional[EmailStr]=None; subject:str=Field(max_length=998); html:str=Field(max_length=100000); text:Optional[str]=None; template_id:Optional[str]=None; campaign_id:Optional[str]=None; tags:list[str]=Field(default_factory=list,max_length=50); tracking:dict=Field(default_factory=dict); callback_metadata:dict=Field(default_factory=dict); headers:dict[str,str]=Field(default_factory=dict); stream:str=Field(default="transactional",pattern="^(marketing|transactional|security|system|bulk)$"); topic:str="marketing"
     @model_validator(mode="before")
     @classmethod
     def accept_from_alias(cls,data):
         if isinstance(data,dict) and "sender" not in data and "from" in data:data={**data,"sender":data["from"]}
         return data
+    @field_validator("headers")
+    @classmethod
+    def validate_governed_headers(cls,value):
+        allowed={"Message-ID","In-Reply-To","References"}
+        if not set(value)<=allowed:raise ValueError("unsupported_mail_header")
+        if any(not item or len(item)>4096 or "\r" in item or "\n" in item for item in value.values()):raise ValueError("invalid_mail_header")
+        return value
 class BulkMailIn(BaseModel): messages:list[MailIn]=Field(min_length=1,max_length=100)
 class ContactIn(BaseModel): email:EmailStr; name:Optional[str]=Field(default=None,max_length=200); subscribed:bool=True; metadata:dict={}
 class CampaignIn(BaseModel): name:str=Field(min_length=1,max_length=200); subject:Optional[str]=Field(default=None,max_length=998)
@@ -814,7 +821,9 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
     if not SAFE_MODE:
         from .preferences import one_click_unsubscribe_headers
         delivery_payload={"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text,"campaign_id":x.campaign_id,"stream":x.stream}
-        if x.stream=="marketing":delivery_payload["headers"]=one_click_unsubscribe_headers(ctx["tenant"],str(x.to))
+        delivery_headers=dict(x.headers)
+        if x.stream=="marketing":delivery_headers.update(one_click_unsubscribe_headers(ctx["tenant"],str(x.to)))
+        if delivery_headers:delivery_payload["headers"]=delivery_headers
         from .guards import stream_priority
         s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,payload=json.dumps(delivery_payload,separators=(",",":"),sort_keys=True),priority=stream_priority(x.stream)))
     s.commit(); MAIL.labels("queued").inc(); await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{"stream":x.stream}}); return result

@@ -1,13 +1,17 @@
 import asyncio
+from datetime import datetime, timezone
 
 import httpx
 import pytest
 
 from apps.gateway.app.mautic_adapter import (
     MAUTIC_ORIGIN_HEADERS,
+    SUPPORTED_MAUTIC_COMMANDS,
     _oauth_access_token,
     mautic_request,
 )
+from apps.gateway.app.operations import IntegrationOutbox, IntegrationResult
+from apps.gateway.app.production_api import MauticCommand, _operation_json
 
 
 @pytest.mark.parametrize(
@@ -81,6 +85,78 @@ def test_sync_resource_is_allowlisted():
 def test_invented_event_write_route_is_rejected():
     with pytest.raises(ValueError, match="mautic_command_unsupported"):
         mautic_request("event.record.v1", {"type": "page.hit"})
+
+
+def test_api_command_vocabulary_exactly_matches_the_dispatcher():
+    samples = {
+        "contact.upsert.v1": {"email": "a@example.test"},
+        "contact.delete.v1": {"provider_id": "1"},
+        "segment.upsert.v1": {"name": "A"},
+        "segment.delete.v1": {"provider_id": "2"},
+        "campaign.upsert.v1": {"name": "A"},
+        "campaign.delete.v1": {"provider_id": "3"},
+        "campaign.publish.v1": {"provider_id": "3"},
+        "campaign.pause.v1": {"provider_id": "3"},
+        "campaign_membership.add.v1": {"campaign_id": "3", "contact_id": "1"},
+        "campaign_membership.remove.v1": {"campaign_id": "3", "contact_id": "1"},
+        "segment_membership.add.v1": {"segment_id": "2", "contact_id": "1"},
+        "segment_membership.remove.v1": {"segment_id": "2", "contact_id": "1"},
+        "email_campaign.state.v1": {"email_id": "4", "published": True},
+        "webhook.register.v1": {"name": "Klyrow"},
+        "sync.request.v1": {"resource": "contacts"},
+        "form_submissions.read.v1": {"form_id": "5"},
+    }
+    assert set(samples) == SUPPORTED_MAUTIC_COMMANDS
+    for command, payload in samples.items():
+        MauticCommand(
+            command=command,
+            aggregate_id="aggregate-1",
+            payload=payload,
+            request_id="request-1",
+            timestamp=datetime.now(timezone.utc),
+        )
+        mautic_request(command, payload)
+    with pytest.raises(ValueError, match="mautic_command_unsupported"):
+        MauticCommand(
+            command="event.record.v1",
+            aggregate_id="aggregate-1",
+            request_id="request-2",
+            timestamp=datetime.now(timezone.utc),
+        )
+
+
+def test_completed_operation_returns_its_tenant_scoped_persisted_result():
+    timestamp = datetime.now(timezone.utc)
+    outbox = IntegrationOutbox(
+        id="operation-1",
+        tenant_id="tenant-a",
+        target="MAUTIC",
+        event_type="sync.request.v1",
+        aggregate_id="contacts",
+        payload_json="{}",
+        idempotency_key="request-1",
+        state="COMPLETED",
+        attempts=1,
+        created_at=timestamp,
+        updated_at=timestamp,
+    )
+    persisted = IntegrationResult(
+        id="result-1",
+        tenant_id="tenant-a",
+        outbox_id="operation-1",
+        source="MAUTIC",
+        result_key="mautic:operation-1",
+        payload_json='{"contacts":{"total":1}}',
+        created_at=timestamp,
+    )
+
+    class ResultSession:
+        def scalar(self, _statement):
+            return persisted
+
+    response = _operation_json(outbox, ResultSession())
+    assert response["status"] == "SUCCEEDED"
+    assert response["result"] == {"contacts": {"total": 1}}
 
 
 def test_oauth_client_credentials_token_is_strictly_validated():

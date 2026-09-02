@@ -14,6 +14,7 @@ from sqlalchemy import DateTime, Integer, String, select
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .main import DB, Base, runtime_secret
+from .mautic_contract import SUPPORTED_MAUTIC_COMMANDS
 from .operations import IntegrationOutbox, IntegrationResult
 
 now = lambda: datetime.now(timezone.utc)
@@ -40,7 +41,6 @@ MAUTIC_ORIGIN_HEADERS = {
     "X-Forwarded-Proto": "https",
     "X-Forwarded-Prefix": "/mautic",
 }
-
 
 class MauticAdapterState(Base):
     __tablename__ = "mautic_adapter_state"
@@ -79,6 +79,9 @@ def mautic_request(
     command: str, payload: dict[str, Any]
 ) -> tuple[str, str, dict[str, Any] | None]:
     """Translate the governed command vocabulary into Mautic's canonical API."""
+
+    if command not in SUPPORTED_MAUTIC_COMMANDS:
+        raise ValueError("mautic_command_unsupported")
 
     provider_id = payload.get("provider_id")
     if command.startswith("contact."):

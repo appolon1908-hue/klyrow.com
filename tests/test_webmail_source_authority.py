@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 from sqlalchemy import select
 
-from apps.gateway.app.main import Base, DB, Tenant, engine
+from apps.gateway.app.main import Base, DB, MailIn, Tenant, engine
 from apps.gateway.app import agent_mailboxes, postal_provisioning
 from apps.gateway.app.postal_provisioning import PostalDomainCredential
 from apps.gateway.app.webmail import router as webmail_router
@@ -57,6 +57,33 @@ def test_webmail_is_the_only_campaignless_browser_mail_channel(monkeypatch):
                 session, {"browser": True}, "sender@example.test", None
             )
     assert getattr(denied.value, "status_code", None) == 403
+
+
+def test_webmail_threading_headers_are_governed_and_persisted_for_delivery():
+    headers = {
+        "Message-ID": "<message-1@webmail.example.test>",
+        "In-Reply-To": "<parent-1@webmail.example.test>",
+        "References": "<root-1@webmail.example.test> <parent-1@webmail.example.test>",
+    }
+    payload = MailIn(
+        to="recipient@example.com",
+        sender="sender@example.com",
+        subject="Reply",
+        html="<p>Reply</p>",
+        headers=headers,
+    )
+    assert payload.headers == headers
+    with pytest.raises(ValueError, match="invalid_mail_header"):
+        MailIn(
+            to="recipient@example.com",
+            sender="sender@example.com",
+            subject="Unsafe",
+            html="<p>Unsafe</p>",
+            headers={"Message-ID": "<safe@example.test>\r\nBcc: victim@example.test"},
+        )
+    main_source = (ROOT / "apps/gateway/app/main.py").read_text(encoding="utf-8")
+    assert "delivery_headers=dict(x.headers)" in main_source
+    assert 'delivery_payload["headers"]=delivery_headers' in main_source
 
 
 def test_live_domain_reconciliation_persists_only_attested_owner(monkeypatch):
