@@ -94,6 +94,7 @@ esac
     assert calls.count("mariadb -uroot") == 2
     assert "import_definitions" in calls
     assert "import_definitions -" not in calls
+    assert "import_definitions -" not in (ROOT / "scripts" / "restore-verify").read_text()
 
 
 def test_backup_scripts_fail_closed_contract():

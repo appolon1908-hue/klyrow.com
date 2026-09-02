@@ -69,7 +69,7 @@ docker exec "$pg_name" psql -U klyrow -d klyrow -v ON_ERROR_STOP=1 -c \
 docker exec -i "$pg_name" pg_restore -U klyrow --clean --if-exists -d klyrow <"$stage/klyrow.dump"
 gzip -dc "$stage/mautic.sql.gz" | docker exec -i "$mautic_name" sh -lc 'MYSQL_PWD=restore-verification exec mariadb -uroot mautic'
 gzip -dc "$stage/postal.sql.gz" | docker exec -i "$postal_name" sh -lc 'MYSQL_PWD=restore-verification exec mariadb -uroot postal'
-docker exec -i "$rabbit_name" rabbitmqctl -q import_definitions - <"$stage/rabbitmq-definitions.json"
+docker exec -i "$rabbit_name" rabbitmqctl -q import_definitions <"$stage/rabbitmq-definitions.json"
 
 docker exec "$pg_name" psql -U klyrow -d klyrow -v ON_ERROR_STOP=1 -Atqc \
   "SELECT 1 FROM klyrow_schema_migrations WHERE version='2026090208_runtime_database_least_privilege.sql'" | grep -qx 1

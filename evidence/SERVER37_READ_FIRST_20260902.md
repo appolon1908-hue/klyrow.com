@@ -87,7 +87,7 @@ mailer/database variable names. No value was copied into this evidence.
 
 - Existing live delivery gates are open on the gateway and worker. This was a
   pre-existing state. Postal has active credentials and an empty current queue.
-- Fifteen managed Postal domains report enabled inbound/outbound and historical
+- Fourteen managed Postal domains report enabled inbound/outbound and historical
   internal DNS checks as passing. Fresh independent DNS evidence is still
   required; historical provider status is not certification.
 - The Klyrow PostgreSQL runtime role is currently `SUPERUSER`, `CREATEROLE`,
