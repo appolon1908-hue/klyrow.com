@@ -474,6 +474,7 @@ def domain_verification(
 def message_cancel(
     message_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
 ) -> dict[str, Any]:
+    _require_permission(ctx, "mail.send")
     item = _tenant_item(s, Message, message_id, ctx["tenant"])
     if item.status in {"delivered", "bounced", "complained", "failed", "cancelled"}:
         raise HTTPException(409, "terminal_message_cannot_cancel")
@@ -687,6 +688,7 @@ def tracking_message(message_id: str, ctx: dict = Depends(auth), s: Session = De
 def suppression_create(
     body: SuppressionIn, ctx: dict = Depends(auth), s: Session = Depends(db)
 ) -> Any:
+    _require_permission(ctx, "contact.manage")
     email = str(body.email).lower()
     item = s.scalar(select(Suppression).where(Suppression.tenant_id == ctx["tenant"], Suppression.email == email))
     if item is None:
@@ -702,6 +704,7 @@ def suppression_create(
 def suppression_delete(
     suppression_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
 ) -> Response:
+    _require_permission(ctx, "contact.manage")
     item = _tenant_item(s, Suppression, suppression_id, ctx["tenant"])
     s.delete(item)
     audit(s, ctx, "suppression.deleted")
@@ -924,7 +927,6 @@ def system_capabilities(ctx: dict = Depends(auth)) -> dict[str, Any]:
 
 @router.get("/v1/system/readiness")
 def system_readiness(ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
-    del ctx
     s.execute(text("SELECT 1"))
-    postal = postal_health({}, s)
+    postal = postal_health(ctx, s)
     return {"status": "ready" if postal["configured"] else "degraded", "database": "ok", "postal": postal["status"], "source_sha": os.getenv("KLYROW_SOURCE_SHA", "development")}

@@ -1064,10 +1064,10 @@ def middleware_operation(command_id:str,ctx=Depends(auth),s:Session=Depends(db),
     item=s.scalar(select(MiddlewareCommandOperation).where(MiddlewareCommandOperation.command_id==command_id,MiddlewareCommandOperation.tenant_id==ctx["tenant"]))
     if item:return command_response(reconcile_email_command_operation(item,s))
     from .operations import IntegrationOutbox
+    from .production_api import _operation_json
     integration=s.scalar(select(IntegrationOutbox).where(IntegrationOutbox.id==command_id,IntegrationOutbox.tenant_id==ctx["tenant"]))
     if not integration:raise HTTPException(404,"not_found")
-    state={"PENDING":"QUEUED","PROCESSING":"PROCESSING","COMPLETED":"SUCCEEDED","RETRY":"FAILED","DEAD_LETTER":"RECONCILIATION_REQUIRED","CANCELLED":"CANCELLED"}.get(integration.state,integration.state)
-    return {"operation_id":integration.id,"status":state,"resource_version":integration.updated_at,"result":{},"error":integration.last_error,"retryability":integration.state in {"RETRY","DEAD_LETTER"},"reconciliation_required":integration.state=="DEAD_LETTER","correlation_id":integration.idempotency_key}
+    return _operation_json(integration,s)
 
 @app.post("/v1/email/bulk",status_code=202)
 async def bulk(x:BulkMailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):

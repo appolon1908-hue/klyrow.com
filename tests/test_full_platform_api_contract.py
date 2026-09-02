@@ -8,12 +8,17 @@ from apps.gateway.app.operations import IntegrationOutbox
 from apps.gateway.app.production_api import (
     ContactPatch,
     MauticCommand,
+    SuppressionIn,
     _authorize_operation_read,
     _require_permission,
     contact_delete,
     contact_patch,
+    message_cancel,
     mautic_command,
     postal_health,
+    suppression_create,
+    suppression_delete,
+    system_readiness,
 )
 import pytest
 from fastapi import HTTPException
@@ -153,6 +158,30 @@ def test_contact_mutations_require_contact_management_permission():
     )
 
 
+def test_message_cancel_requires_send_permission_before_state_access():
+    with pytest.raises(HTTPException) as denied:
+        message_cancel(
+            "message-a",
+            {"tenant": "tenant-a", "role": "READ_ONLY", "permissions": ["mail.read"]},
+            None,
+        )
+    assert denied.value.status_code == 403
+
+
+def test_suppression_mutations_require_contact_management_permission():
+    context = {"tenant": "tenant-a", "role": "ANALYST", "permissions": ["analytics.read"]}
+    with pytest.raises(HTTPException) as denied_create:
+        suppression_create(
+            SuppressionIn(email="blocked@example.com", reason="policy"),
+            context,
+            None,
+        )
+    assert denied_create.value.status_code == 403
+    with pytest.raises(HTTPException) as denied_delete:
+        suppression_delete("suppression-a", context, None)
+    assert denied_delete.value.status_code == 403
+
+
 def test_postal_health_counts_are_tenant_scoped(monkeypatch):
     class RecordingSession:
         def __init__(self):
@@ -167,6 +196,25 @@ def test_postal_health_counts_are_tenant_scoped(monkeypatch):
     postal_health({"tenant": "tenant-a"}, session)
     assert len(session.statements) == 2
     assert all("email_outbox.tenant_id" in statement for statement in session.statements)
+
+
+def test_system_readiness_passes_authenticated_tenant_to_postal(monkeypatch):
+    observed = {}
+
+    class ReadinessSession:
+        def execute(self, _statement):
+            return None
+
+    def fake_postal(context, _session):
+        observed.update(context)
+        return {"configured": True, "status": "ok"}
+
+    monkeypatch.setattr("apps.gateway.app.production_api.postal_health", fake_postal)
+    response = system_readiness(
+        {"tenant": "tenant-a", "sub": "operator"}, ReadinessSession()
+    )
+    assert observed["tenant"] == "tenant-a"
+    assert response["status"] == "ready"
 
 
 def test_concurrent_mautic_idempotency_insert_returns_durable_winner():

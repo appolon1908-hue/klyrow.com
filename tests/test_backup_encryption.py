@@ -38,6 +38,7 @@ case "$*" in
   *"postal-db"*"mariadb-dump"*) printf 'postal-dump-fixture' ;;
   *"mariadb-dump"*) printf 'mautic-dump-fixture' ;;
   *"mautic tar"*) printf 'mautic-files-fixture' ;;
+  *"find /var/www/html -mindepth 1"*) ;;
   *"export_definitions"*) printf '[]' ;;
   *"import_definitions"*) cat >/dev/null ;;
   *"list_queues"*) printf '[]' ;;
@@ -93,6 +94,7 @@ esac
     assert "pg_restore" in calls
     assert calls.count("mariadb -uroot") == 2
     assert "import_definitions" in calls
+    assert "find /var/www/html -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +" in calls
     assert "import_definitions -" not in calls
     assert "import_definitions -" not in (ROOT / "scripts" / "restore-verify").read_text()
 

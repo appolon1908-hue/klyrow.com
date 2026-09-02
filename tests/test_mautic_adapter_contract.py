@@ -14,6 +14,7 @@ from apps.gateway.app.mautic_adapter import (
     mautic_request,
 )
 from apps.gateway.app.operations import IntegrationOutbox, IntegrationResult
+from apps.gateway.app.main import middleware_operation
 from apps.gateway.app.production_api import (
     MauticCommand,
     _mautic_permission,
@@ -169,6 +170,38 @@ def test_completed_operation_returns_its_tenant_scoped_persisted_result():
     response = _operation_json(outbox, ResultSession())
     assert response["status"] == "SUCCEEDED"
     assert response["result"] == {"contacts": {"total": 1}}
+
+
+def test_generic_operation_route_returns_integration_result():
+    timestamp = datetime.now(timezone.utc)
+    outbox = IntegrationOutbox(
+        id="operation-generic", tenant_id="tenant-a", target="MAUTIC",
+        event_type="sync.request.v1", aggregate_id="contacts",
+        payload_json="{}", idempotency_key="request-generic", state="COMPLETED",
+        attempts=1, created_at=timestamp, updated_at=timestamp,
+    )
+    result = IntegrationResult(
+        id="result-generic", tenant_id="tenant-a", outbox_id=outbox.id,
+        source="MAUTIC", result_key="mautic:operation-generic",
+        payload_json='{"contacts":{"total":2}}', created_at=timestamp,
+    )
+
+    class RouteSession:
+        def __init__(self):
+            self.calls = 0
+
+        def scalar(self, _statement):
+            self.calls += 1
+            return {1: None, 2: outbox, 3: result}[self.calls]
+
+    response = middleware_operation(
+        outbox.id,
+        {"tenant": "tenant-a", "sub": "operator"},
+        RouteSession(),
+        "tenant-a",
+    )
+    assert response["status"] == "SUCCEEDED"
+    assert response["result"] == {"contacts": {"total": 2}}
 
 
 def test_mautic_provider_result_idempotency_uses_full_composite_scope():
