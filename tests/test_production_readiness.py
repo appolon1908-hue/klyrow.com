@@ -96,6 +96,10 @@ def test_production_compose_forbids_local_builds_and_requires_release_images():
     ):
         assert variable in combined
     assert "./migrations:/migrations:ro" not in base
+    gateway_override = provisioning.split("  postal-provisioner:", 1)[0]
+    assert "KLYROW_PROVIDER_CREDENTIAL_KEY_FILE" in gateway_override
+    assert "KLYROW_POSTAL_PROVISIONER_TOKEN_FILE" in gateway_override
+    assert "secrets: [klyrow_provider_credential_key, klyrow_postal_provisioner_token]" in gateway_override
 
 
 def test_production_image_validator_requires_digests_and_canonical_repositories():

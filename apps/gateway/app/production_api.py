@@ -265,8 +265,32 @@ def _require_mautic_permission(ctx: dict[str, Any], command: str) -> None:
 
 
 def _authorize_operation_mutation(ctx: dict[str, Any], item: Any) -> None:
-    if isinstance(item, IntegrationOutbox) and item.target == "MAUTIC":
+    if _has_permission(ctx, "klyrow.middleware.operation.write"):
+        return
+    if isinstance(item, MiddlewareCommandOperation):
+        permission = {
+            "email.message.send.v1": "mail.send",
+            "email.message.cancel.v1": "mail.send",
+            "email.domain.verify.v1": "domain.manage",
+            "email.suppression.upsert.v1": "contact.manage",
+            "email.reputation.snapshot.request.v1": "analytics.read",
+        }.get(item.command)
+    elif isinstance(item, IntegrationOutbox) and item.target == "MAUTIC":
         _require_mautic_permission(ctx, item.event_type)
+        return
+    elif isinstance(item, IntegrationOutbox) and item.target == "N8N":
+        permission = "webhook.manage"
+    elif isinstance(item, IntegrationOutbox) and item.target == "ODOO":
+        permission = (
+            "support.manage"
+            if item.event_type == "SupportTicketCreatedV1"
+            else "billing.manage"
+        )
+    else:
+        permission = None
+    if permission is None:
+        raise HTTPException(403, "operation_mutation_permission_denied")
+    _require_permission(ctx, permission)
 
 
 def _authorize_operation_read(ctx: dict[str, Any], item: Any) -> None:
@@ -618,6 +642,7 @@ def campaign_patch(
 ) -> Any:
     from .main import Campaign
 
+    _require_permission(ctx, "campaign.manage")
     item = _tenant_item(s, Campaign, campaign_id, ctx["tenant"])
     if item.status not in {"draft", "paused"}:
         raise HTTPException(409, "campaign_not_editable")
@@ -637,6 +662,7 @@ def campaign_schedule(
 ) -> dict[str, Any]:
     from .main import Campaign
 
+    _require_permission(ctx, "campaign.manage")
     item = _tenant_item(s, Campaign, campaign_id, ctx["tenant"])
     if body.scheduled_at.astimezone(timezone.utc) <= now():
         raise HTTPException(422, "schedule_must_be_future")
@@ -653,6 +679,7 @@ def campaign_cancel(
 ) -> dict[str, Any]:
     from .main import Campaign
 
+    _require_permission(ctx, "campaign.manage")
     item = _tenant_item(s, Campaign, campaign_id, ctx["tenant"])
     if item.status in {"completed", "cancelled"}:
         raise HTTPException(409, "campaign_terminal")
@@ -862,6 +889,12 @@ def mautic_command(
     x_correlation_id: str = Header(alias="X-Correlation-ID", min_length=8, max_length=200),
 ) -> dict[str, Any]:
     _require_mautic_permission(ctx, body.command)
+    from .mautic_adapter import mautic_request
+
+    try:
+        mautic_request(body.command, body.payload)
+    except (TypeError, ValueError) as error:
+        raise HTTPException(422, "mautic_command_payload_invalid") from error
     semantic = json.dumps({"command": body.command, "aggregate_id": body.aggregate_id, "payload": body.payload, "tenant_id": ctx["tenant"]}, separators=(",", ":"), sort_keys=True)
     digest = hashlib.sha256(semantic.encode()).hexdigest()
     prior = s.scalar(select(IntegrationOutbox).where(IntegrationOutbox.tenant_id == ctx["tenant"], IntegrationOutbox.target == "MAUTIC", IntegrationOutbox.idempotency_key == idempotency_key))

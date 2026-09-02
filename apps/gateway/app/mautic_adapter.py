@@ -250,22 +250,30 @@ def _claim(session: Session) -> IntegrationOutbox | None:
     return item
 
 
-def _failure(session: Session, item_id: str, error: str, *, retryable: bool) -> None:
+def _failure(
+    session: Session,
+    item_id: str,
+    error: str,
+    *,
+    retryable: bool,
+    affects_circuit: bool = True,
+) -> None:
     current = now()
     item = session.scalar(
         select(IntegrationOutbox)
         .where(IntegrationOutbox.id == item_id)
         .with_for_update()
     )
-    circuit = session.get(MauticAdapterState, "primary") or MauticAdapterState(
-        state_key="primary"
-    )
-    circuit.failure_streak += 1
-    circuit.last_failure_at = current
-    circuit.updated_at = current
-    if circuit.failure_streak >= 5:
-        circuit.circuit_open_until = current + timedelta(seconds=60)
-    session.add(circuit)
+    if affects_circuit:
+        circuit = session.get(MauticAdapterState, "primary") or MauticAdapterState(
+            state_key="primary"
+        )
+        circuit.failure_streak += 1
+        circuit.last_failure_at = current
+        circuit.updated_at = current
+        if circuit.failure_streak >= 5:
+            circuit.circuit_open_until = current + timedelta(seconds=60)
+        session.add(circuit)
     if item and item.state == "PROCESSING":
         can_retry = retryable and item.attempts < MAX_ATTEMPTS
         item.state = "RETRY" if can_retry else "DEAD_LETTER"
@@ -367,10 +375,12 @@ async def dispatch_mautic_outbox(limit: int = 20) -> dict[str, int]:
                 current = session.get(IntegrationOutbox, item_id)
                 if not current or current.state != "PROCESSING":
                     continue
+            provider_called = False
             try:
                 method, path, body = mautic_request(
                     command, stored.get("payload") or {}
                 )
+                provider_called = True
                 response = await client.request(
                     method,
                     path,
@@ -417,6 +427,7 @@ async def dispatch_mautic_outbox(limit: int = 20) -> dict[str, int]:
                         item_id,
                         "mautic_http_" + str(error.response.status_code),
                         retryable=retryable,
+                        affects_circuit=error.response.status_code in {401, 403, 408, 429},
                     )
                 failed += 1
             except httpx.ConnectError:
@@ -437,7 +448,13 @@ async def dispatch_mautic_outbox(limit: int = 20) -> dict[str, int]:
                 json.JSONDecodeError,
             ) as error:
                 with DB() as session:
-                    _failure(session, item_id, type(error).__name__, retryable=False)
+                    _failure(
+                        session,
+                        item_id,
+                        type(error).__name__,
+                        retryable=False,
+                        affects_circuit=provider_called,
+                    )
                 failed += 1
     return {"completed": completed, "failed": failed, "disabled": 0}
 

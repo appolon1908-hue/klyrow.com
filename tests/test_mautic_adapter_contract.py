@@ -276,6 +276,26 @@ def test_mautic_mutations_require_the_command_specific_workspace_permission():
     }
 
 
+def test_invalid_mautic_payload_is_rejected_before_enqueue_or_provider_effect():
+    command = MauticCommand(
+        command="contact.delete.v1",
+        aggregate_id="contact-1",
+        payload={},
+        request_id="request-invalid-payload",
+        timestamp=datetime.now(timezone.utc),
+    )
+    with pytest.raises(HTTPException) as denied:
+        mautic_command(
+            command,
+            {"sub": "marketer", "tenant": "tenant-a", "role": "MARKETING"},
+            None,
+            "idempotency-invalid-payload",
+            "correlation-invalid-payload",
+        )
+    assert denied.value.status_code == 422
+    assert denied.value.detail == "mautic_command_payload_invalid"
+
+
 def test_processing_mautic_operation_cannot_report_successful_cancellation():
     item = IntegrationOutbox(
         id="operation-processing",

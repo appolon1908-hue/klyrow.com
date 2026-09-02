@@ -3,16 +3,22 @@ from datetime import datetime, timezone
 
 from openapi_spec_validator import validate
 
-from apps.gateway.app.main import app
+from apps.gateway.app.main import MiddlewareCommandOperation, app
 from apps.gateway.app.operations import IntegrationOutbox
 from apps.gateway.app.production_api import (
     ContactPatch,
+    CampaignPatch,
+    CampaignSchedule,
     MauticCommand,
     SuppressionIn,
     _authorize_operation_read,
+    _authorize_operation_mutation,
     _require_permission,
     contact_delete,
     contact_patch,
+    campaign_cancel,
+    campaign_patch,
+    campaign_schedule,
     message_cancel,
     mautic_command,
     postal_health,
@@ -180,6 +186,45 @@ def test_suppression_mutations_require_contact_management_permission():
     with pytest.raises(HTTPException) as denied_delete:
         suppression_delete("suppression-a", context, None)
     assert denied_delete.value.status_code == 403
+
+
+def test_campaign_mutations_require_campaign_management_permission():
+    context = {"tenant": "tenant-a", "role": "ANALYST", "permissions": ["analytics.read"]}
+    with pytest.raises(HTTPException) as patch_denied:
+        campaign_patch("campaign-a", CampaignPatch(name="Denied"), context, None)
+    assert patch_denied.value.status_code == 403
+    with pytest.raises(HTTPException) as schedule_denied:
+        campaign_schedule(
+            "campaign-a",
+            CampaignSchedule(scheduled_at=datetime.now(timezone.utc)),
+            context,
+            None,
+        )
+    assert schedule_denied.value.status_code == 403
+    with pytest.raises(HTTPException) as cancel_denied:
+        campaign_cancel("campaign-a", context, None)
+    assert cancel_denied.value.status_code == 403
+
+
+def test_every_operation_mutation_requires_specific_write_authority():
+    read_only = {"role": "READ_ONLY", "permissions": ["mail.read"]}
+    command = MiddlewareCommandOperation(command="email.message.cancel.v1")
+    with pytest.raises(HTTPException) as command_denied:
+        _authorize_operation_mutation(read_only, command)
+    assert command_denied.value.status_code == 403
+    for target, event_type in (
+        ("N8N", "MailDeliveryStatusV1"),
+        ("ODOO", "KlyrowBillingSyncV1"),
+        ("UNKNOWN", "UnknownV1"),
+    ):
+        operation = IntegrationOutbox(target=target, event_type=event_type)
+        with pytest.raises(HTTPException) as denied:
+            _authorize_operation_mutation(read_only, operation)
+        assert denied.value.status_code == 403
+    _authorize_operation_mutation(
+        {"role": "SERVICE", "permissions": ["klyrow.middleware.operation.write"]},
+        command,
+    )
 
 
 def test_postal_health_counts_are_tenant_scoped(monkeypatch):
