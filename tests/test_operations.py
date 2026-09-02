@@ -74,6 +74,14 @@ def test_terminal_integration_cannot_be_requeued_by_admin_failure():
     assert failed.status_code==404
     with DB() as s:assert s.get(IntegrationOutbox,queued["id"]).state=="CANCELLED"
 
+def test_in_flight_integration_cannot_be_requeued_by_admin_failure():
+    queued=client.post("/v1/automation/events",headers=h("a"),json={"event_type":"InFlightStateV1","aggregate_id":"in-flight-item","payload":{"ok":True},"idempotency_key":"in-flight-state-event-0001"}).json()
+    with DB() as s:
+        row=s.get(IntegrationOutbox,queued["id"]);row.state="PROCESSING";s.commit()
+    failed=client.post(f"/v1/admin/operations/integrations/{queued['id']}/fail",headers=h("root"),json={"reason":"provider timeout not yet confirmed"})
+    assert failed.status_code==404
+    with DB() as s:assert s.get(IntegrationOutbox,queued["id"]).state=="PROCESSING"
+
 class ConcurrentResultSession:
     def __init__(self,prior):
         self.outbox=IntegrationOutbox(id="concurrent-outbox",tenant_id="a",target="N8N",event_type="ConcurrentV1",aggregate_id="aggregate",payload_json="{}",idempotency_key="concurrent-command",state="PENDING")

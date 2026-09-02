@@ -133,7 +133,7 @@ def replay_webhook(item_id:str,x:RecoverIn,ctx=Depends(require("platform_admin")
 @router.post("/admin/operations/integrations/{item_id}/fail")
 def fail_integration(item_id:str,x:RecoverIn,ctx=Depends(require("platform_admin")),s:Session=Depends(db)):
     item=locked_integration_outbox(s,item_id)
-    if not item or item.state not in {"PENDING","PROCESSING","RETRY"}:raise HTTPException(404,"pending_integration_not_found")
+    if not item or item.state not in {"PENDING","RETRY"}:raise HTTPException(404,"pending_integration_not_found")
     item.attempts+=1;item.last_error=x.reason;item.state="DEAD_LETTER" if item.attempts>=8 else "RETRY";item.next_attempt_at=now()+timedelta(seconds=min(900,2**item.attempts));item.updated_at=now();audit(s,{**ctx,"tenant":item.tenant_id},"integration.delivery_failed:"+item.target);s.commit();return {"state":item.state,"attempts":item.attempts,"target":item.target}
 @router.post("/admin/operations/integrations/{item_id}/recover")
 def recover_integration(item_id:str,x:RecoverIn,ctx=Depends(require("platform_admin")),s:Session=Depends(db)):

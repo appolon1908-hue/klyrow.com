@@ -162,6 +162,7 @@ def test_integration_state_transitions_share_row_lock_and_unique_race_recovery()
     production_api = (ROOT / "apps/gateway/app/production_api.py").read_text()
     mautic = (ROOT / "apps/gateway/app/mautic_adapter.py").read_text()
     assert operations.count("locked_integration_outbox(") >= 4
+    assert 'item.state not in {"PENDING","RETRY"}' in operations
     assert "except IntegrityError:" in operations
     assert "s.rollback();prior=integration_result_by_key" in operations
     assert production_api.count("_find_operation_for_update(") >= 3
