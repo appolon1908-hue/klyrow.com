@@ -142,6 +142,16 @@ def test_protected_publisher_scans_and_verifies_exact_digests_before_promotion()
     assert "sha256sum -c PUBLISH_SHA256SUMS" in workflow
 
 
+def test_cosign_attestation_verification_normalizes_jsonl_and_legacy_arrays():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    normalize = '[.[] | if type == "array" then .[] else . end]'
+    assert workflow.count(normalize) == 4
+    assert workflow.count("jq -s -e --arg source") == 2
+    assert workflow.count("jq -s -e '[.[] | if type") == 2
+    assert "| jq -e --arg source" not in workflow
+    assert "\n            jq -e 'any(.[];" not in workflow
+
+
 def test_pull_request_images_and_evidence_bind_to_exact_head_sha():
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "KLYROW_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}" in workflow
