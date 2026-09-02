@@ -13,7 +13,8 @@ ARG SOURCE_COMMIT_SHA
 RUN test "$(printf '%s' "$SOURCE_COMMIT_SHA" | wc -c)" -eq 40 \
     && case "$SOURCE_COMMIT_SHA" in *[!0-9a-f]*) exit 1 ;; *) : ;; esac
 LABEL org.opencontainers.image.source="https://github.com/appolon1908-hue/klyrow.com" \
-      org.opencontainers.image.revision="$SOURCE_COMMIT_SHA"
+      org.opencontainers.image.revision="$SOURCE_COMMIT_SHA" \
+      org.opencontainers.image.version="$SOURCE_COMMIT_SHA"
 # Pin an exact published patched Nginx runtime rather than a moving minor tag.
 # Assert the exact pinned runtime patch level, then return to non-root UID 101.
 USER root

@@ -4,11 +4,14 @@ import Dashboard from './Dashboard.vue'
 import Onboarding from './Onboarding.vue'
 import AdminDashboard from './AdminDashboard.vue'
 import Provisioning from './Provisioning.vue'
+import Webmail from './Webmail.vue'
 import './styles.css'
 
 const path = location.pathname
 const Root = path === '/app/provisioning' || path === '/admin/provisioning'
   ? Provisioning
+  : path === '/app/mail' || path.startsWith('/app/mail/')
+    ? Webmail
   : path === '/admin' || path.startsWith('/admin/')
     ? AdminDashboard
     : path === '/onboarding'

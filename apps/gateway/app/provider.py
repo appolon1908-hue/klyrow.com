@@ -1266,6 +1266,12 @@ def inbound_receive(payload: InboundFixtureIn, ctx=Depends(auth), s: Session = D
             "auth_verdict": item.auth_verdict, "spf_result": item.spf_result,
             "dkim_result": item.dkim_result, "dmarc_result": item.dmarc_result,
             "arc_result": item.arc_result, "dmarc_fail_action": item.dmarc_fail_action}, separators=(",", ":"), sort_keys=True)))
+    # The provider pipeline remains authoritative for SPF/DKIM/DMARC and spam
+    # disposition. Webmail receives only the already-attributed, accepted or
+    # quarantined tenant record; rejected messages are ignored by the helper.
+    from .webmail import capture_provider_inbound
+
+    capture_provider_inbound(s, route, item, parsed)
     audit_provider(s, ctx, "inbound.received", item.disposition, resource_id=item.id)
     s.commit()
     return {"inbound_id": item.id, "duplicate": False, "disposition": item.disposition,

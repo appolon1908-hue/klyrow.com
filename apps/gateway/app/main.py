@@ -462,6 +462,10 @@ def persist_email_event(s:Session, *, event_id:str, tenant_id:str, message_id:st
             "bounced":"BOUNCED_HARD","complained":"COMPLAINED","failed":"FAILED"}.get(canonical_status,canonical_status.upper())
         if provider_status in {"SENT","DELIVERED","BOUNCED_SOFT","BOUNCED_HARD","COMPLAINED","FAILED","DEFERRED"}:
             provider_message.status=provider_status;provider_message.updated_at=datetime.now(timezone.utc)
+    # Keep the browser webmail projection synchronized with the same signed,
+    # tenant-attributed provider lifecycle event as the core message.
+    from .webmail import update_outbound_status
+    update_outbound_status(s, tenant_id, message_id, canonical_status)
     if not s.get(Event,event_id):
         s.add(Event(id=event_id,tenant_id=tenant_id,message_id=local_message.id if local_message else message_id,kind="klyrow."+event_type,payload=payload))
         s.add(Audit(id=str(uuid.uuid4()),tenant_id=tenant_id,actor="provider:postal",action="email.status."+canonical_status))
@@ -1025,6 +1029,7 @@ from .delivery_controls import router as delivery_controls_router
 app.include_router(delivery_controls_router)
 from .preferences import router as preferences_router
 app.include_router(preferences_router)
+from . import webmail_models as _webmail_models
 from .provider import provider_worker_loop, reconcile_legacy_registry, router as provider_router, status_router as provider_status_router
 app.include_router(provider_router)
 app.include_router(provider_status_router)
@@ -1033,6 +1038,8 @@ app.include_router(provider_status_router)
 def reconcile_provider_registry_on_startup():
     with DB() as s:
         reconcile_legacy_registry(s)
+        from .webmail import sync_verified_mailboxes
+        sync_verified_mailboxes(s)
 
 @app.on_event("startup")
 async def start_provider_worker():

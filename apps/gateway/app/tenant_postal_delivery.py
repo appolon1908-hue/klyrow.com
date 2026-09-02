@@ -151,7 +151,11 @@ async def tenant_email_outbox_loop() -> None:
                     gate.claimed_deliveries += 1
                     gate.updated_at = current
 
-                key = tenant_postal_api_key(session, item.tenant_id)
+                sender = str(payload.get("from") or "").strip().lower()
+                sender_domain = sender.rsplit("@", 1)[-1] if "@" in sender else None
+                key = tenant_postal_api_key(
+                    session, item.tenant_id, sender_domain=sender_domain
+                )
                 item.state = "sending"
                 item.attempts += 1
                 item.next_attempt_at = None
@@ -199,6 +203,11 @@ async def tenant_email_outbox_loop() -> None:
                     item.updated_at = now()
                 if message:
                     set_core_message_status(message, "provider_accepted")
+                from .webmail import update_outbound_status
+
+                update_outbound_status(
+                    session, snapshot[2], snapshot[1], "provider_accepted"
+                )
                 session.commit()
         except Exception as exc:
             with DB() as session:
@@ -213,6 +222,14 @@ async def tenant_email_outbox_loop() -> None:
                             item.next_attempt_at = None
                             if message:
                                 set_core_message_status(message, "indeterminate")
+                            from .webmail import update_outbound_status
+
+                            update_outbound_status(
+                                session,
+                                item.tenant_id,
+                                item.message_id,
+                                "indeterminate",
+                            )
                         else:
                             failed = item.attempts >= 5
                             item.state = "failed" if failed else "retry"
@@ -221,6 +238,14 @@ async def tenant_email_outbox_loop() -> None:
                             item.next_attempt_at = None if failed else item.updated_at + timedelta(seconds=min(300, 2 ** max(item.attempts, 1)))
                             if message:
                                 set_core_message_status(message, "failed" if failed else "deferred")
+                            from .webmail import update_outbound_status
+
+                            update_outbound_status(
+                                session,
+                                item.tenant_id,
+                                item.message_id,
+                                "failed" if failed else "deferred",
+                            )
                             if failed:
                                 session.add(
                                     Event(

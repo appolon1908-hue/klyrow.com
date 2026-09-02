@@ -149,7 +149,7 @@ jobs:
           file: docker/postal-provisioner.Dockerfile
           load: true
           tags: klyrow-postal-provisioner:${{ env.KLYROW_SOURCE_SHA }}
-          build-args: SOURCE_COMMIT_SHA=${{ env.KLYROW_SOURCE_SHA }}
+          build-args: SOURCE_SHA=${{ env.KLYROW_SOURCE_SHA }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
@@ -321,6 +321,7 @@ jobs:
                 --provenance=false \
                 --sbom=false \
                 --build-arg "SOURCE_COMMIT_SHA=${KLYROW_SOURCE_SHA}" \
+                --build-arg "SOURCE_SHA=${KLYROW_SOURCE_SHA}" \
                 --build-arg "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" \
                 --output "type=oci,dest=${RUNNER_TEMP}/klyrow-${image}-${copy}.tar,rewrite-timestamp=true" \
                 --file "${dockerfile}" \
@@ -424,7 +425,7 @@ jobs:
           tags: ghcr.io/${{ github.repository_owner }}/klyrow-postal-provisioner:candidate-${{ github.run_id }}-${{ github.run_attempt }}
           build-args: |
             SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
-            SOURCE_COMMIT_SHA=${{ env.KLYROW_SOURCE_SHA }}
+            SOURCE_SHA=${{ env.KLYROW_SOURCE_SHA }}
           provenance: false
           sbom: false
           labels: |
