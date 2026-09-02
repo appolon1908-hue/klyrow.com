@@ -196,7 +196,12 @@ def test_generic_operation_route_returns_integration_result():
 
     response = middleware_operation(
         outbox.id,
-        {"tenant": "tenant-a", "sub": "operator"},
+        {
+            "tenant": "tenant-a",
+            "sub": "operator",
+            "role": "ANALYST",
+            "permissions": ["analytics.read"],
+        },
         RouteSession(),
         "tenant-a",
     )
