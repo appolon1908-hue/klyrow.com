@@ -50,6 +50,12 @@ def test_provider_edge_keeps_app_api_and_tracking_on_distinct_upstreams():
 
     assert "proxy_pass http://klyrow_web;" in app
     assert "proxy_pass http://klyrow_gateway;" not in app
+    assert "location = /mautic/api { return 404; }" in app
+    assert "location ^~ /mautic/api/ { return 404; }" in app
+    assert "location = /mautic/oauth { return 404; }" in app
+    assert "location ^~ /mautic/oauth/ { return 404; }" in app
+    assert app.index("location ^~ /mautic/api/") < app.index("location /mautic/")
+    assert app.index("location ^~ /mautic/oauth/") < app.index("location /mautic/")
     assert "proxy_pass http://klyrow_gateway;" in api
     assert "proxy_pass http://klyrow_web;" not in api
     assert "location ^~ /t/" in tracking and "location / { return 404; }" in tracking
