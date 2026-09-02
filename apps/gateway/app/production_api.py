@@ -242,6 +242,11 @@ def _has_permission(ctx: dict[str, Any], permission: str) -> bool:
     return "*" in granted or permission in granted
 
 
+def _require_permission(ctx: dict[str, Any], permission: str) -> None:
+    if not _has_permission(ctx, permission):
+        raise HTTPException(403, "permission_denied")
+
+
 def _mautic_permission(command: str) -> str:
     if command in {"sync.request.v1", "form_submissions.read.v1"}:
         return "analytics.read"
@@ -541,6 +546,7 @@ def contact_detail(contact_id: str, ctx: dict = Depends(auth), s: Session = Depe
 def contact_patch(
     contact_id: str, body: ContactPatch, ctx: dict = Depends(auth), s: Session = Depends(db)
 ) -> Any:
+    _require_permission(ctx, "contact.manage")
     item = _tenant_item(s, Contact, contact_id, ctx["tenant"])
     for key, value in body.model_dump(exclude_unset=True).items():
         setattr(item, "metadata_json" if key == "metadata" else key, json.dumps(value, sort_keys=True) if key == "metadata" else value)
@@ -553,6 +559,7 @@ def contact_patch(
 def contact_delete(
     contact_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
 ) -> Response:
+    _require_permission(ctx, "contact.manage")
     item = _tenant_item(s, Contact, contact_id, ctx["tenant"])
     s.delete(item)
     audit(s, ctx, "contact.deleted")
@@ -826,9 +833,14 @@ def operation_reconcile(operation_id: str, ctx: dict = Depends(auth), s: Session
 
 @router.get("/v1/providers/postal/health")
 def postal_health(ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
-    del ctx
-    pending = s.scalar(select(func.count()).select_from(EmailOutbox).where(EmailOutbox.state.in_(("pending", "retry", "sending")))) or 0
-    failed = s.scalar(select(func.count()).select_from(EmailOutbox).where(EmailOutbox.state.in_(("failed", "INDETERMINATE")))) or 0
+    pending = s.scalar(select(func.count()).select_from(EmailOutbox).where(
+        EmailOutbox.tenant_id == ctx["tenant"],
+        EmailOutbox.state.in_(("pending", "retry", "sending")),
+    )) or 0
+    failed = s.scalar(select(func.count()).select_from(EmailOutbox).where(
+        EmailOutbox.tenant_id == ctx["tenant"],
+        EmailOutbox.state.in_(("failed", "INDETERMINATE")),
+    )) or 0
     configured = bool(os.getenv("KLYROW_POSTAL_API_URL") and (os.getenv("KLYROW_POSTAL_API_KEY_FILE") or os.getenv("KLYROW_POSTAL_API_KEY")))
     return {"provider": "postal", "status": "ok" if configured and failed == 0 else "degraded", "configured": configured, "queue_active": pending, "queue_failed": failed}
 

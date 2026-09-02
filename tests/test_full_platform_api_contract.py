@@ -5,7 +5,16 @@ from openapi_spec_validator import validate
 
 from apps.gateway.app.main import app
 from apps.gateway.app.operations import IntegrationOutbox
-from apps.gateway.app.production_api import MauticCommand, _authorize_operation_read, mautic_command
+from apps.gateway.app.production_api import (
+    ContactPatch,
+    MauticCommand,
+    _authorize_operation_read,
+    _require_permission,
+    contact_delete,
+    contact_patch,
+    mautic_command,
+    postal_health,
+)
 import pytest
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
@@ -128,6 +137,36 @@ def test_mautic_result_visibility_requires_command_specific_permission():
     _authorize_operation_read(
         {"role": "DEVELOPER", "permissions": ["contact.manage"]}, item,
     )
+
+
+def test_contact_mutations_require_contact_management_permission():
+    context = {"tenant": "tenant-a", "role": "ANALYST", "permissions": ["analytics.read"]}
+    with pytest.raises(HTTPException) as denied:
+        contact_patch("contact-a", ContactPatch(name="Denied"), context, None)
+    assert denied.value.status_code == 403
+    with pytest.raises(HTTPException) as denied_delete:
+        contact_delete("contact-a", context, None)
+    assert denied_delete.value.status_code == 403
+    _require_permission(
+        {"role": "MARKETING", "permissions": ["contact.manage"]},
+        "contact.manage",
+    )
+
+
+def test_postal_health_counts_are_tenant_scoped(monkeypatch):
+    class RecordingSession:
+        def __init__(self):
+            self.statements = []
+
+        def scalar(self, statement):
+            self.statements.append(str(statement))
+            return 0
+
+    monkeypatch.delenv("KLYROW_POSTAL_API_URL", raising=False)
+    session = RecordingSession()
+    postal_health({"tenant": "tenant-a"}, session)
+    assert len(session.statements) == 2
+    assert all("email_outbox.tenant_id" in statement for statement in session.statements)
 
 
 def test_concurrent_mautic_idempotency_insert_returns_durable_winner():

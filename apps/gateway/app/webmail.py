@@ -21,7 +21,7 @@ from urllib.parse import quote
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel, EmailStr, Field, model_validator
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 
 from .auth_bff import BrowserSession, browser_context, csrf_guard
@@ -195,6 +195,12 @@ def sync_verified_mailboxes(s: Session, tenant_id: Optional[str] = None) -> dict
     only when its exact route and provider domain are already enabled.
     """
     from .provider import ProviderDomain
+
+    # Gateway and billing-api both run the startup reconciliation. Serialize
+    # the transaction on PostgreSQL so only one process can materialize a
+    # previously absent (tenant, address) mailbox at a time.
+    if s.get_bind().dialect.name == "postgresql":
+        s.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": 49367291020260902})
 
     domains_query = select(Domain).where(Domain.verified == True)
     if tenant_id:

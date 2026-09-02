@@ -40,7 +40,15 @@ def test_web_candidate_contains_the_reviewed_webmail_application():
     assert 'href="/app/mail"' in dashboard
     assert "'/app/api/mailboxes'" in webmail
     assert "Idempotency-Key" in webmail
+    assert "composeSendKey.value" in webmail
+    assert ":href=\"file.download_url\"" in webmail
     assert "v-html" not in webmail
+
+
+def test_mailbox_materialization_is_serialized_on_postgresql():
+    source = (ROOT / "apps/gateway/app/webmail.py").read_text(encoding="utf-8")
+    assert "pg_advisory_xact_lock" in source
+    assert "s.get_bind().dialect.name == \"postgresql\"" in source
 
 
 def test_webmail_is_the_only_campaignless_browser_mail_channel(monkeypatch):
