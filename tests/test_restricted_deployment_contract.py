@@ -22,10 +22,15 @@ def test_restricted_deployment_contract_is_fail_closed_and_preserves_data():
         "klyrow_postal_db",
         "klyrow_postal_assets",
     }
-    assert contract["expected_safety"] == {
+    assert contract["expected_environment"] == {
         "KLYROW_SAFE_MODE": "true",
         "KLYROW_PRODUCTION_GATE_APPROVED": "false",
-        "KLYROW_PRODUCTION_GATE_OPEN": "false",
-        "KLYROW_LIVE_EMAIL_DELIVERY": "false",
-        "OUTBOX_ACTIVE": "0",
+        "LIVE_EMAIL_DELIVERY": "false",
+    }
+    assert contract["expected_readback"] == {
+        "safe_mode": True,
+        "production_gate_approved": False,
+        "production_gate_open": False,
+        "live_email_delivery": False,
+        "outbox_active": 0,
     }

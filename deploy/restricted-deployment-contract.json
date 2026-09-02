@@ -14,11 +14,16 @@
     "klyrow_postal_db",
     "klyrow_postal_assets"
   ],
-  "expected_safety": {
+  "expected_environment": {
     "KLYROW_SAFE_MODE": "true",
     "KLYROW_PRODUCTION_GATE_APPROVED": "false",
-    "KLYROW_PRODUCTION_GATE_OPEN": "false",
-    "KLYROW_LIVE_EMAIL_DELIVERY": "false",
-    "OUTBOX_ACTIVE": "0"
+    "LIVE_EMAIL_DELIVERY": "false"
+  },
+  "expected_readback": {
+    "safe_mode": true,
+    "production_gate_approved": false,
+    "production_gate_open": false,
+    "live_email_delivery": false,
+    "outbox_active": 0
   }
 }
