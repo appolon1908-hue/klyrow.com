@@ -1,0 +1,192 @@
+openapi: 3.1.0
+info:
+  title: Klyrow Postal Provisioner
+  version: 1.0.0
+  description: Backend-only desired-state bridge between Klyrow and Postal.
+servers:
+  - url: http://postal-provisioner:9090
+    description: Private Docker network only
+paths:
+  /healthz:
+    get:
+      operationId: postalProvisionerHealth
+      security: []
+      responses:
+        "200":
+          description: Process is accepting requests.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /v1/provision:
+    post:
+      operationId: provisionPostalTenant
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProvisionRequest"
+      responses:
+        "201":
+          description: Existing or newly reconciled development server.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProvisionResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+  /v1/reconcile-inbound:
+    post:
+      operationId: reconcilePostalInbound
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/InboundReconcile"
+      responses:
+        "201":
+          description: Inbound routes now match desired state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReconcileResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+  /v1/reconcile-outbound:
+    post:
+      operationId: reconcilePostalOutbound
+      security:
+        - bearerAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/Reconcile"
+      responses:
+        "201":
+          description: Outbound credentials now match desired state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReconcileResult"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidRequest"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  requestBodies:
+    InboundReconcile:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/InboundReconcileRequest"
+    Reconcile:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ReconcileRequest"
+  responses:
+    Unauthorized:
+      description: Bearer service credential is missing or invalid.
+    InvalidRequest:
+      description: Request failed validation.
+  schemas:
+    Health:
+      type: object
+      required: [status, mode]
+      properties:
+        status:
+          const: ok
+        mode:
+          const: Development-only
+    TenantId:
+      type: string
+      pattern: "^[A-Za-z0-9-]{1,80}$"
+    DomainName:
+      type: string
+      minLength: 1
+      maxLength: 253
+    ProvisionRequest:
+      type: object
+      required: [tenant_id]
+      additionalProperties: false
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/TenantId"
+        tenant_name:
+          type: string
+          maxLength: 120
+        send_limit:
+          type: integer
+          minimum: 100
+          maximum: 10000
+    ReconcileRequest:
+      type: object
+      required: [tenant_id, domains]
+      additionalProperties: false
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/TenantId"
+        domains:
+          type: array
+          minItems: 1
+          maxItems: 100
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/DomainName"
+    InboundReconcileRequest:
+      type: object
+      required: [tenant_id, addresses]
+      additionalProperties: false
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/TenantId"
+        addresses:
+          type: array
+          minItems: 1
+          maxItems: 300
+          uniqueItems: true
+          items:
+            type: string
+            format: email
+    ProvisionResult:
+      type: object
+      required: [tenant_id, organization_id, server_id, mode, api_key]
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/TenantId"
+        organization_id:
+          type: string
+        server_id:
+          type: string
+        mode:
+          const: Development
+        api_key:
+          type: string
+          writeOnly: true
+    ReconcileResult:
+      type: object
+      required: [tenant_id, domains]
+      properties:
+        tenant_id:
+          $ref: "#/components/schemas/TenantId"
+        domains:
+          type: array
+          items:
+            type: object
+        addresses:
+          type: array
+          items:
+            type: string
+            format: email
+security:
+  - bearerAuth: []

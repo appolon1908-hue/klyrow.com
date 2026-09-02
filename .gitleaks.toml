@@ -1,0 +1,22 @@
+title = "Klyrow secret scanning policy"
+
+[extend]
+useDefault = true
+
+# Public upstream PHP signing-key fingerprints embedded in a historical
+# Dockerfile. These identify release signing keys; they are not private key
+# material. Match the exact bytes rather than exempting the file or rule.
+[[allowlists]]
+description = "Public upstream PHP signing-key fingerprints"
+regexes = [
+  '''^1198C0117593497A5EC5C199286AF1F9897469DC$''',
+  '''^C28D937575603EB4ABB725861C0779DC5C0A9DE4$''',
+  '''^AFD8691FDAEDF03BDF6E460563F15A9B715376CA$''',
+]
+
+# Historical browser-only fixture used to exercise invitation hydration.
+[[allowlists]]
+description = "Synthetic invitation capability fixture"
+regexes = [
+  '''^invite_capability_0123456789abcdef$''',
+]

@@ -14,7 +14,7 @@ from typing import Optional
 import httpx
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import DateTime, Integer, String, Text, or_, select
+from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, or_, select
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .auth_bff import BrowserSession, browser_context, csrf_guard
@@ -57,6 +57,29 @@ class PostalTenantMapping(Base):
     provider_mode: Mapped[str] = mapped_column(String, default="Development")
     api_key_ciphertext: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     api_key_fingerprint: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PostalDomainCredential(Base):
+    """Encrypted credential for the live Postal server owning one domain."""
+
+    __tablename__ = "postal_domain_credentials"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "domain", name="uq_postal_domain_credential_tenant_domain"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String, index=True)
+    domain: Mapped[str] = mapped_column(String, index=True)
+    state: Mapped[str] = mapped_column(String, default="PENDING", index=True)
+    provider_server_id: Mapped[str] = mapped_column(String)
+    provider_server_permalink: Mapped[str] = mapped_column(String)
+    provider_mode: Mapped[str] = mapped_column(String)
+    api_key_ciphertext: Mapped[str] = mapped_column(Text)
+    api_key_fingerprint: Mapped[str] = mapped_column(String)
     last_error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
@@ -169,6 +192,94 @@ async def _call_bridge(tenant: Tenant) -> dict:
     return result
 
 
+async def _call_live_domain_bridge(tenant_id: str, domains: list[str]) -> dict:
+    base = os.getenv(
+        "KLYROW_POSTAL_PROVISIONER_URL", "http://postal-provisioner:9090"
+    ).rstrip("/")
+    headers = {
+        "Authorization": "Bearer " + _bridge_token(),
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(
+        timeout=30, trust_env=False, follow_redirects=False
+    ) as client:
+        response = await client.post(
+            base + "/v1/reconcile-outbound",
+            headers=headers,
+            json={"tenant_id": tenant_id, "domains": sorted(set(domains))},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+async def reconcile_live_domain_credentials(
+    s: Session, tenant_id: str, domains: list[str]
+) -> dict:
+    """Attest each live Postal owner and persist its credential encrypted."""
+
+    expected = sorted(set(domain.lower() for domain in domains))
+    result = await _call_live_domain_bridge(tenant_id, expected)
+    items = result.get("domains")
+    if not isinstance(items, list):
+        raise RuntimeError("postal outbound reconciliation returned invalid domains")
+    returned = sorted(
+        str(item.get("domain") or "").lower()
+        for item in items
+        if isinstance(item, dict)
+    )
+    if returned != expected:
+        raise RuntimeError("postal outbound reconciliation incomplete")
+    validated = []
+    for item in items:
+        domain = str(item.get("domain") or "").lower()
+        server_id = str(item.get("server_id") or "")
+        server_permalink = str(item.get("server_permalink") or server_id)
+        mode = str(item.get("mode") or "")
+        key = str(item.get("api_key") or "")
+        if (
+            not domain
+            or not server_id
+            or not server_permalink
+            or mode != "Live"
+            or len(key) < 20
+        ):
+            raise RuntimeError(
+                "postal outbound reconciliation returned invalid credential"
+            )
+        validated.append((domain, server_id, server_permalink, mode, key))
+    fingerprints = {}
+    for domain, server_id, server_permalink, mode, key in validated:
+        credential = s.scalar(
+            select(PostalDomainCredential).where(
+                PostalDomainCredential.tenant_id == tenant_id,
+                PostalDomainCredential.domain == domain,
+            )
+        )
+        if credential is None:
+            credential = PostalDomainCredential(
+                id=str(uuid.uuid4()),
+                tenant_id=tenant_id,
+                domain=domain,
+                provider_server_id=server_id,
+                provider_server_permalink=server_permalink,
+                provider_mode=mode,
+                api_key_ciphertext="",
+                api_key_fingerprint="",
+            )
+            s.add(credential)
+        credential.state = READY
+        credential.provider_server_id = server_id
+        credential.provider_server_permalink = server_permalink
+        credential.provider_mode = mode
+        credential.api_key_ciphertext = encrypt_provider_secret(key)
+        credential.api_key_fingerprint = credential_fingerprint(key)
+        credential.last_error = None
+        credential.updated_at = now()
+        fingerprints[domain] = credential.api_key_fingerprint
+    s.commit()
+    return {"domains": expected, "credential_fingerprints": fingerprints}
+
+
 def _recover_expired_leases(s: Session) -> None:
     current = now()
     rows = s.scalars(select(PostalProvisioningOutbox).where(PostalProvisioningOutbox.state == "RUNNING", PostalProvisioningOutbox.lease_expires_at < current)).all()
@@ -264,7 +375,24 @@ async def provisioning_tick() -> int:
         return 0
 
 
-def tenant_postal_api_key(s: Session, tenant_id: str) -> str:
+def tenant_postal_api_key(
+    s: Session, tenant_id: str, sender_domain: Optional[str] = None
+) -> str:
+    if sender_domain:
+        credential = s.scalar(
+            select(PostalDomainCredential).where(
+                PostalDomainCredential.tenant_id == tenant_id,
+                PostalDomainCredential.domain == sender_domain.lower(),
+                PostalDomainCredential.state == READY,
+                PostalDomainCredential.provider_mode == "Live",
+            )
+        )
+        if credential and credential.api_key_ciphertext:
+            return decrypt_provider_secret(credential.api_key_ciphertext)
+        # Production must never cross a sender domain onto another tenant or
+        # its development server when the exact live-domain owner is absent.
+        if os.getenv("KLYROW_ENV", "development").lower() == "production":
+            raise RuntimeError("postal sender domain is not provisioned")
     mapping = s.get(PostalTenantMapping, tenant_id)
     if mapping and mapping.state == READY and mapping.api_key_ciphertext:
         return decrypt_provider_secret(mapping.api_key_ciphertext)
@@ -275,6 +403,8 @@ def tenant_postal_api_key(s: Session, tenant_id: str) -> str:
             key = Path(path).read_text(encoding="utf-8").strip()
             if key:
                 return key
+    if sender_domain:
+        raise RuntimeError("postal sender domain is not provisioned")
     raise RuntimeError("postal tenant is not provisioned")
 
 

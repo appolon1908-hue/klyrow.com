@@ -18,8 +18,20 @@ trap cleanup EXIT
 
 docker compose exec -T postgres pg_dump -U klyrow -Fc klyrow >"$stage/klyrow.dump"
 docker compose exec -T mautic-db sh -lc 'MYSQL_PWD="$MARIADB_PASSWORD" exec mariadb-dump -u"$MARIADB_USER" --single-transaction "$MARIADB_DATABASE"' | gzip >"$stage/mautic.sql.gz"
-docker compose exec -T postal-db sh -lc 'MYSQL_PWD="$MARIADB_PASSWORD" exec mariadb-dump -u"$MARIADB_USER" --single-transaction --all-databases' | gzip >"$stage/postal.sql.gz"
-(cd "$stage" && sha256sum klyrow.dump mautic.sql.gz postal.sql.gz >MANIFEST.sha256)
+docker compose exec -T postal-db sh -lc 'MYSQL_PWD="$MARIADB_PASSWORD" exec mariadb-dump -u"$MARIADB_USER" --single-transaction "$MARIADB_DATABASE"' | gzip >"$stage/postal.sql.gz"
+docker compose exec -T mautic tar -cz -C /var/www/html . >"$stage/mautic-files.tar.gz"
+docker compose exec -T rabbitmq rabbitmqctl -q export_definitions - >"$stage/rabbitmq-definitions.json"
+docker compose exec -T rabbitmq rabbitmqctl -q list_queues name messages --formatter json >"$stage/rabbitmq-queues.json"
+python3 - "$stage/rabbitmq-queues.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    queues = json.load(stream)
+if not isinstance(queues, list) or any(int(item.get("messages", 0)) != 0 for item in queues):
+    raise SystemExit("RabbitMQ must be drained before a database-consistent backup")
+PY
+(cd "$stage" && sha256sum klyrow.dump mautic.sql.gz postal.sql.gz mautic-files.tar.gz rabbitmq-definitions.json rabbitmq-queues.json >MANIFEST.sha256)
 
 gpg_home="$stage/gnupg";install -d -m 0700 "$gpg_home"
 gpg --batch --homedir "$gpg_home" --import "$recipient_file" >/dev/null 2>&1
@@ -28,8 +40,13 @@ recipient="$(gpg --batch --homedir "$gpg_home" --with-colons --list-keys | awk -
 
 paths=(config docker docs scripts docker-compose.yml .env)
 [[ -d secrets ]] && paths+=(secrets)
-tar -cz -C "$stage" klyrow.dump mautic.sql.gz postal.sql.gz MANIFEST.sha256 -C "$ROOT" "${paths[@]}" |
+tar -cz -C "$stage" klyrow.dump mautic.sql.gz postal.sql.gz mautic-files.tar.gz rabbitmq-definitions.json rabbitmq-queues.json MANIFEST.sha256 -C "$ROOT" "${paths[@]}" |
   gpg --batch --yes --homedir "$gpg_home" --trust-model always --recipient "$recipient" --output "$archive" --encrypt
-sha256sum "$archive" >"$archive.sha256"
+archive_name="$(basename -- "$archive")"
+archive_digest="$(sha256sum "$archive" | awk '{print $1}')"
+printf '%s  %s\n' "$archive_digest" "$archive_name" >"$archive.sha256"
 chmod 0600 "$archive" "$archive.sha256"
+if [[ "${KLYROW_BACKUP_OFFHOST_REQUIRED:-true}" == true ]]; then
+  scripts/archive-offhost "$archive" >&2
+fi
 printf '%s\n' "$archive"

@@ -71,6 +71,8 @@ def test_postal_runtime_is_patched_from_immutable_os_and_gem_inputs():
     assert sources.count("20260901T000000Z") == 3
     assert "rm -f /etc/apt/sources.list.d/*" in dockerfile
     assert "apt-get dist-upgrade -y" in dockerfile
+    assert "setcap -r /usr/local/bin/ruby" in dockerfile
+    assert 'test -z "$(getcap /usr/local/bin/ruby)"' in dockerfile
     os_patch_layer = dockerfile.split(
         "COPY docker/postal-security/Gemfile", maxsplit=1
     )[0]
@@ -94,6 +96,12 @@ def test_postal_runtime_is_patched_from_immutable_os_and_gem_inputs():
     assert "rails (7.2.3.2) sha256=" in lock
     assert "resolv (0.7.2) sha256=" in lock
     assert "zlib (3.2.3) sha256=" in lock
+    assert 'ARG SOURCE_SHA' in dockerfile
+    assert 'ARG SOURCE_DATE_EPOCH' in dockerfile
+    assert 'export SOURCE_DATE_EPOCH' in dockerfile
+    assert 'bundle install --jobs 1 --retry 3' in dockerfile
+    assert 'org.opencontainers.image.revision=$SOURCE_SHA' in dockerfile
+    assert 'wc -c)" -eq 40' in dockerfile
 
 
 def test_ci_compares_two_timestamp_rewritten_oci_exports_before_publish():
@@ -108,6 +116,10 @@ def test_ci_compares_two_timestamp_rewritten_oci_exports_before_publish():
     assert "type=oci,dest=${RUNNER_TEMP}/klyrow-${image}-${copy}.tar,rewrite-timestamp=true" in workflow
     assert "cmp \\\n" in workflow
     assert workflow.count("outputs: type=registry,rewrite-timestamp=true") == 4
+    initial_postal_build = workflow.split(
+        "- name: Build Postal provisioner candidate", maxsplit=1
+    )[1].split("- name: Build frontend candidate", maxsplit=1)[0]
+    assert "SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}" in initial_postal_build
 
 
 def test_protected_publication_covers_every_production_owned_image():
@@ -148,6 +160,16 @@ def test_protected_publisher_scans_and_verifies_exact_digests_before_promotion()
     assert "sha256sum -c PUBLISH_SHA256SUMS" in workflow
 
 
+def test_cosign_attestation_verification_normalizes_jsonl_and_legacy_arrays():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    normalize = '[.[] | if type == "array" then .[] else . end]'
+    assert workflow.count(normalize) == 4
+    assert workflow.count("jq -s -e --arg source") == 2
+    assert workflow.count("jq -s -e '[.[] | if type") == 2
+    assert "| jq -e --arg source" not in workflow
+    assert "\n            jq -e 'any(.[];" not in workflow
+
+
 def test_pull_request_images_and_evidence_bind_to_exact_head_sha():
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "KLYROW_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}" in workflow
@@ -160,6 +182,8 @@ def test_pull_request_images_and_evidence_bind_to_exact_head_sha():
     assert "org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}" in workflow
     assert "trivy-${{ env.KLYROW_SOURCE_SHA }}" in workflow
     assert "klyrow-gateway-${{ env.KLYROW_SOURCE_SHA }}.cdx.json" in workflow
+    assert workflow.count("SOURCE_SHA=${{ env.KLYROW_SOURCE_SHA }}") == 2
+    assert '--build-arg "SOURCE_SHA=${KLYROW_SOURCE_SHA}"' in workflow
 
 
 def test_all_third_party_workflow_actions_are_commit_pinned():

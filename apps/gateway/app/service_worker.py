@@ -9,8 +9,9 @@ from datetime import timedelta
 
 from sqlalchemy import select
 
+from .main import DB, email_outbox_loop, postal_retry_loop, recover_middleware_commands
 from .billing import BillingEvent, BillingWorkItem, now
-from .main import DB, email_outbox_loop, postal_retry_loop
+from .mautic_adapter import dispatch_mautic_outbox
 from .postal_provisioning import provisioning_tick
 from .provider import (
     dispatch_provider_outbox,
@@ -131,6 +132,7 @@ async def loop():
     while RUNNING:
         try:
             if ROLE == "mail":
+                await recover_middleware_commands()
                 with DB() as session:
                     recover_expired_leases(session)
                     for _ in range(50):
@@ -142,8 +144,7 @@ async def loop():
             elif ROLE == "billing":
                 billing_tick()
             elif ROLE == "scheduler":
-                with DB() as session:
-                    session.execute(select(1))
+                await dispatch_mautic_outbox()
         except Exception as exc:
             print(
                 json.dumps(

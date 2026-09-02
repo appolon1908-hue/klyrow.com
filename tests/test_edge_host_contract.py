@@ -43,6 +43,7 @@ def test_frontend_container_serves_only_the_canonical_application_host():
 
 def test_provider_edge_keeps_app_api_and_tracking_on_distinct_upstreams():
     source = (ROOT / "docker/proxy/klyrow.conf").read_text(encoding="utf-8")
+    assert "map $http_upgrade $connection_upgrade" in source
     app = _https_block(source, "app.klyrow.com")
     api = _https_block(source, "api.klyrow.com")
     tracking = _https_block(source, "track.klyrow.com")
@@ -50,6 +51,15 @@ def test_provider_edge_keeps_app_api_and_tracking_on_distinct_upstreams():
 
     assert "proxy_pass http://klyrow_web;" in app
     assert "proxy_pass http://klyrow_gateway;" not in app
+    assert "location = /mautic/api { return 404; }" in app
+    assert "location ^~ /mautic/api/ { return 404; }" in app
+    assert "location = /mautic/oauth { return 404; }" in app
+    assert "location ^~ /mautic/oauth/ { return 404; }" in app
+    assert app.index("location ^~ /mautic/api/") < app.index("location /mautic/")
+    assert app.index("location ^~ /mautic/oauth/") < app.index("location /mautic/")
+    assert "location = /ops { return 308 https://app.klyrow.com/ops/; }" in app
+    assert "proxy_pass http://127.0.0.1:18003;" in app
+    assert "proxy_pass http://127.0.0.1:18003/;" not in app
     assert "proxy_pass http://klyrow_gateway;" in api
     assert "proxy_pass http://klyrow_web;" not in api
     assert "location ^~ /t/" in tracking and "location / { return 404; }" in tracking

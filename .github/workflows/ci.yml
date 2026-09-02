@@ -66,22 +66,37 @@ jobs:
           cache: pip
           cache-dependency-path: apps/gateway/requirements.txt
       - name: Install gateway and test dependencies
-        run: pip install -r apps/gateway/requirements.txt pytest pip-audit
+        run: pip install -r apps/gateway/requirements.txt pytest pip-audit openapi-spec-validator
       - name: Audit Python dependencies
         run: pip-audit --requirement apps/gateway/requirements.txt
       - name: Apply migrations twice and verify the ledger
         env:
-          KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:ci-only-password@127.0.0.1:5432/klyrow_ci
+          KLYROW_DATABASE_URL: postgresql+psycopg://klyrow@127.0.0.1:5432/klyrow_ci
+          KLYROW_DATABASE_OWNER_PASSWORD_FILE: ${{ runner.temp }}/klyrow-db-owner-password
+          KLYROW_DATABASE_RUNTIME_PASSWORD_FILE: ${{ runner.temp }}/klyrow-db-runtime-password
         run: |
+          umask 077
+          printf '%s' 'ci-only-password' > "$KLYROW_DATABASE_OWNER_PASSWORD_FILE"
+          printf '%s' 'ci-runtime-only-password' > "$KLYROW_DATABASE_RUNTIME_PASSWORD_FILE"
+          cleanup() { shred -u "$KLYROW_DATABASE_OWNER_PASSWORD_FILE" "$KLYROW_DATABASE_RUNTIME_PASSWORD_FILE"; }
+          trap cleanup EXIT
           python scripts/migrate
           python scripts/migrate
           python - <<'PY'
           import os
+          from pathlib import Path
           from sqlalchemy import create_engine, text
-          with create_engine(os.environ["KLYROW_DATABASE_URL"]).connect() as connection:
+          from sqlalchemy.engine import make_url
+          runtime_url = make_url(os.environ["KLYROW_DATABASE_URL"]).set(
+              username="klyrow_runtime",
+              password=Path(os.environ["KLYROW_DATABASE_RUNTIME_PASSWORD_FILE"]).read_text(),
+          )
+          with create_engine(runtime_url).connect() as connection:
               count = connection.execute(text("SELECT count(*) FROM klyrow_schema_migrations")).scalar_one()
               expected = sum(1 for _ in __import__("pathlib").Path("migrations").glob("*.sql"))
               assert count == expected, (count, expected)
+              role = connection.execute(text("SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls FROM pg_roles WHERE rolname=current_user")).one()
+              assert role[0] == "klyrow_runtime" and not any(role[1:]), role
           PY
       - name: Compile and test
         env:
@@ -125,6 +140,7 @@ jobs:
           file: apps/gateway/Dockerfile
           load: true
           tags: klyrow-gateway:${{ env.KLYROW_SOURCE_SHA }}
+          build-args: SOURCE_COMMIT_SHA=${{ env.KLYROW_SOURCE_SHA }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
@@ -136,6 +152,7 @@ jobs:
           file: docker/migrate.Dockerfile
           load: true
           tags: klyrow-migrate:${{ env.KLYROW_SOURCE_SHA }}
+          build-args: SOURCE_COMMIT_SHA=${{ env.KLYROW_SOURCE_SHA }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
@@ -147,6 +164,9 @@ jobs:
           file: docker/postal-provisioner.Dockerfile
           load: true
           tags: klyrow-postal-provisioner:${{ env.KLYROW_SOURCE_SHA }}
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+            SOURCE_SHA=${{ env.KLYROW_SOURCE_SHA }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
@@ -158,6 +178,7 @@ jobs:
           file: apps/web/Dockerfile
           load: true
           tags: klyrow-web:${{ env.KLYROW_SOURCE_SHA }}
+          build-args: SOURCE_COMMIT_SHA=${{ env.KLYROW_SOURCE_SHA }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ env.KLYROW_SOURCE_SHA }}
@@ -316,6 +337,8 @@ jobs:
                 --no-cache \
                 --provenance=false \
                 --sbom=false \
+                --build-arg "SOURCE_COMMIT_SHA=${KLYROW_SOURCE_SHA}" \
+                --build-arg "SOURCE_SHA=${KLYROW_SOURCE_SHA}" \
                 --build-arg "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" \
                 --output "type=oci,dest=${RUNNER_TEMP}/klyrow-${image}-${copy}.tar,rewrite-timestamp=true" \
                 --file "${dockerfile}" \
@@ -366,7 +389,9 @@ jobs:
           file: apps/gateway/Dockerfile
           outputs: type=registry,rewrite-timestamp=true
           tags: ghcr.io/${{ github.repository_owner }}/klyrow-gateway:candidate-${{ github.run_id }}-${{ github.run_attempt }}
-          build-args: SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+            SOURCE_COMMIT_SHA=${{ env.KLYROW_SOURCE_SHA }}
           provenance: false
           sbom: false
           labels: |
@@ -381,7 +406,9 @@ jobs:
           file: apps/web/Dockerfile
           outputs: type=registry,rewrite-timestamp=true
           tags: ghcr.io/${{ github.repository_owner }}/klyrow-web:candidate-${{ github.run_id }}-${{ github.run_attempt }}
-          build-args: SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+            SOURCE_COMMIT_SHA=${{ env.KLYROW_SOURCE_SHA }}
           provenance: false
           sbom: false
           labels: |
@@ -396,7 +423,9 @@ jobs:
           file: docker/migrate.Dockerfile
           outputs: type=registry,rewrite-timestamp=true
           tags: ghcr.io/${{ github.repository_owner }}/klyrow-migrate:candidate-${{ github.run_id }}-${{ github.run_attempt }}
-          build-args: SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+            SOURCE_COMMIT_SHA=${{ env.KLYROW_SOURCE_SHA }}
           provenance: false
           sbom: false
           labels: |
@@ -411,7 +440,9 @@ jobs:
           file: docker/postal-provisioner.Dockerfile
           outputs: type=registry,rewrite-timestamp=true
           tags: ghcr.io/${{ github.repository_owner }}/klyrow-postal-provisioner:candidate-${{ github.run_id }}-${{ github.run_attempt }}
-          build-args: SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+            SOURCE_SHA=${{ env.KLYROW_SOURCE_SHA }}
           provenance: false
           sbom: false
           labels: |
@@ -607,8 +638,8 @@ jobs:
             fi
             if ! cosign verify-attestation --type slsaprovenance1 \
               --certificate-identity "$SIGNING_IDENTITY" --certificate-oidc-issuer "$OIDC_ISSUER" \
-              "$exact_image" 2>/dev/null | jq -e --arg source "$KLYROW_SOURCE_SHA" --arg digest "$digest" '
-                any(.[];
+              "$exact_image" 2>/dev/null | jq -s -e --arg source "$KLYROW_SOURCE_SHA" --arg digest "$digest" '
+                [.[] | if type == "array" then .[] else . end] | any(.[];
                   ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.sourceCommit == $source) and
                   ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.registryDigest == $digest)
                 )' >/dev/null; then
@@ -618,7 +649,7 @@ jobs:
             if ! cosign verify-attestation --type spdxjson \
               --certificate-identity "$SIGNING_IDENTITY" --certificate-oidc-issuer "$OIDC_ISSUER" \
               "$exact_image" 2>/dev/null | \
-              jq -e 'any(.[]; ((.payload | @base64d | fromjson).predicate.spdxVersion == "SPDX-2.3"))' >/dev/null; then
+              jq -s -e '[.[] | if type == "array" then .[] else . end] | any(.[]; ((.payload | @base64d | fromjson).predicate.spdxVersion == "SPDX-2.3"))' >/dev/null; then
               cosign attest --yes --type spdxjson \
                 --predicate "publish-sbom-${image}.spdx.json" "$exact_image"
             fi
@@ -651,12 +682,12 @@ jobs:
               --certificate-identity "$SIGNING_IDENTITY" --certificate-oidc-issuer "$OIDC_ISSUER" \
               "$exact_image" > "publish-sbom-verification-${image}.json"
             jq -e 'length > 0' "publish-signature-verification-${image}.json"
-            jq -e --arg source "$KLYROW_SOURCE_SHA" --arg digest "$digest" '
-              any(.[];
+            jq -s -e --arg source "$KLYROW_SOURCE_SHA" --arg digest "$digest" '
+              [.[] | if type == "array" then .[] else . end] | any(.[];
                 ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.sourceCommit == $source) and
                 ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.registryDigest == $digest)
               )' "publish-provenance-verification-${image}.json"
-            jq -e 'any(.[]; ((.payload | @base64d | fromjson).predicate.spdxVersion == "SPDX-2.3"))' \
+            jq -s -e '[.[] | if type == "array" then .[] else . end] | any(.[]; ((.payload | @base64d | fromjson).predicate.spdxVersion == "SPDX-2.3"))' \
               "publish-sbom-verification-${image}.json"
           done
 
