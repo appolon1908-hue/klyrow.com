@@ -42,7 +42,10 @@ def test_mutations_require_constant_time_bearer_authentication():
 def test_reconciliation_is_bounded_and_uses_postal_models():
     assert 'domains.length > 100' in SOURCE
     assert 'length > 16_384' in SOURCE
-    assert 'Domain.find_by!(name: name)' in SOURCE
+    assert 'organization.servers.find_by!(name: "Klyrow #{tenant_id}")' in SOURCE
+    assert 'server.domains.find_by!(name: name)' in SOURCE
+    assert 'domain.owner == server' in SOURCE
+    assert 'Domain.find_by!(name: name)' not in SOURCE
     assert 'find_or_initialize_by(name: "Klyrow signed inbound adapter")' in SOURCE
     assert 'find_or_create_by!(' in SOURCE
     assert "UPDATE " not in SOURCE.upper() and "INSERT INTO" not in SOURCE.upper()
@@ -55,6 +58,7 @@ def test_inbound_destination_is_pinned_to_the_gateway_contract():
     assert 'inbound_uri.path == "/v1/webhooks/postal-inbound"' in SOURCE
 
 
-def test_provider_credentials_are_declared_write_only():
+def test_provider_credentials_are_declared_as_response_only():
     api_key = CONTRACT["components"]["schemas"]["ProvisionResult"]["properties"]["api_key"]
-    assert api_key["writeOnly"] is True
+    assert api_key["readOnly"] is True
+    assert "writeOnly" not in api_key

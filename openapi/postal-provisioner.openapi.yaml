@@ -151,7 +151,7 @@ components:
           const: Development
         api_key:
           type: string
-          writeOnly: true
+          readOnly: true
     ReconcileResult:
       type: object
       required: [tenant_id, domains]

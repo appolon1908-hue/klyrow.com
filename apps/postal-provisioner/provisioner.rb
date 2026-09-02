@@ -32,6 +32,12 @@ rescue StandardError
 end
 
 
+def provisioned_server_for_tenant!(tenant_id)
+  organization = Organization.find_by!(name: "Klyrow #{tenant_id}")
+  organization.servers.find_by!(name: "Klyrow #{tenant_id}")
+end
+
+
 def provision(payload)
   tenant_id = String(payload.fetch("tenant_id"))
   raise ArgumentError, "invalid tenant_id" unless tenant_id.match?(/\A[a-zA-Z0-9-]{1,80}\z/)
@@ -73,12 +79,12 @@ def reconcile_inbound(payload)
   raise ArgumentError, "invalid domain" unless domains.all? { |value| value.match?(/\A[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\z/) }
   reconciled = []
   ActiveRecord::Base.transaction do
+    server = provisioned_server_for_tenant!(tenant_id)
     domains.each do |name|
-      domain = Domain.find_by!(name: name)
+      domain = server.domains.find_by!(name: name)
       raise "Postal domain is not verified" if domain.verified_at.nil?
       raise "Postal inbound is disabled" unless domain.incoming
-      server = domain.owner
-      raise "Postal domain owner is not a server" unless server.is_a?(Server)
+      raise "Postal domain tenant ownership mismatch" unless domain.owner == server
       endpoint = server.http_endpoints.find_or_initialize_by(name: "Klyrow signed inbound adapter")
       endpoint.assign_attributes(
         url: INBOUND_ENDPOINT_URL, encoding: "BodyAsJSON", format: "RawMessage",
@@ -108,11 +114,11 @@ def reconcile_outbound(payload)
   raise ArgumentError, "invalid domain" unless domains.all? { |value| value.match?(/\A[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\z/) }
   reconciled = []
   ActiveRecord::Base.transaction do
+    server = provisioned_server_for_tenant!(tenant_id)
     domains.each do |name|
-      domain = Domain.find_by!(name: name)
+      domain = server.domains.find_by!(name: name)
       raise "Postal domain is not verified" if domain.verified_at.nil?
-      server = domain.owner
-      raise "Postal domain owner is not a server" unless server.is_a?(Server)
+      raise "Postal domain tenant ownership mismatch" unless domain.owner == server
       raise "Postal outbound server is not live" unless server.mode.to_s.casecmp("Live").zero?
       credential = server.credentials.find_or_create_by!(
         name: "Klyrow Webmail #{tenant_id}", type: "API"
