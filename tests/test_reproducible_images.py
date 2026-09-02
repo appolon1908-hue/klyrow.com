@@ -57,6 +57,8 @@ def test_postal_runtime_is_patched_from_immutable_os_and_gem_inputs():
     assert sources.count("20260901T000000Z") == 3
     assert "rm -f /etc/apt/sources.list.d/*" in dockerfile
     assert "apt-get dist-upgrade -y" in dockerfile
+    assert "setcap -r /usr/local/bin/ruby" in dockerfile
+    assert 'test -z "$(getcap /usr/local/bin/ruby)"' in dockerfile
     os_patch_layer = dockerfile.split(
         "COPY docker/postal-security/Gemfile", maxsplit=1
     )[0]

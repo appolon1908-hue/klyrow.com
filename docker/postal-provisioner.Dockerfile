@@ -9,10 +9,14 @@ LABEL org.opencontainers.image.source=$SOURCE_REPOSITORY \
 USER root
 COPY docker/postal-security/debian.sources.list /etc/apt/sources.list
 # trivy:ignore:DS-0017 -- update and dist-upgrade are atomic in this same layer.
+# This private provisioner listens on 9090. Retaining Postal's low-port Ruby
+# capability makes exec fail when production correctly drops ALL capabilities.
 RUN rm -f /etc/apt/sources.list.d/* \
     && DEBIAN_FRONTEND=noninteractive apt-get \
         -o Acquire::Check-Valid-Until=false update \
     && DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y \
+    && setcap -r /usr/local/bin/ruby \
+    && test -z "$(getcap /usr/local/bin/ruby)" \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
     && rm -f \
         /var/log/apt/* \
