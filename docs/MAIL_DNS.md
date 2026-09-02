@@ -1,6 +1,6 @@
 # Klyrow production mail DNS contract
 
-Observed from both authoritative nameservers, Cloudflare `1.1.1.1`, Google `8.8.8.8`, and the live Postal 3.3.7 database on 2026-08-15. TTL `3600` is recommended for all records during rollout. Postal created the sending domain once and generated selector `postal-QQaKrT`; its private key remains only in Postal's database and protected backups.
+Observed from both authoritative nameservers, Cloudflare `1.1.1.1`, Google `8.8.8.8`, and the live Postal 3.3.7 database on 2026-08-15. Public DNS was refreshed through Cloudflare and Google on 2026-09-02; both resolvers returned one matching record for the apex SPF, SPF include, bounce SPF, DKIM, and DMARC contracts, plus the expected A, MX, bounce MX, and PTR records. This read-only refresh did not submit mail. TTL `3600` is recommended for all records during rollout. Postal created the sending domain once and generated selector `postal-QQaKrT`; its private key remains only in Postal's database and protected backups.
 
 ## APPLIED
 
@@ -49,10 +49,17 @@ returned SPF fail. Add exactly one authoritative record:
 | TXT | `bounce.klyrow.com` | `v=spf1 include:spf.klyrow.com -all` |
 
 The include terminates at `v=spf1 ip4:37.27.128.39 -all`; it has no recursion,
-syntax, multiplicity, or lookup-limit issue. This record is still absent from
-authoritative and public resolvers, so readiness is `DNS-PROPAGATION` /
-`BLOCKED-DNS` until the owner publishes it.
+syntax, multiplicity, or lookup-limit issue. On 2026-09-02 Cloudflare and
+Google each returned exactly one matching bounce SPF record. The propagation
+blocker is therefore cleared.
 
 Postal's domain DNS cache was refreshed after worker egress repair and now
 reports SPF/DKIM/MX/return-path `OK`. The intended next envelope domain is
 `psrp.klyrow.com`, aligned with From `klyrow.com` under relaxed DMARC.
+
+Public DNS correctness is not production activation approval. The currently
+published selector predates the required rotation of previously exposed Postal
+DKIM keys in `SECURITY_SMTP_ACTIVATION.md`. Production domain policy remains
+blocked until an approved rotation is performed, the replacement public TXT is
+read back byte-for-byte, Postal reports the replacement selector active, the
+prior selector is retired, and the protected backup/restore path is verified.
