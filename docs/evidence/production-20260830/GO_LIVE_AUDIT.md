@@ -1,7 +1,7 @@
 # Klyrow production go-live audit
 
-Date: 2026-08-30  
-Audited repository head: `57678867166043c2351d56f58ad47785e9456c18`  
+Date: 2026-08-30
+Audited repository head: `57678867166043c2351d56f58ad47785e9456c18`
 Audited host: `37.27.128.39` / private `10.40.0.4`
 
 ## Verdict
