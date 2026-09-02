@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .main import Base
@@ -81,3 +81,20 @@ class WebmailMessage(Base):
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class WebmailAttachment(Base):
+    __tablename__ = "webmail_attachments"
+    __table_args__ = (
+        UniqueConstraint("message_id", "sha256", "filename", name="uq_webmail_attachment_message_digest_name"),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String, index=True)
+    mailbox_id: Mapped[str] = mapped_column(ForeignKey("webmail_mailboxes.id"), index=True)
+    message_id: Mapped[str] = mapped_column(ForeignKey("webmail_messages.id"), index=True)
+    filename: Mapped[str] = mapped_column(String)
+    content_type: Mapped[str] = mapped_column(String)
+    size: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String)
+    content: Mapped[bytes] = mapped_column(LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

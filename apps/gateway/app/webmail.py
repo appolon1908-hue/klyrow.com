@@ -8,6 +8,7 @@ members require an explicit mailbox grant in addition to their workspace role.
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import re
@@ -15,9 +16,10 @@ import uuid
 from datetime import datetime, timezone
 from email.utils import getaddresses
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel, EmailStr, Field, model_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -25,7 +27,7 @@ from sqlalchemy.orm import Session
 from .auth_bff import BrowserSession, browser_context, csrf_guard
 from .main import AllowedSender, Domain, EmailOutbox, InboundRouteConfig, MailIn, _send, audit, db
 from .tenancy import ROLE_PERMISSIONS
-from .webmail_models import WebmailAccess, WebmailMailbox, WebmailMessage
+from .webmail_models import WebmailAccess, WebmailAttachment, WebmailMailbox, WebmailMessage
 
 
 router = APIRouter(prefix="/app/api/mailboxes", tags=["Browser webmail"])
@@ -219,7 +221,14 @@ def sync_verified_mailboxes(s: Session, tenant_id: Optional[str] = None) -> dict
                 InboundRouteConfig.tenant_id == domain.tenant_id,
                 InboundRouteConfig.address == address,
             ))
-            receiving = bool(provider_receive and route and route.verified and route.enabled)
+            receiving = bool(
+                provider_receive
+                and route
+                and route.verified
+                and route.enabled
+                and route.destination_kind == "webmail"
+                and route.destination_ref == "klyrow:webmail"
+            )
             mailbox = s.scalar(select(WebmailMailbox).where(
                 WebmailMailbox.tenant_id == domain.tenant_id,
                 WebmailMailbox.address == address,
@@ -285,6 +294,8 @@ def capture_provider_inbound(s: Session, route: InboundRouteConfig, provider_ite
     """Copy one authenticated provider message into its matching mailbox."""
     if provider_item.disposition == "REJECT":
         return None
+    if route.destination_kind != "webmail" or route.destination_ref != "klyrow:webmail":
+        return None
     existing = s.scalar(select(WebmailMessage).where(WebmailMessage.provider_inbound_id == provider_item.id))
     if existing:
         return existing
@@ -297,6 +308,32 @@ def capture_provider_inbound(s: Session, route: InboundRouteConfig, provider_ite
         return None
     references = re.findall(r"<[^>]+>", parsed.get("references") or "")
     item_id = str(uuid.uuid4())
+    attachment_metadata = parsed.get("attachments") or []
+    attachment_contents = parsed.get("attachment_contents") or []
+    if len(attachment_metadata) != len(attachment_contents):
+        raise HTTPException(500, "inbound_attachment_content_mismatch")
+    stored_attachments = []
+    public_attachments = []
+    for metadata, content in zip(attachment_metadata, attachment_contents, strict=True):
+        if not isinstance(content, bytes) or hashlib.sha256(content).hexdigest() != metadata.get("sha256"):
+            raise HTTPException(422, "inbound_attachment_digest_mismatch")
+        attachment_id = str(uuid.uuid4())
+        public_attachments.append({
+            **metadata,
+            "id": attachment_id,
+            "download_url": f"/app/api/mailboxes/{mailbox.id}/messages/{item_id}/attachments/{attachment_id}",
+        })
+        stored_attachments.append(WebmailAttachment(
+            id=attachment_id,
+            tenant_id=mailbox.tenant_id,
+            mailbox_id=mailbox.id,
+            message_id=item_id,
+            filename=metadata["filename"],
+            content_type=metadata["content_type"],
+            size=metadata["size"],
+            sha256=metadata["sha256"],
+            content=content,
+        ))
     item = WebmailMessage(
         id=item_id,
         tenant_id=mailbox.tenant_id,
@@ -314,7 +351,7 @@ def capture_provider_inbound(s: Session, route: InboundRouteConfig, provider_ite
         subject=parsed.get("subject") or "(no subject)",
         text_body=parsed.get("text") or "",
         html_body=parsed.get("html"),
-        attachments_json=json.dumps(parsed.get("attachments") or [], separators=(",", ":"), sort_keys=True),
+        attachments_json=json.dumps(public_attachments, separators=(",", ":"), sort_keys=True),
         is_read=False,
         delivery_status="RECEIVED",
         received_at=now(),
@@ -322,6 +359,7 @@ def capture_provider_inbound(s: Session, route: InboundRouteConfig, provider_ite
     mailbox.receiving_enabled = True
     mailbox.updated_at = now()
     s.add(item)
+    s.add_all(stored_attachments)
     return item
 
 
@@ -438,11 +476,13 @@ async def activate_inbound_mailboxes(
                 destination_kind="webmail", destination_ref="klyrow:webmail",
             )
             s.add(route)
-        route.verified = True
-        route.enabled = True
-        if not route.destination_ref:
+        elif not route.destination_ref:
             route.destination_kind = "webmail"
             route.destination_ref = "klyrow:webmail"
+        elif route.destination_kind != "webmail" or route.destination_ref != "klyrow:webmail":
+            continue
+        route.verified = True
+        route.enabled = True
         activated_routes += 1
     audit(s, ctx, "webmail.inbound.activated")
     s.commit()
@@ -489,6 +529,35 @@ def list_messages(
 def get_message(mailbox_id: str, message_id: str, ctx: dict = Depends(browser_context), s: Session = Depends(db)):
     mailbox = _mailbox(s, ctx, mailbox_id)
     return _detail(_message(s, mailbox, message_id))
+
+
+@router.get("/{mailbox_id}/messages/{message_id}/attachments/{attachment_id}")
+def get_attachment(
+    mailbox_id: str,
+    message_id: str,
+    attachment_id: str,
+    ctx: dict = Depends(browser_context),
+    s: Session = Depends(db),
+):
+    mailbox = _mailbox(s, ctx, mailbox_id)
+    message = _message(s, mailbox, message_id)
+    item = s.scalar(select(WebmailAttachment).where(
+        WebmailAttachment.id == attachment_id,
+        WebmailAttachment.tenant_id == ctx["tenant"],
+        WebmailAttachment.mailbox_id == mailbox.id,
+        WebmailAttachment.message_id == message.id,
+    ))
+    if not item:
+        raise HTTPException(404, "attachment_not_found")
+    return Response(
+        content=item.content,
+        media_type="application/octet-stream",
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": "attachment; filename*=UTF-8''" + quote(item.filename, safe=""),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.post("/{mailbox_id}/drafts", status_code=201)

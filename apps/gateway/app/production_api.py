@@ -207,6 +207,39 @@ def _find_operation(s: Session, operation_id: str, tenant_id: str) -> Any:
     return item
 
 
+def _has_permission(ctx: dict[str, Any], permission: str) -> bool:
+    role = str(ctx.get("role") or "").upper()
+    if role in {"OWNER", "ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN"}:
+        return True
+    granted = set(ROLE_PERMISSIONS.get(role, set()))
+    for field in ("permissions", "scopes"):
+        values = ctx.get(field) or []
+        granted.update(values.split() if isinstance(values, str) else values)
+    return "*" in granted or permission in granted
+
+
+def _mautic_permission(command: str) -> str:
+    if command in {"sync.request.v1", "form_submissions.read.v1"}:
+        return "analytics.read"
+    if command == "webhook.register.v1":
+        return "webhook.manage"
+    if command.startswith("campaign.") or command.startswith("campaign_membership."):
+        return "campaign.manage"
+    if command == "email_campaign.state.v1":
+        return "campaign.manage"
+    return "contact.manage"
+
+
+def _require_mautic_permission(ctx: dict[str, Any], command: str) -> None:
+    if not _has_permission(ctx, _mautic_permission(command)):
+        raise HTTPException(403, "mautic_command_permission_denied")
+
+
+def _authorize_operation_mutation(ctx: dict[str, Any], item: Any) -> None:
+    if isinstance(item, IntegrationOutbox) and item.target == "MAUTIC":
+        _require_mautic_permission(ctx, item.event_type)
+
+
 @router.get("/health/live")
 def health_live() -> dict[str, str]:
     return {"status": "live"}
@@ -709,14 +742,19 @@ def operation_attempts(operation_id: str, ctx: dict = Depends(auth), s: Session 
 @router.post("/v1/operations/{operation_id}/cancel")
 def operation_cancel(operation_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
     item = _find_operation(s, operation_id, ctx["tenant"])
+    _authorize_operation_mutation(ctx, item)
     if isinstance(item, MiddlewareCommandOperation):
         if item.state in {"completed", "failed", "cancelled"}:
             raise HTTPException(409, "operation_terminal")
+        if item.state == "processing":
+            raise HTTPException(409, "operation_processing_not_cancellable")
         item.state = "cancelled"
         item.updated_at = now()
     else:
         if item.state in {"COMPLETED", "DEAD_LETTER", "CANCELLED"}:
             raise HTTPException(409, "operation_terminal")
+        if item.state == "PROCESSING":
+            raise HTTPException(409, "operation_processing_not_cancellable")
         item.state = "CANCELLED"
         item.updated_at = now()
     audit(s, ctx, "operation.cancelled")
@@ -727,6 +765,7 @@ def operation_cancel(operation_id: str, ctx: dict = Depends(auth), s: Session = 
 @router.post("/v1/operations/{operation_id}/reconcile")
 def operation_reconcile(operation_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
     item = _find_operation(s, operation_id, ctx["tenant"])
+    _authorize_operation_mutation(ctx, item)
     if isinstance(item, MiddlewareCommandOperation):
         if item.state != "failed":
             return _operation_json(item, s)
@@ -767,6 +806,7 @@ def mautic_command(
     idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=200),
     x_correlation_id: str = Header(alias="X-Correlation-ID", min_length=8, max_length=200),
 ) -> dict[str, Any]:
+    _require_mautic_permission(ctx, body.command)
     semantic = json.dumps({"command": body.command, "aggregate_id": body.aggregate_id, "payload": body.payload, "tenant_id": ctx["tenant"]}, separators=(",", ":"), sort_keys=True)
     digest = hashlib.sha256(semantic.encode()).hexdigest()
     prior = s.scalar(select(IntegrationOutbox).where(IntegrationOutbox.tenant_id == ctx["tenant"], IntegrationOutbox.target == "MAUTIC", IntegrationOutbox.idempotency_key == idempotency_key))

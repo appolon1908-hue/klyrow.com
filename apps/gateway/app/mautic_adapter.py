@@ -262,7 +262,7 @@ def _failure(session: Session, item_id: str, error: str, *, retryable: bool) -> 
     if circuit.failure_streak >= 5:
         circuit.circuit_open_until = current + timedelta(seconds=60)
     session.add(circuit)
-    if item:
+    if item and item.state == "PROCESSING":
         can_retry = retryable and item.attempts < MAX_ATTEMPTS
         item.state = "RETRY" if can_retry else "DEAD_LETTER"
         item.next_attempt_at = current + timedelta(seconds=min(300, 2**item.attempts))
@@ -276,6 +276,13 @@ def _success(session: Session, item_id: str, response: dict[str, Any]) -> None:
     current = now()
     item = session.get(IntegrationOutbox, item_id)
     if not item:
+        return
+    if item.state != "PROCESSING":
+        item.state = "DEAD_LETTER"
+        item.lease_expires_at = None
+        item.last_error = "provider_completed_after_operation_state_changed"
+        item.updated_at = current
+        session.commit()
         return
     item.state = "COMPLETED"
     item.lease_expires_at = None
@@ -344,6 +351,10 @@ async def dispatch_mautic_outbox(limit: int = 20) -> dict[str, int]:
                     item.idempotency_key,
                 )
             item_id, command, stored, idempotency_key = snapshot
+            with DB() as session:
+                current = session.get(IntegrationOutbox, item_id)
+                if not current or current.state != "PROCESSING":
+                    continue
             try:
                 method, path, body = mautic_request(
                     command, stored.get("payload") or {}

@@ -417,6 +417,7 @@ def parse_inbound(raw: bytes, max_message_bytes: int, max_attachment_bytes: int)
     text_body = None
     html_body = None
     attachments = []
+    attachment_contents = []
     disposition = "ACCEPT"
     for part in message.walk():
         if part.is_multipart():
@@ -433,6 +434,7 @@ def parse_inbound(raw: bytes, max_message_bytes: int, max_attachment_bytes: int)
             if PurePath(clean.lower()).suffix in EXECUTABLE_SUFFIXES:
                 disposition = "QUARANTINE"
             attachments.append({"filename": clean, "content_type": content_type, "size": len(content), "sha256": hashlib.sha256(content).hexdigest()})
+            attachment_contents.append(content)
         elif content_type == "text/plain" and text_body is None:
             text_body = content.decode(part.get_content_charset() or "utf-8", errors="replace")
         elif content_type == "text/html" and html_body is None:
@@ -440,7 +442,8 @@ def parse_inbound(raw: bytes, max_message_bytes: int, max_attachment_bytes: int)
     return {"message_id": message.get("Message-ID"), "from": message.get("From", ""), "to": message.get("To", ""),
         "cc": message.get("Cc"), "date": message.get("Date"), "in_reply_to": message.get("In-Reply-To"),
         "references": message.get("References"), "subject": message.get("Subject", ""), "text": text_body,
-        "html": html_body, "attachments": attachments, "disposition": disposition}
+        "html": html_body, "attachments": attachments, "attachment_contents": attachment_contents,
+        "disposition": disposition}
 
 
 def smtp_authorize(s: Session, payload: SmtpPreflightIn, tenant_id: str) -> SmtpCredential:

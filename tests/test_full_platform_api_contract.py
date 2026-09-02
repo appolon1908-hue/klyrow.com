@@ -86,3 +86,6 @@ def test_production_migration_is_required_by_the_model():
     migration = Path("migrations/2026090201_full_platform_api.sql").read_text()
     assert "CREATE TABLE IF NOT EXISTS contact_lists" in migration
     assert "integration_outbox_state_known" in migration
+    attachments = Path("migrations/2026090202_webmail_attachments.sql").read_text()
+    assert "CREATE TABLE IF NOT EXISTS webmail_attachments" in attachments
+    assert "octet_length(content) = size" in attachments

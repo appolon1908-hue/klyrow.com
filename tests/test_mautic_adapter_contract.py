@@ -3,15 +3,24 @@ from datetime import datetime, timezone
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from apps.gateway.app.mautic_adapter import (
     MAUTIC_ORIGIN_HEADERS,
     SUPPORTED_MAUTIC_COMMANDS,
+    _success,
     _oauth_access_token,
     mautic_request,
 )
 from apps.gateway.app.operations import IntegrationOutbox, IntegrationResult
-from apps.gateway.app.production_api import MauticCommand, _operation_json
+from apps.gateway.app.production_api import (
+    MauticCommand,
+    _mautic_permission,
+    _operation_json,
+    _require_mautic_permission,
+    mautic_command,
+    operation_cancel,
+)
 
 
 @pytest.mark.parametrize(
@@ -185,3 +194,91 @@ def test_private_mautic_adapter_preserves_the_canonical_origin():
         "X-Forwarded-Proto": "https",
         "X-Forwarded-Prefix": "/mautic",
     }
+
+
+def test_mautic_mutations_require_the_command_specific_workspace_permission():
+    command = MauticCommand(
+        command="contact.delete.v1",
+        aggregate_id="contact-1",
+        payload={"provider_id": "1"},
+        request_id="request-1",
+        timestamp=datetime.now(timezone.utc),
+    )
+    with pytest.raises(HTTPException, match="mautic_command_permission_denied") as denied:
+        mautic_command(
+            command,
+            {"sub": "reader", "tenant": "tenant-a", "role": "READ_ONLY"},
+            None,
+            "idempotency-1",
+            "correlation-1",
+        )
+    assert denied.value.status_code == 403
+    _require_mautic_permission(
+        {"sub": "analyst", "tenant": "tenant-a", "role": "ANALYST"},
+        "sync.request.v1",
+    )
+    assert {_mautic_permission(command) for command in SUPPORTED_MAUTIC_COMMANDS} == {
+        "analytics.read",
+        "campaign.manage",
+        "contact.manage",
+        "webhook.manage",
+    }
+
+
+def test_processing_mautic_operation_cannot_report_successful_cancellation():
+    item = IntegrationOutbox(
+        id="operation-processing",
+        tenant_id="tenant-a",
+        target="MAUTIC",
+        event_type="campaign.publish.v1",
+        aggregate_id="campaign-1",
+        payload_json="{}",
+        idempotency_key="request-1",
+        state="PROCESSING",
+        attempts=1,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    class ProcessingSession:
+        def scalar(self, _statement):
+            return item
+
+    with pytest.raises(HTTPException, match="operation_processing_not_cancellable") as denied:
+        operation_cancel(
+            item.id,
+            {"sub": "marketer", "tenant": "tenant-a", "role": "MARKETING"},
+            ProcessingSession(),
+        )
+    assert denied.value.status_code == 409
+
+
+def test_provider_completion_after_state_change_requires_reconciliation():
+    item = IntegrationOutbox(
+        id="operation-raced",
+        tenant_id="tenant-a",
+        target="MAUTIC",
+        event_type="campaign.publish.v1",
+        aggregate_id="campaign-1",
+        payload_json="{}",
+        idempotency_key="request-1",
+        state="CANCELLED",
+        attempts=1,
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+
+    class ChangedSession:
+        committed = False
+
+        def get(self, _model, _item_id):
+            return item
+
+        def commit(self):
+            self.committed = True
+
+    session = ChangedSession()
+    _success(session, item.id, {"id": "provider-result"})
+    assert session.committed is True
+    assert item.state == "DEAD_LETTER"
+    assert item.last_error == "provider_completed_after_operation_state_changed"
