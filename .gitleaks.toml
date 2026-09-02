@@ -1,0 +1,18 @@
+title = "Klyrow secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Historical Mautic build metadata contains three public PHP release-signing fingerprints; require only that exact non-secret line shape."
+condition = "AND"
+regexTarget = "line"
+paths = ['''^docker/mautic\.Dockerfile$''']
+regexes = ['''^\s*GPG_KEYS="(?:[0-9A-F]{40} ){2}[0-9A-F]{40}" \\$''']
+
+[[allowlists]]
+description = "Historical browser test used one deterministic invitation fixture; scope the exception to its exact assignment and file."
+condition = "AND"
+regexTarget = "line"
+paths = ['''^apps/web/e2e/auth\.spec\.ts$''']
+regexes = ['''^\s*const token = 'invite_capability_[0-9a-f]{16}'$''']
