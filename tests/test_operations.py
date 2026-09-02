@@ -12,7 +12,7 @@ def setup_module():
         s.add_all([Tenant(id="a",name="A",quota=100),Tenant(id="b",name="B",quota=100),Tenant(id="root",name="Root",quota=100),User(id="a",tenant_id="a",email="a@example.com",password_hash=ph.hash("long-enough-password"),role="tenant_admin"),User(id="b",tenant_id="b",email="b@example.com",password_hash=ph.hash("long-enough-password"),role="tenant_admin"),User(id="root",tenant_id="root",email="root@example.com",password_hash=ph.hash("long-enough-password"),role="platform_admin")]);s.commit()
 def h(user):
     if user in tokens:return tokens[user]
-    r=client.post("/v1/auth/login",json={"email":f"{user}@example.com","password":"long-enough-password"});assert r.status_code==200;tokens[user]={"Authorization":"Bearer "+r.json()["access_token"]};return tokens[user]
+    r=client.post("/v1/auth/login",json={"email":f"{user}@example.com","password":"long-enough-password"});assert r.status_code==200;tokens[user]={"Authorization":"Bearer "+r.json()["access_token"],"X-Correlation-ID":"correlation-user-"+user};return tokens[user]
 
 def test_support_odoo_and_n8n_use_durable_outbox_not_direct_database():
     support=client.post("/v1/support/tickets",headers=h("a"),json={"category":"deliverability","subject":"DNS review","description":"Please review DNS status"});assert support.status_code==201 and support.json()["odoo_sync"]=="QUEUED"

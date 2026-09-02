@@ -9,6 +9,8 @@ COPY docker/postal-security/debian.sources.list /etc/apt/sources.list
 RUN rm -f /etc/apt/sources.list.d/* \
     && DEBIAN_FRONTEND=noninteractive apt-get \
         -o Acquire::Check-Valid-Until=false update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
+        ca-certificates \
     && DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
     && rm -f \

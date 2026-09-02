@@ -12,7 +12,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, EmailStr, Field
@@ -24,6 +24,7 @@ from .main import (
     Base,
     Contact,
     Domain,
+    DurableCommandOperation,
     EmailOutbox,
     Event,
     Message,
@@ -33,7 +34,11 @@ from .main import (
     User,
     audit,
     auth,
+    claim_command,
+    command_caller_identity,
+    complete_command,
     db,
+    replay_command,
 )
 from .messaging import Template, TemplateUpdate, TemplateVersion, template_update, validate_html
 from .operations import IntegrationOutbox, IntegrationResult
@@ -43,12 +48,30 @@ from .tenancy import (
     RoleIn,
     TenantMember,
     manage,
-    role_change,
+    validate_role,
 )
 
 
 router = APIRouter(tags=["Production API"])
 now = lambda: datetime.now(timezone.utc)
+IdempotencyKey = Annotated[
+    str,
+    Header(
+        alias="Idempotency-Key",
+        min_length=8,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    ),
+]
+CorrelationId = Annotated[
+    str,
+    Header(
+        alias="X-Correlation-ID",
+        min_length=8,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9._:-]+$",
+    ),
+]
 
 
 class ContactList(Base):
@@ -123,7 +146,26 @@ def _tenant_item(s: Session, model: Any, item_id: str, tenant_id: str) -> Any:
     return item
 
 
-def _operation_json(item: MiddlewareCommandOperation | IntegrationOutbox) -> dict[str, Any]:
+def _operation_json(
+    item: DurableCommandOperation | MiddlewareCommandOperation | IntegrationOutbox,
+) -> dict[str, Any]:
+    if isinstance(item, DurableCommandOperation):
+        state = {
+            "CLAIMED": "PROCESSING",
+            "COMPLETED": "SUCCEEDED",
+            "CANCELLED": "CANCELLED",
+            "RECONCILIATION_REQUIRED": "RECONCILIATION_REQUIRED",
+        }.get(item.state, item.state)
+        return {
+            "operation_id": item.id,
+            "status": state,
+            "result": {"resource_id": item.resource_id} if item.resource_id else {},
+            "error": item.error,
+            "retryability": state == "RECONCILIATION_REQUIRED",
+            "reconciliation_required": state == "RECONCILIATION_REQUIRED",
+            "correlation_id": item.correlation_id,
+            "resource_version": item.updated_at.isoformat(),
+        }
     if isinstance(item, MiddlewareCommandOperation):
         state = {
             "accepted": "QUEUED",
@@ -150,6 +192,10 @@ def _operation_json(item: MiddlewareCommandOperation | IntegrationOutbox) -> dic
         "DEAD_LETTER": "RECONCILIATION_REQUIRED",
         "CANCELLED": "CANCELLED",
     }.get(item.state, item.state)
+    try:
+        envelope = json.loads(item.payload_json).get("envelope", {})
+    except (TypeError, ValueError, json.JSONDecodeError):
+        envelope = {}
     return {
         "operation_id": item.id,
         "status": state,
@@ -157,18 +203,25 @@ def _operation_json(item: MiddlewareCommandOperation | IntegrationOutbox) -> dic
         "error": item.last_error,
         "retryability": item.state in {"RETRY", "DEAD_LETTER"},
         "reconciliation_required": item.state == "DEAD_LETTER",
-        "correlation_id": item.idempotency_key,
+        "correlation_id": envelope.get("correlation_id") or item.idempotency_key,
         "resource_version": item.updated_at.isoformat(),
     }
 
 
 def _find_operation(s: Session, operation_id: str, tenant_id: str) -> Any:
     item = s.scalar(
-        select(MiddlewareCommandOperation).where(
-            MiddlewareCommandOperation.command_id == operation_id,
-            MiddlewareCommandOperation.tenant_id == tenant_id,
+        select(DurableCommandOperation).where(
+            DurableCommandOperation.id == operation_id,
+            DurableCommandOperation.tenant_id == tenant_id,
         )
     )
+    if item is None:
+        item = s.scalar(
+            select(MiddlewareCommandOperation).where(
+                MiddlewareCommandOperation.command_id == operation_id,
+                MiddlewareCommandOperation.tenant_id == tenant_id,
+            )
+        )
     if item is None:
         item = s.scalar(
             select(IntegrationOutbox).where(
@@ -273,11 +326,25 @@ def organization_members(
 def organization_member_add(
     organization_id: str,
     body: MemberIn,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
     ctx: dict = Depends(auth),
     s: Session = Depends(db),
 ) -> dict[str, Any]:
     organization = organization_detail(organization_id, ctx, s)
-    manage({**ctx, "tenant": organization.tenant_id}, s)
+    operation_ctx = {**ctx, "tenant": organization.tenant_id}
+    manage(operation_ctx, s)
+    semantic = {**body.model_dump(mode="json"), "role": body.role.upper()}
+    replay = replay_command(
+        s,
+        operation_ctx,
+        f"organizations:{organization_id}:members",
+        "add",
+        idempotency_key,
+        semantic,
+    )
+    if replay:
+        return replay
     user = s.get(User, body.user_id)
     if user is None:
         raise HTTPException(404, "user_not_found")
@@ -294,12 +361,25 @@ def organization_member_add(
         item = TenantMember(
             id=str(uuid.uuid4()), tenant_id=organization.tenant_id, user_id=user.id, role=role
         )
+    claim, replay = claim_command(
+        s,
+        operation_ctx,
+        f"organizations:{organization_id}:members",
+        "add",
+        idempotency_key,
+        x_correlation_id,
+        semantic,
+    )
+    if replay:
+        return replay
     item.role = role
     item.active = True
     s.add(item)
-    audit(s, {**ctx, "tenant": organization.tenant_id}, "tenant.member.added")
+    audit(s, operation_ctx, "tenant.member.added")
     s.commit()
-    return {"id": item.id, "user_id": item.user_id, "role": item.role}
+    return complete_command(
+        s, claim, {"id": item.id, "user_id": item.user_id, "role": item.role}, 201, item.id
+    )
 
 
 @router.patch("/v1/organizations/{organization_id}/members/{member_id}")
@@ -307,10 +387,25 @@ def organization_member_patch(
     organization_id: str,
     member_id: str,
     body: RoleIn,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
     ctx: dict = Depends(auth),
     s: Session = Depends(db),
 ) -> dict[str, Any]:
     organization = organization_detail(organization_id, ctx, s)
+    operation_ctx = {**ctx, "tenant": organization.tenant_id}
+    manage(operation_ctx, s)
+    semantic = {**body.model_dump(mode="json"), "role": body.role.upper()}
+    replay = replay_command(
+        s,
+        operation_ctx,
+        f"organizations:{organization_id}:members:{member_id}",
+        "update",
+        idempotency_key,
+        semantic,
+    )
+    if replay:
+        return replay
     item = s.scalar(
         select(TenantMember).where(
             TenantMember.id == member_id, TenantMember.tenant_id == organization.tenant_id
@@ -318,7 +413,26 @@ def organization_member_patch(
     )
     if item is None:
         raise HTTPException(404, "member_not_found")
-    return role_change(item.user_id, body, {**ctx, "tenant": organization.tenant_id}, s)
+    role = validate_role(body.role)
+    if item.role == "OWNER" and role != "OWNER":
+        raise HTTPException(409, "owner_transfer_required")
+    claim, replay = claim_command(
+        s,
+        operation_ctx,
+        f"organizations:{organization_id}:members:{member_id}",
+        "update",
+        idempotency_key,
+        x_correlation_id,
+        semantic,
+    )
+    if replay:
+        return replay
+    item.role = role
+    audit(s, operation_ctx, "tenant.member.role_changed")
+    s.commit()
+    return complete_command(
+        s, claim, {"user_id": item.user_id, "role": item.role}, 200, item.id
+    )
 
 
 @router.get("/v1/domains/{domain_id}")
@@ -328,27 +442,62 @@ def domain_detail(domain_id: str, ctx: dict = Depends(auth), s: Session = Depend
 
 @router.patch("/v1/domains/{domain_id}")
 def domain_patch(
-    domain_id: str, body: DomainPatch, ctx: dict = Depends(auth), s: Session = Depends(db)
+    domain_id: str,
+    body: DomainPatch,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
 ) -> Any:
+    semantic = {"domain": body.domain.lower().rstrip(".")}
+    replay = replay_command(s, ctx, f"domains:{domain_id}", "update", idempotency_key, semantic)
+    if replay:
+        return replay
     item = _tenant_item(s, Domain, domain_id, ctx["tenant"])
+    conflict = s.scalar(
+        select(Domain).where(
+            Domain.tenant_id == ctx["tenant"],
+            Domain.domain == semantic["domain"],
+            Domain.id != domain_id,
+        )
+    )
+    if conflict:
+        raise HTTPException(409, "domain_already_exists")
+    claim, replay = claim_command(
+        s, ctx, f"domains:{domain_id}", "update", idempotency_key, x_correlation_id, semantic
+    )
+    if replay:
+        return replay
     item.domain = body.domain.lower().rstrip(".")
     item.verified = False
     audit(s, ctx, "domain.updated")
     s.commit()
-    return item
+    return complete_command(s, claim, item, 200, item.id)
 
 
 @router.delete("/v1/domains/{domain_id}", status_code=204)
 def domain_delete(
-    domain_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
+    domain_id: str,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
 ) -> Response:
+    replay = replay_command(s, ctx, f"domains:{domain_id}", "delete", idempotency_key, {})
+    if replay:
+        return replay
     item = _tenant_item(s, Domain, domain_id, ctx["tenant"])
     if item.verified:
         raise HTTPException(409, "verified_domain_must_be_disabled_before_delete")
+    claim, replay = claim_command(
+        s, ctx, f"domains:{domain_id}", "delete", idempotency_key, x_correlation_id, {}
+    )
+    if replay:
+        return replay
     s.delete(item)
     audit(s, ctx, "domain.deleted")
     s.commit()
-    return Response(status_code=204)
+    return complete_command(s, claim, {}, 204, domain_id)
 
 
 @router.get("/v1/domains/{domain_id}/dns")
@@ -376,8 +525,15 @@ def domain_verification(
 
 @router.post("/v1/messages/{message_id}/cancel")
 def message_cancel(
-    message_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
+    message_id: str,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
 ) -> dict[str, Any]:
+    replay = replay_command(s, ctx, f"messages:{message_id}", "cancel", idempotency_key, {})
+    if replay:
+        return replay
     item = _tenant_item(s, Message, message_id, ctx["tenant"])
     if item.status in {"delivered", "bounced", "complained", "failed", "cancelled"}:
         raise HTTPException(409, "terminal_message_cannot_cancel")
@@ -388,6 +544,17 @@ def message_cancel(
     )
     if outbox and outbox.state not in {"pending", "retry"}:
         raise HTTPException(409, "provider_submission_requires_reconciliation")
+    claim, replay = claim_command(
+        s,
+        ctx,
+        f"messages:{message_id}",
+        "cancel",
+        idempotency_key,
+        x_correlation_id,
+        {},
+    )
+    if replay:
+        return replay
     if outbox:
         outbox.state = "cancelled"
         outbox.last_error = "cancelled_by_api"
@@ -395,7 +562,7 @@ def message_cancel(
     item.status = "cancelled"
     audit(s, ctx, "message.cancelled")
     s.commit()
-    return {"id": item.id, "status": item.status}
+    return complete_command(s, claim, {"id": item.id, "status": item.status}, 200, item.id)
 
 
 @router.get("/v1/templates/{template_id}")
@@ -415,19 +582,58 @@ def template_detail(template_id: str, ctx: dict = Depends(auth), s: Session = De
 def template_patch(
     template_id: str,
     body: TemplateUpdate,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
     ctx: dict = Depends(auth),
     s: Session = Depends(db),
 ) -> dict[str, Any]:
-    return template_update(template_id, body, ctx, s)
+    semantic = body.model_dump(mode="json")
+    semantic["variables"] = sorted(set(body.variables))
+    replay = replay_command(s, ctx, f"templates:{template_id}", "update", idempotency_key, semantic)
+    if replay:
+        return replay
+    _tenant_item(s, Template, template_id, ctx["tenant"])
+    validate_html(body.html_body)
+    claim, replay = claim_command(
+        s,
+        ctx,
+        f"templates:{template_id}",
+        "update",
+        idempotency_key,
+        x_correlation_id,
+        semantic,
+    )
+    if replay:
+        return replay
+    result = template_update(template_id, body, ctx, s)
+    return complete_command(s, claim, result, 200, template_id)
 
 
 @router.delete("/v1/templates/{template_id}", status_code=204)
 def template_delete(
-    template_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
+    template_id: str,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
 ) -> Response:
+    replay = replay_command(s, ctx, f"templates:{template_id}", "delete", idempotency_key, {})
+    if replay:
+        return replay
     item = _tenant_item(s, Template, template_id, ctx["tenant"])
     if item.status == "PUBLISHED":
         raise HTTPException(409, "published_template_cannot_be_deleted")
+    claim, replay = claim_command(
+        s,
+        ctx,
+        f"templates:{template_id}",
+        "delete",
+        idempotency_key,
+        x_correlation_id,
+        {},
+    )
+    if replay:
+        return replay
     for version in s.scalars(
         select(TemplateVersion).where(
             TemplateVersion.template_id == item.id,
@@ -438,7 +644,7 @@ def template_delete(
     s.delete(item)
     audit(s, ctx, "template.deleted")
     s.commit()
-    return Response(status_code=204)
+    return complete_command(s, claim, {}, 204, template_id)
 
 
 @router.get("/v1/contacts/{contact_id}")
@@ -448,25 +654,63 @@ def contact_detail(contact_id: str, ctx: dict = Depends(auth), s: Session = Depe
 
 @router.patch("/v1/contacts/{contact_id}")
 def contact_patch(
-    contact_id: str, body: ContactPatch, ctx: dict = Depends(auth), s: Session = Depends(db)
+    contact_id: str,
+    body: ContactPatch,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
 ) -> Any:
+    semantic = body.model_dump(mode="json", exclude_unset=True)
+    replay = replay_command(s, ctx, f"contacts:{contact_id}", "update", idempotency_key, semantic)
+    if replay:
+        return replay
     item = _tenant_item(s, Contact, contact_id, ctx["tenant"])
+    claim, replay = claim_command(
+        s,
+        ctx,
+        f"contacts:{contact_id}",
+        "update",
+        idempotency_key,
+        x_correlation_id,
+        semantic,
+    )
+    if replay:
+        return replay
     for key, value in body.model_dump(exclude_unset=True).items():
         setattr(item, "metadata_json" if key == "metadata" else key, json.dumps(value, sort_keys=True) if key == "metadata" else value)
     audit(s, ctx, "contact.updated")
     s.commit()
-    return item
+    return complete_command(s, claim, item, 200, item.id)
 
 
 @router.delete("/v1/contacts/{contact_id}", status_code=204)
 def contact_delete(
-    contact_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
+    contact_id: str,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
 ) -> Response:
+    replay = replay_command(s, ctx, f"contacts:{contact_id}", "delete", idempotency_key, {})
+    if replay:
+        return replay
     item = _tenant_item(s, Contact, contact_id, ctx["tenant"])
+    claim, replay = claim_command(
+        s,
+        ctx,
+        f"contacts:{contact_id}",
+        "delete",
+        idempotency_key,
+        x_correlation_id,
+        {},
+    )
+    if replay:
+        return replay
     s.delete(item)
     audit(s, ctx, "contact.deleted")
     s.commit()
-    return Response(status_code=204)
+    return complete_command(s, claim, {}, 204, contact_id)
 
 
 @router.get("/v1/lists")
@@ -475,12 +719,39 @@ def lists(ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]
 
 
 @router.post("/v1/lists", status_code=201)
-def list_create(body: ListIn, ctx: dict = Depends(auth), s: Session = Depends(db)) -> Any:
+def list_create(
+    body: ListIn,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
+) -> Any:
+    semantic = body.model_dump(mode="json")
+    replay = replay_command(s, ctx, "contact_lists", "create", idempotency_key, semantic)
+    if replay:
+        return replay
+    if s.scalar(
+        select(ContactList).where(
+            ContactList.tenant_id == ctx["tenant"], ContactList.name == body.name
+        )
+    ):
+        raise HTTPException(409, "contact_list_name_exists")
+    claim, replay = claim_command(
+        s,
+        ctx,
+        "contact_lists",
+        "create",
+        idempotency_key,
+        x_correlation_id,
+        semantic,
+    )
+    if replay:
+        return replay
     item = ContactList(id=str(uuid.uuid4()), tenant_id=ctx["tenant"], name=body.name, description=body.description)
     s.add(item)
     audit(s, ctx, "contact_list.created")
     s.commit()
-    return item
+    return complete_command(s, claim, item, 201, item.id)
 
 
 @router.get("/v1/lists/{list_id}")
@@ -490,78 +761,184 @@ def list_detail(list_id: str, ctx: dict = Depends(auth), s: Session = Depends(db
 
 @router.patch("/v1/lists/{list_id}")
 def list_patch(
-    list_id: str, body: ListPatch, ctx: dict = Depends(auth), s: Session = Depends(db)
+    list_id: str,
+    body: ListPatch,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
 ) -> Any:
+    semantic = body.model_dump(mode="json", exclude_unset=True)
+    replay = replay_command(s, ctx, f"contact_lists:{list_id}", "update", idempotency_key, semantic)
+    if replay:
+        return replay
     item = _tenant_item(s, ContactList, list_id, ctx["tenant"])
+    if body.name and s.scalar(
+        select(ContactList).where(
+            ContactList.tenant_id == ctx["tenant"],
+            ContactList.name == body.name,
+            ContactList.id != list_id,
+        )
+    ):
+        raise HTTPException(409, "contact_list_name_exists")
+    claim, replay = claim_command(
+        s,
+        ctx,
+        f"contact_lists:{list_id}",
+        "update",
+        idempotency_key,
+        x_correlation_id,
+        semantic,
+    )
+    if replay:
+        return replay
     for key, value in body.model_dump(exclude_unset=True).items():
         setattr(item, key, value)
     item.updated_at = now()
     audit(s, ctx, "contact_list.updated")
     s.commit()
-    return item
+    return complete_command(s, claim, item, 200, item.id)
 
 
 @router.delete("/v1/lists/{list_id}", status_code=204)
-def list_delete(list_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> Response:
+def list_delete(
+    list_id: str,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
+) -> Response:
+    replay = replay_command(s, ctx, f"contact_lists:{list_id}", "delete", idempotency_key, {})
+    if replay:
+        return replay
     item = _tenant_item(s, ContactList, list_id, ctx["tenant"])
+    claim, replay = claim_command(
+        s,
+        ctx,
+        f"contact_lists:{list_id}",
+        "delete",
+        idempotency_key,
+        x_correlation_id,
+        {},
+    )
+    if replay:
+        return replay
     s.delete(item)
     audit(s, ctx, "contact_list.deleted")
     s.commit()
-    return Response(status_code=204)
+    return complete_command(s, claim, {}, 204, list_id)
 
 
 @router.patch("/v1/campaigns/{campaign_id}")
 def campaign_patch(
     campaign_id: str,
     body: CampaignPatch,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
     ctx: dict = Depends(auth),
     s: Session = Depends(db),
 ) -> Any:
     from .main import Campaign
 
+    semantic = body.model_dump(mode="json", exclude_unset=True)
+    replay = replay_command(s, ctx, f"campaigns:{campaign_id}", "update", idempotency_key, semantic)
+    if replay:
+        return replay
     item = _tenant_item(s, Campaign, campaign_id, ctx["tenant"])
     if item.status not in {"draft", "paused"}:
         raise HTTPException(409, "campaign_not_editable")
+    claim, replay = claim_command(
+        s,
+        ctx,
+        f"campaigns:{campaign_id}",
+        "update",
+        idempotency_key,
+        x_correlation_id,
+        semantic,
+    )
+    if replay:
+        return replay
     for key, value in body.model_dump(exclude_unset=True).items():
         setattr(item, key, value)
     audit(s, ctx, "campaign.updated")
     s.commit()
-    return item
+    return complete_command(s, claim, item, 200, item.id)
 
 
 @router.post("/v1/campaigns/{campaign_id}/schedule", status_code=202)
 def campaign_schedule(
     campaign_id: str,
     body: CampaignSchedule,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
     ctx: dict = Depends(auth),
     s: Session = Depends(db),
 ) -> dict[str, Any]:
     from .main import Campaign
 
+    semantic = body.model_dump(mode="json")
+    replay = replay_command(s, ctx, f"campaigns:{campaign_id}", "schedule", idempotency_key, semantic)
+    if replay:
+        return replay
     item = _tenant_item(s, Campaign, campaign_id, ctx["tenant"])
     if body.scheduled_at.astimezone(timezone.utc) <= now():
         raise HTTPException(422, "schedule_must_be_future")
+    claim, replay = claim_command(
+        s,
+        ctx,
+        f"campaigns:{campaign_id}",
+        "schedule",
+        idempotency_key,
+        x_correlation_id,
+        semantic,
+    )
+    if replay:
+        return replay
     item.status = "scheduled"
     item.scheduled_at = body.scheduled_at.astimezone(timezone.utc)
     audit(s, ctx, "campaign.scheduled")
     s.commit()
-    return {"id": item.id, "status": item.status, "scheduled_at": item.scheduled_at}
+    return complete_command(
+        s,
+        claim,
+        {"id": item.id, "status": item.status, "scheduled_at": item.scheduled_at},
+        202,
+        item.id,
+    )
 
 
 @router.post("/v1/campaigns/{campaign_id}/cancel")
 def campaign_cancel(
-    campaign_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
+    campaign_id: str,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
 ) -> dict[str, Any]:
     from .main import Campaign
 
+    replay = replay_command(s, ctx, f"campaigns:{campaign_id}", "cancel", idempotency_key, {})
+    if replay:
+        return replay
     item = _tenant_item(s, Campaign, campaign_id, ctx["tenant"])
     if item.status in {"completed", "cancelled"}:
         raise HTTPException(409, "campaign_terminal")
+    claim, replay = claim_command(
+        s,
+        ctx,
+        f"campaigns:{campaign_id}",
+        "cancel",
+        idempotency_key,
+        x_correlation_id,
+        {},
+    )
+    if replay:
+        return replay
     item.status = "cancelled"
     item.scheduled_at = None
     audit(s, ctx, "campaign.cancelled")
     s.commit()
-    return {"id": item.id, "status": item.status}
+    return complete_command(s, claim, {"id": item.id, "status": item.status}, 200, item.id)
 
 
 @router.get("/v1/tracking/events")
@@ -587,28 +964,65 @@ def tracking_message(message_id: str, ctx: dict = Depends(auth), s: Session = De
 
 @router.post("/v1/suppressions", status_code=201)
 def suppression_create(
-    body: SuppressionIn, ctx: dict = Depends(auth), s: Session = Depends(db)
+    body: SuppressionIn,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
 ) -> Any:
     email = str(body.email).lower()
+    semantic = {"email": email, "reason": body.reason}
+    replay = replay_command(s, ctx, "suppressions", "upsert", idempotency_key, semantic)
+    if replay:
+        return replay
     item = s.scalar(select(Suppression).where(Suppression.tenant_id == ctx["tenant"], Suppression.email == email))
+    claim, replay = claim_command(
+        s,
+        ctx,
+        "suppressions",
+        "upsert",
+        idempotency_key,
+        x_correlation_id,
+        semantic,
+    )
+    if replay:
+        return replay
     if item is None:
         item = Suppression(id=str(uuid.uuid4()), tenant_id=ctx["tenant"], email=email, reason=body.reason)
     item.reason = body.reason
     s.add(item)
     audit(s, ctx, "suppression.upserted")
     s.commit()
-    return item
+    return complete_command(s, claim, item, 201, item.id)
 
 
 @router.delete("/v1/suppressions/{suppression_id}", status_code=204)
 def suppression_delete(
-    suppression_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
+    suppression_id: str,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
 ) -> Response:
+    replay = replay_command(s, ctx, f"suppressions:{suppression_id}", "delete", idempotency_key, {})
+    if replay:
+        return replay
     item = _tenant_item(s, Suppression, suppression_id, ctx["tenant"])
+    claim, replay = claim_command(
+        s,
+        ctx,
+        f"suppressions:{suppression_id}",
+        "delete",
+        idempotency_key,
+        x_correlation_id,
+        {},
+    )
+    if replay:
+        return replay
     s.delete(item)
     audit(s, ctx, "suppression.deleted")
     s.commit()
-    return Response(status_code=204)
+    return complete_command(s, claim, {}, 204, suppression_id)
 
 
 def _outcome_events(kind: str, ctx: dict, s: Session) -> dict[str, Any]:
@@ -656,9 +1070,10 @@ def billing_plans(ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[s
 @router.get("/v1/operations")
 def operations(ctx: dict = Depends(auth), s: Session = Depends(db), limit: int = 100) -> dict[str, Any]:
     limit = max(1, min(limit, 500))
+    durable_rows = s.scalars(select(DurableCommandOperation).where(DurableCommandOperation.tenant_id == ctx["tenant"]).order_by(DurableCommandOperation.created_at.desc()).limit(limit)).all()
     command_rows = s.scalars(select(MiddlewareCommandOperation).where(MiddlewareCommandOperation.tenant_id == ctx["tenant"]).order_by(MiddlewareCommandOperation.created_at.desc()).limit(limit)).all()
     integration_rows = s.scalars(select(IntegrationOutbox).where(IntegrationOutbox.tenant_id == ctx["tenant"]).order_by(IntegrationOutbox.created_at.desc()).limit(limit)).all()
-    items = [_operation_json(item) for item in [*command_rows, *integration_rows]]
+    items = [_operation_json(item) for item in [*durable_rows, *command_rows, *integration_rows]]
     items.sort(key=lambda value: value["resource_version"], reverse=True)
     return {"items": items[:limit]}
 
@@ -676,47 +1091,91 @@ def operation_events(operation_id: str, ctx: dict = Depends(auth), s: Session = 
 @router.get("/v1/operations/{operation_id}/attempts")
 def operation_attempts(operation_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
     item = _find_operation(s, operation_id, ctx["tenant"])
-    attempts = item.attempts if isinstance(item, IntegrationOutbox) else 0
+    attempts = item.attempts if isinstance(item, (DurableCommandOperation, IntegrationOutbox)) else 0
     return {"operation_id": operation_id, "attempts": attempts}
 
 
 @router.post("/v1/operations/{operation_id}/cancel")
-def operation_cancel(operation_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
+def operation_cancel(
+    operation_id: str,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
+) -> dict[str, Any]:
+    resource = f"operations:{operation_id}"
+    replay = replay_command(s, ctx, resource, "cancel", idempotency_key, {})
+    if replay:
+        return replay
     item = _find_operation(s, operation_id, ctx["tenant"])
-    if isinstance(item, MiddlewareCommandOperation):
+    if isinstance(item, DurableCommandOperation):
+        if item.state in {"COMPLETED", "CANCELLED"}:
+            raise HTTPException(409, "operation_terminal")
+    elif isinstance(item, MiddlewareCommandOperation):
         if item.state in {"completed", "failed", "cancelled"}:
             raise HTTPException(409, "operation_terminal")
-        item.state = "cancelled"
-        item.updated_at = now()
     else:
         if item.state in {"COMPLETED", "DEAD_LETTER", "CANCELLED"}:
             raise HTTPException(409, "operation_terminal")
+    claim, replay = claim_command(
+        s, ctx, resource, "cancel", idempotency_key, x_correlation_id, {}
+    )
+    if replay:
+        return replay
+    if isinstance(item, DurableCommandOperation):
+        item.state = "RECONCILIATION_REQUIRED"
+        item.error = "cancellation_requires_authoritative_state_confirmation"
+        item.updated_at = now()
+    elif isinstance(item, MiddlewareCommandOperation):
+        item.state = "cancelled"
+        item.updated_at = now()
+    else:
         item.state = "CANCELLED"
         item.updated_at = now()
     audit(s, ctx, "operation.cancelled")
-    s.commit()
-    return _operation_json(item)
+    result = _operation_json(item)
+    return complete_command(s, claim, result, 200, operation_id)
 
 
 @router.post("/v1/operations/{operation_id}/reconcile")
-def operation_reconcile(operation_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
+def operation_reconcile(
+    operation_id: str,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
+) -> dict[str, Any]:
+    resource = f"operations:{operation_id}"
+    replay = replay_command(s, ctx, resource, "reconcile", idempotency_key, {})
+    if replay:
+        return replay
     item = _find_operation(s, operation_id, ctx["tenant"])
-    if isinstance(item, MiddlewareCommandOperation):
+    claim, replay = claim_command(
+        s, ctx, resource, "reconcile", idempotency_key, x_correlation_id, {}
+    )
+    if replay:
+        return replay
+    if isinstance(item, DurableCommandOperation):
+        if item.state != "COMPLETED":
+            item.state = "RECONCILIATION_REQUIRED"
+            item.error = "authoritative_state_confirmation_required"
+            item.updated_at = now()
+    elif isinstance(item, MiddlewareCommandOperation):
         if item.state != "failed":
-            return _operation_json(item)
-        item.state = "accepted"
-        item.error = None
-        item.updated_at = now()
+            pass
+        else:
+            item.state = "accepted"
+            item.error = None
+            item.updated_at = now()
     else:
-        if item.state not in {"RETRY", "DEAD_LETTER"}:
-            return _operation_json(item)
-        item.state = "PENDING"
-        item.last_error = None
-        item.next_attempt_at = now()
-        item.updated_at = now()
+        if item.state in {"RETRY", "DEAD_LETTER"}:
+            item.state = "PENDING"
+            item.last_error = None
+            item.next_attempt_at = now()
+            item.updated_at = now()
     audit(s, ctx, "operation.reconciliation_requested")
-    s.commit()
-    return _operation_json(item)
+    result = _operation_json(item)
+    return complete_command(s, claim, result, 200, operation_id)
 
 
 @router.get("/v1/providers/postal/health")
@@ -738,23 +1197,45 @@ def mautic_command(
     body: MauticCommand,
     ctx: dict = Depends(auth),
     s: Session = Depends(db),
-    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=200),
-    x_correlation_id: str = Header(alias="X-Correlation-ID", min_length=8, max_length=200),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=200, pattern=r"^[A-Za-z0-9._:-]+$"),
+    x_correlation_id: str = Header(alias="X-Correlation-ID", min_length=8, max_length=200, pattern=r"^[A-Za-z0-9._:-]+$"),
 ) -> dict[str, Any]:
-    semantic = json.dumps({"command": body.command, "aggregate_id": body.aggregate_id, "payload": body.payload, "tenant_id": ctx["tenant"]}, separators=(",", ":"), sort_keys=True)
-    digest = hashlib.sha256(semantic.encode()).hexdigest()
-    prior = s.scalar(select(IntegrationOutbox).where(IntegrationOutbox.tenant_id == ctx["tenant"], IntegrationOutbox.target == "MAUTIC", IntegrationOutbox.idempotency_key == idempotency_key))
+    semantic = {"command": body.command, "aggregate_id": body.aggregate_id, "payload": body.payload, "tenant_id": ctx["tenant"]}
+    replay = replay_command(s, ctx, "integrations:mautic", "command", idempotency_key, semantic)
+    if replay:
+        return replay
+    digest = hashlib.sha256(json.dumps(semantic, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+    caller = command_caller_identity(ctx)
+    outbox_key = hashlib.sha256(f"mautic:v1:{caller}:{idempotency_key}".encode()).hexdigest()
+    prior = s.scalar(select(IntegrationOutbox).where(IntegrationOutbox.tenant_id == ctx["tenant"], IntegrationOutbox.target == "MAUTIC", IntegrationOutbox.idempotency_key == outbox_key))
+    if prior is None:
+        legacy = s.scalar(select(IntegrationOutbox).where(IntegrationOutbox.tenant_id == ctx["tenant"], IntegrationOutbox.target == "MAUTIC", IntegrationOutbox.idempotency_key == idempotency_key))
+        if legacy:
+            try:
+                legacy_actor = json.loads(legacy.payload_json).get("envelope", {}).get("actor")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                legacy_actor = None
+            if legacy_actor == ctx["sub"]:
+                prior = legacy
     if prior:
         prior_payload = json.loads(prior.payload_json)
         if prior_payload.get("semantic_sha256") != digest:
             raise HTTPException(409, "idempotency_key_payload_mismatch")
-        return _operation_json(prior)
+        claim, replay = claim_command(s, ctx, "integrations:mautic", "command", idempotency_key, x_correlation_id, semantic)
+        if replay:
+            return replay
+        return complete_command(s, claim, _operation_json(prior), 202, prior.id)
+    if body.operation_id and s.get(IntegrationOutbox, body.operation_id):
+        raise HTTPException(409, "operation_id_exists")
+    claim, replay = claim_command(s, ctx, "integrations:mautic", "command", idempotency_key, x_correlation_id, semantic)
+    if replay:
+        return replay
     payload = {"envelope": {"request_id": body.request_id, "correlation_id": x_correlation_id, "tenant_id": ctx["tenant"], "actor": ctx["sub"], "operation_id": body.operation_id, "idempotency_key": idempotency_key, "api_version": "v1", "timestamp": body.timestamp.isoformat(), "trace_context": body.trace_context}, "command": body.command, "payload": body.payload, "semantic_sha256": digest}
-    item = IntegrationOutbox(id=body.operation_id or str(uuid.uuid4()), tenant_id=ctx["tenant"], target="MAUTIC", event_type=body.command, aggregate_id=body.aggregate_id, payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True), idempotency_key=idempotency_key)
+    item = IntegrationOutbox(id=body.operation_id or str(uuid.uuid4()), tenant_id=ctx["tenant"], target="MAUTIC", event_type=body.command, aggregate_id=body.aggregate_id, payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True), idempotency_key=outbox_key)
     s.add(item)
     audit(s, ctx, "mautic.command.queued")
     s.commit()
-    return _operation_json(item)
+    return complete_command(s, claim, _operation_json(item), 202, item.id)
 
 
 @router.get("/v1/integrations/mautic/operations")
@@ -772,11 +1253,17 @@ def mautic_operation(operation_id: str, ctx: dict = Depends(auth), s: Session = 
 
 
 @router.post("/v1/integrations/mautic/operations/{operation_id}/reconcile")
-def mautic_reconcile(operation_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
+def mautic_reconcile(
+    operation_id: str,
+    idempotency_key: IdempotencyKey,
+    x_correlation_id: CorrelationId,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
+) -> dict[str, Any]:
     item = _tenant_item(s, IntegrationOutbox, operation_id, ctx["tenant"])
     if item.target != "MAUTIC":
         raise HTTPException(404, "not_found")
-    return operation_reconcile(operation_id, ctx, s)
+    return operation_reconcile(operation_id, idempotency_key, x_correlation_id, ctx, s)
 
 
 @router.get("/v1/system/capabilities")

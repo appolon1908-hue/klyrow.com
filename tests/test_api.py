@@ -7,10 +7,12 @@ from cryptography.hazmat.primitives import hashes,serialization
 from cryptography.hazmat.primitives.asymmetric import padding,rsa
 SERVICE_TOKEN_FILE="/tmp/klyrow-beyvra-test-token"
 Path(SERVICE_TOKEN_FILE).write_text("bounded-beyvra-test-token",encoding="utf-8")
-os.environ.update(KLYROW_DATABASE_URL="sqlite:///./test.db",KLYROW_SESSION_SECRET="test-session-secret-at-least-32-bytes",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_MIDDLEWARE_API_KEY="middleware-command-test-token",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple",BEYVRA_EMAIL_SERVICE_TOKEN_FILE=SERVICE_TOKEN_FILE,BEYVRA_EMAIL_TENANT_ID="a",KLYROW_AUTH_RATE_PER_MINUTE="1000")
+os.environ.update(KLYROW_DATABASE_URL="sqlite:///./test.db",KLYROW_SESSION_SECRET="test-session-secret-at-least-32-bytes",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_MIDDLEWARE_API_KEY="middleware-command-test-token",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple",BEYVRA_EMAIL_SERVICE_TOKEN_FILE=SERVICE_TOKEN_FILE,BEYVRA_EMAIL_TENANT_ID="a",KLYROW_AUTH_RATE_PER_MINUTE="1000",KLYROW_RATE_PER_MINUTE="1000")
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from apps.gateway.app.main import AllowedSender,Audit,Base,DB,Domain,EmailOutbox,Event,Message,MiddlewareCommandOperation,PostalEvent,Suppression,Tenant,User,app,engine,ph,runtime_secret
+from apps.gateway.app.main import AllowedSender,Audit,Base,DB,Domain,DurableCommandOperation,EmailOutbox,Event,Message,MiddlewareCommandOperation,PostalEvent,Suppression,Tenant,User,app,engine,ph,runtime_secret
+from apps.gateway.app.operations import IntegrationOutbox
+from apps.gateway.app.production_api import ContactList
 
 def setup_module():
     Base.metadata.drop_all(engine); Base.metadata.create_all(engine)
@@ -20,7 +22,8 @@ def setup_module():
         s.commit()
 client=TestClient(app)
 def login(n): return client.post("/v1/auth/login",json={"email":f"{n}@example.com","password":"long-enough-password"}).json()["access_token"]
-def hdr(n): return {"Authorization":"Bearer "+login(n)}
+def hdr(n): return {"Authorization":"Bearer "+login(n),"X-Correlation-ID":"correlation-user-"+n}
+def command_hdr(n,key): return {**hdr(n),"Idempotency-Key":key,"X-Correlation-ID":"correlation-"+key}
 def middleware_hdr(n,correlation,idempotency): return {"Authorization":"Bearer middleware-command-test-token","X-Klyrow-Tenant-Id":n,"X-Tenant-ID":n,"X-Correlation-ID":correlation,"Idempotency-Key":idempotency}
 def test_unauthorized(): assert client.get("/v1/domains").status_code==401
 def test_resolver_outage_is_reported_as_authorization_unavailable():
@@ -38,18 +41,18 @@ def test_resolver_network_failure_is_reported_as_authorization_unavailable():
 def test_logout_revokes_active_session():
     access=login("a");h={"Authorization":"Bearer "+access}
     assert client.get("/v1/me",headers=h).status_code==200
-    assert client.post("/v1/auth/logout",headers=h).status_code==204
+    assert client.post("/v1/auth/logout",headers={**h,"Idempotency-Key":"logout-session-0001","X-Correlation-ID":"correlation-logout-session-0001"}).status_code==204
     assert client.get("/v1/me",headers=h).status_code==401
 def test_tenant_isolation():
     assert [d["domain"] for d in client.get("/v1/domains",headers=hdr("a")).json()]==["a.example.com"]
 def test_api_key_revoke():
     h=hdr("a"); made=client.post("/v1/api-keys",headers=h,json={"name":"ci"}).json(); kh={"Authorization":"Bearer "+made["key"]}; assert client.get("/v1/domains",headers=kh).status_code==200; assert client.delete("/v1/api-keys/"+made["id"],headers=h).status_code==204; assert client.get("/v1/domains",headers=kh).status_code==401
 def test_logout_revokes_active_session():
-    token=login("a");headers={"Authorization":"Bearer "+token};assert client.post("/v1/auth/logout",headers=headers).status_code==204;assert client.get("/v1/me",headers=headers).status_code==401
+    token=login("a");headers={"Authorization":"Bearer "+token,"Idempotency-Key":"logout-session-0002","X-Correlation-ID":"correlation-logout-session-0002"};assert client.post("/v1/auth/logout",headers=headers).status_code==204;assert client.get("/v1/me",headers=headers).status_code==401
 def test_safe_send_and_suppression():
-    h={**hdr("a"),"Idempotency-Key":"send-1"}; x={"to":"ok@example.net","sender":"sender@a.example.com","subject":"test","html":"<p>test</p>"}; r=client.post("/v1/messages",headers=h,json=x); assert r.status_code==202 and r.json()["safe_mode"]; assert client.post("/v1/messages",headers=h,json=x).json()["id"]==r.json()["id"]
+    h={**hdr("a"),"Idempotency-Key":"send-0001"}; x={"to":"ok@example.net","sender":"sender@a.example.com","subject":"test","html":"<p>test</p>"}; r=client.post("/v1/messages",headers=h,json=x); assert r.status_code==202 and r.json()["safe_mode"]; assert client.post("/v1/messages",headers=h,json=x).json()["id"]==r.json()["id"]
     with DB() as s:s.add(Suppression(id="s",tenant_id="a",email="blocked@example.net",reason="hard_bounce"));s.commit()
-    x["to"]="blocked@example.net"; assert client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"send-2"},json=x).status_code==422
+    x["to"]="blocked@example.net"; assert client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"send-0002"},json=x).status_code==422
 
 def test_middleware_command_submit_readback_and_replay():
     h=middleware_hdr("a","command-correlation-0001","command-send-0001")
@@ -113,7 +116,7 @@ def test_idempotency_key_is_tenant_scoped_and_changed_payload_conflicts():
     assert client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"shared-key"},json=payload_a).status_code==202
     assert client.post("/v1/email/send",headers={**hdr("b"),"Idempotency-Key":"shared-key"},json=payload_b).status_code==202
     changed={**payload_a,"subject":"changed"};r=client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"shared-key"},json=changed)
-    assert r.status_code==409 and r.json()["detail"]=="idempotency_key_payload_mismatch"
+    assert r.status_code==409 and r.json()["detail"]=="idempotency_key_reused_with_different_request"
 
 def test_exact_replay_precedes_mutable_send_guards():
     payload={"to":"stable-replay@example.net","sender":"sender@a.example.com","subject":"stable","html":"<p>stable</p>"}
@@ -130,7 +133,7 @@ def test_exact_replay_precedes_mutable_send_guards():
             replay=client.post("/v1/email/send",headers=headers,json=payload)
             conflict=client.post("/v1/email/send",headers=headers,json={**payload,"subject":"changed"})
         assert replay.status_code==202 and replay.json()==first.json()
-        assert conflict.status_code==409 and conflict.json()["detail"]=="idempotency_key_payload_mismatch"
+        assert conflict.status_code==409 and conflict.json()["detail"]=="idempotency_key_reused_with_different_request"
     finally:
         with DB() as s:
             suppression=s.get(Suppression,"stable-policy-suppression")
@@ -174,7 +177,7 @@ def test_webhook_ssrf_targets_are_rejected():
     assert client.post("/v1/webhooks",headers=hdr("a"),json={"url":"https://127.0.0.1/hook"}).status_code==422
 
 def test_beyvra_service_scope_sender_policy_and_idempotency():
-    base={"Authorization":"Bearer bounded-beyvra-test-token","X-Service-Identity":"codestra-server-a:beyvra-email-production","X-Service-Scopes":"email.send email.status","Idempotency-Key":"beyvra-1"}
+    base={"Authorization":"Bearer bounded-beyvra-test-token","X-Service-Identity":"codestra-server-a:beyvra-email-production","X-Service-Scopes":"email.send email.status","Idempotency-Key":"beyvra-1","X-Correlation-ID":"correlation-beyvra-1"}
     payload={"to":"synthetic@example.net","sender":"support@beyvra.com","subject":"Synthetic","html":"<p>Synthetic</p>","text":"Synthetic","stream":"transactional"}
     assert client.post("/v1/internal/email/beyvra/send",headers={**base,"X-Service-Scopes":"email.status"},json=payload).status_code==403
     assert client.post("/v1/internal/email/beyvra/send",headers={**base,"Idempotency-Key":"beyvra-spoof"},json={**payload,"sender":"spoof@beyvra.com"}).status_code==403
@@ -183,8 +186,63 @@ def test_beyvra_service_scope_sender_policy_and_idempotency():
         first=client.post("/v1/internal/email/beyvra/send",headers=base,json=payload);second=client.post("/v1/internal/email/beyvra/send",headers=base,json=payload)
     assert first.status_code==202 and first.json()["provider_message_id"]==second.json()["provider_message_id"]
 def test_contacts_campaigns_and_isolation():
-    a,b=hdr("a"),hdr("b"); assert client.post("/v1/contacts",headers=a,json={"email":"one@example.net","name":"One"}).status_code==200; assert len(client.get("/v1/contacts",headers=a).json())==1; assert client.get("/v1/contacts",headers=b).json()==[]
-    c=client.post("/v1/campaigns",headers={**a,"Idempotency-Key":"campaign-1"},json={"name":"Mock campaign","subject":"Test"}); assert c.status_code==201; cid=c.json()["id"]; assert client.get("/v1/campaigns/"+cid,headers=b).status_code==404
+    a,b=hdr("a"),hdr("b"); assert client.post("/v1/contacts",headers={**a,"Idempotency-Key":"contact-upsert-0001","X-Correlation-ID":"correlation-contact-upsert-0001"},json={"email":"one@example.net","name":"One"}).status_code==200; assert len(client.get("/v1/contacts",headers=a).json())==1; assert client.get("/v1/contacts",headers=b).json()==[]
+    c=client.post("/v1/campaigns",headers={**a,"Idempotency-Key":"campaign-0001","X-Correlation-ID":"correlation-campaign-0001"},json={"name":"Mock campaign","subject":"Test"}); assert c.status_code==201; cid=c.json()["id"]; assert client.get("/v1/campaigns/"+cid,headers=b).status_code==404
+
+def test_durable_command_replay_is_caller_scoped_encrypted_and_delete_safe():
+    key="list-create-durable-0001";body={"name":"Durable list","description":"stable"};headers=command_hdr("a",key)
+    first=client.post("/v1/lists",headers=headers,json=body);replay=client.post("/v1/lists",headers=headers,json=body)
+    assert first.status_code==201 and replay.status_code==201 and replay.json()==first.json()
+    assert first.headers["Idempotency-Replayed"]=="false" and replay.headers["Idempotency-Replayed"]=="true"
+    conflict=client.post("/v1/lists",headers=headers,json={**body,"description":"changed"})
+    assert conflict.status_code==409 and conflict.json()["detail"]=="idempotency_key_reused_with_different_request"
+    with DB() as s:
+        record=s.scalar(select(DurableCommandOperation).where(DurableCommandOperation.idempotency_key==key,DurableCommandOperation.caller_identity=="user:a"))
+        assert record.state=="COMPLETED" and record.status_code==201 and record.resource_id==first.json()["id"]
+        assert body["name"] not in record.response_ciphertext and first.json()["id"] not in record.response_ciphertext
+    with DB() as s:
+        s.add(User(id="a2",tenant_id="a",email="a2@example.com",password_hash=ph.hash("long-enough-password"),role="tenant_admin"));s.commit()
+    second=client.post("/v1/lists",headers=command_hdr("a2",key),json={"name":"Caller-scoped list"})
+    assert second.status_code==201 and second.json()["id"]!=first.json()["id"]
+    delete_headers=command_hdr("a","list-delete-durable-0001")
+    deleted=client.delete("/v1/lists/"+first.json()["id"],headers=delete_headers);deleted_replay=client.delete("/v1/lists/"+first.json()["id"],headers=delete_headers)
+    assert deleted.status_code==204 and deleted_replay.status_code==204
+    assert deleted_replay.headers["Idempotency-Replayed"]=="true"
+    assert client.get("/v1/lists/"+first.json()["id"],headers=hdr("a")).status_code==404
+    with DB() as s:
+        assert s.scalar(select(ContactList).where(ContactList.tenant_id=="a",ContactList.name==body["name"])) is None
+    assert client.post("/v1/lists",headers=hdr("a"),json={"name":"Missing command headers"}).status_code==422
+
+def test_uncertain_durable_operation_requires_reconciliation_without_reexecution():
+    operation_id="durable-operation-uncertain-0001"
+    with DB() as s:
+        s.add(DurableCommandOperation(id=operation_id,tenant_id="a",caller_identity="service:synthetic-worker",resource="contacts:uncertain",action="update",api_version="v1",idempotency_key="original-operation-key",semantic_sha256="0"*64,correlation_id="original-operation-correlation",state="CLAIMED"));s.commit()
+    headers=command_hdr("a","operation-reconcile-0001")
+    first=client.post(f"/v1/operations/{operation_id}/reconcile",headers=headers);replay=client.post(f"/v1/operations/{operation_id}/reconcile",headers=headers)
+    assert first.status_code==200 and replay.status_code==200 and replay.json()==first.json()
+    assert first.json()["status"]=="RECONCILIATION_REQUIRED" and first.json()["reconciliation_required"] is True
+    assert replay.headers["Idempotency-Replayed"]=="true"
+    with DB() as s:
+        target=s.get(DurableCommandOperation,operation_id)
+        assert target.state=="RECONCILIATION_REQUIRED"
+        assert target.error=="authoritative_state_confirmation_required"
+    attempts=client.get(f"/v1/operations/{operation_id}/attempts",headers=hdr("a"))
+    assert attempts.status_code==200 and attempts.json()["attempts"]==1
+
+def test_mautic_command_replay_is_caller_scoped_and_outbox_backed():
+    key="mautic-command-durable-0001";headers=command_hdr("a",key)
+    body={"command":"contact.upsert.v1","aggregate_id":"contact-1","payload":{"email":"person@example.net"},"request_id":"request-mautic-0001","timestamp":"2026-09-02T10:00:00Z"}
+    first=client.post("/v1/integrations/mautic/commands",headers=headers,json=body);replay=client.post("/v1/integrations/mautic/commands",headers=headers,json=body)
+    assert first.status_code==202 and replay.status_code==202 and replay.json()==first.json()
+    assert replay.headers["Idempotency-Replayed"]=="true"
+    changed=client.post("/v1/integrations/mautic/commands",headers=headers,json={**body,"payload":{"email":"changed@example.net"}})
+    assert changed.status_code==409 and changed.json()["detail"]=="idempotency_key_reused_with_different_request"
+    with DB() as s:
+        rows=s.scalars(select(IntegrationOutbox).where(IntegrationOutbox.tenant_id=="a",IntegrationOutbox.target=="MAUTIC")).all()
+        assert len(rows)==1 and rows[0].idempotency_key!=key
+        if s.get(User,"a2") is None:s.add(User(id="a2",tenant_id="a",email="a2@example.com",password_hash=ph.hash("long-enough-password"),role="tenant_admin"));s.commit()
+    second=client.post("/v1/integrations/mautic/commands",headers=command_hdr("a2",key),json={**body,"aggregate_id":"contact-2","request_id":"request-mautic-0002"})
+    assert second.status_code==202 and second.json()["operation_id"]!=first.json()["operation_id"]
 def test_webhook_signature_and_replay():
     body=json.dumps({"event":"email.delivered","message_id":"m","tenant_id":"a"},separators=(",",":")); ts=str(int(time.time())); eid=str(uuid.uuid4()); sig=hmac.new(b"hook-secret",f"{ts}.{eid}.{body}".encode(),hashlib.sha256).hexdigest(); h={"X-Klyrow-Timestamp":ts,"X-Klyrow-Event-Id":eid,"X-Klyrow-Signature":sig,"Content-Type":"application/json"}
     with patch("apps.gateway.app.main.emit_middleware",new=AsyncMock(return_value=True)):

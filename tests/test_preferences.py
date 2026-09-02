@@ -17,7 +17,7 @@ def setup_module():
 
 def h():
     response=client.post("/v1/auth/login",json={"email":"a@example.com","password":"long-enough-password"});assert response.status_code==200
-    return {"Authorization":"Bearer "+response.json()["access_token"]}
+    return {"Authorization":"Bearer "+response.json()["access_token"],"X-Correlation-ID":"correlation-preferences-test"}
 
 
 def mail(recipient,stream="transactional",campaign_id=None):return {"to":recipient,"sender":"sender@a.example.com","subject":"Purpose scoped","html":"<p>synthetic</p>","stream":stream,"campaign_id":campaign_id}

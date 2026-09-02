@@ -14,7 +14,7 @@ def setup_module():
 
 def hdr(email):
     token=client.post("/v1/auth/login",json={"email":email,"password":"long-enough-password"}).json()["access_token"]
-    return {"Authorization":"Bearer "+token}
+    return {"Authorization":"Bearer "+token,"X-Correlation-ID":"correlation-agent-test"}
 
 def event(agent="agent-1",first="María José",event_id="event-1",campaign="campaign-a",keycloak="agent-a"):
     return {"event_id":event_id,"agent_id":agent,"employee_id":"employee-1","odoo_user_id":"odoo-1","vicidial_user_id":"vic-1","keycloak_user_id":keycloak,"campaign_id":campaign,"campaign_name":"Campaign A","first_name":first,"last_name":"Example","display_name":first+" Example","supervisor_id":"supervisor-1","active":True,"correlation_id":"correlation-1"}

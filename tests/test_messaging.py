@@ -2,6 +2,8 @@ import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+os.environ["KLYROW_RATE_PER_MINUTE"] = "1000"
+
 from fastapi.testclient import TestClient
 
 from apps.gateway.app.main import AllowedSender, Base, DB, Message, Tenant, User, app, engine, ph
@@ -44,7 +46,7 @@ def test_stream_separation_template_version_render_rollback_and_campaign_safety(
     sender=client.post("/v1/senders",headers=h,json={"domain_claim_id":claim,"email":"campaign@campaign.example","display_name":"Campaign","stream":"MARKETING"}).json()["id"]
     assert client.post("/v1/streams",headers=h,json={"name":"security","kind":"SECURITY","rate_limit":100,"retention_days":90,"suppression_policy":"MARKETING_GLOBAL"}).status_code==422
     assert client.post("/v1/streams",headers=h,json={"name":"marketing","kind":"MARKETING","rate_limit":100,"retention_days":90,"suppression_policy":"MARKETING_GLOBAL"}).status_code==201
-    template=client.post("/v1/templates",headers=h,json={"slug":"welcome","name":"Welcome","subject":"Hello {{name}}","html_body":"<h1>Hello {{name}}</h1>","text_body":"Hello {{name}}","variables":["name"]});assert template.status_code==201
+    template=client.post("/v1/templates",headers={**h,"Idempotency-Key":"template-create-0001","X-Correlation-ID":"correlation-template-create-0001"},json={"slug":"welcome","name":"Welcome","subject":"Hello {{name}}","html_body":"<h1>Hello {{name}}</h1>","text_body":"Hello {{name}}","variables":["name"]});assert template.status_code==201
     tid=template.json()["id"];updated=client.put(f"/v1/templates/{tid}",headers=h,json={"subject":"Welcome {{name}}","html_body":"<p>Welcome {{name}}</p>","text_body":"Welcome {{name}}","variables":["name"]});assert updated.json()["version"]==2
     rendered=client.post(f"/v1/templates/{tid}/render",headers=h,json={"variables":{"name":"<Alice>"}});assert "&lt;Alice&gt;" in rendered.json()["html"]
     rollback=client.post(f"/v1/templates/{tid}/rollback/1",headers=h);assert rollback.json()["source_version"]==1

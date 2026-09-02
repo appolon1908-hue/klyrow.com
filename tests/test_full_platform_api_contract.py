@@ -82,7 +82,53 @@ def test_established_canonical_aliases_remain_documented():
         assert method in paths[path]
 
 
+def test_canonical_mutations_require_durable_idempotency_and_correlation_headers():
+    paths = app.openapi()["paths"]
+    mutations = {
+        ("post", "/v1/auth/logout"),
+        ("post", "/v1/organizations/{organization_id}/members"),
+        ("patch", "/v1/organizations/{organization_id}/members/{member_id}"),
+        ("post", "/v1/domains"),
+        ("patch", "/v1/domains/{domain_id}"),
+        ("delete", "/v1/domains/{domain_id}"),
+        ("post", "/v1/domains/{did}/verify"),
+        ("post", "/v1/messages"),
+        ("post", "/v1/messages/{message_id}/cancel"),
+        ("post", "/v1/templates"),
+        ("patch", "/v1/templates/{template_id}"),
+        ("delete", "/v1/templates/{template_id}"),
+        ("post", "/v1/contacts"),
+        ("patch", "/v1/contacts/{contact_id}"),
+        ("delete", "/v1/contacts/{contact_id}"),
+        ("post", "/v1/lists"),
+        ("patch", "/v1/lists/{list_id}"),
+        ("delete", "/v1/lists/{list_id}"),
+        ("post", "/v1/campaigns"),
+        ("patch", "/v1/campaigns/{campaign_id}"),
+        ("post", "/v1/campaigns/{campaign_id}/schedule"),
+        ("post", "/v1/campaigns/{campaign_id}/cancel"),
+        ("post", "/v1/suppressions"),
+        ("delete", "/v1/suppressions/{suppression_id}"),
+        ("post", "/v1/operations/{operation_id}/cancel"),
+        ("post", "/v1/operations/{operation_id}/reconcile"),
+        ("post", "/v1/integrations/mautic/commands"),
+        ("post", "/v1/integrations/mautic/operations/{operation_id}/reconcile"),
+    }
+    for method, path in mutations:
+        headers = {
+            parameter["name"].lower(): parameter
+            for parameter in paths[path][method].get("parameters", [])
+            if parameter["in"] == "header"
+        }
+        assert headers["idempotency-key"]["required"] is True, f"{method} {path}"
+        assert headers["x-correlation-id"]["required"] is True, f"{method} {path}"
+
+
 def test_production_migration_is_required_by_the_model():
     migration = Path("migrations/2026090201_full_platform_api.sql").read_text()
     assert "CREATE TABLE IF NOT EXISTS contact_lists" in migration
     assert "integration_outbox_state_known" in migration
+    durable = Path("migrations/2026090202_durable_command_operations.sql").read_text()
+    assert "uq_durable_command_identity" in durable
+    assert "durable_command_completed_result" in durable
+    assert "ENABLE ROW LEVEL SECURITY" in durable

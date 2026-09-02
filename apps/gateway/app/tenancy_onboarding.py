@@ -287,8 +287,9 @@ async def browser_send(
     _session: BrowserSession = Depends(csrf_guard),
     s: Session = Depends(db),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    x_correlation_id: Optional[str] = Header(default=None, alias="X-Correlation-ID"),
 ):
-    return await _send(payload, ctx, s, idempotency_key)
+    return await _send(payload, ctx, s, idempotency_key, x_correlation_id or idempotency_key)
 
 
 @router.get("/app/api/onboarding")

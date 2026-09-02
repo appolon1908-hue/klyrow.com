@@ -22,7 +22,7 @@ def setup_module():
 
 def h(user):
     response=client.post("/v1/auth/login",json={"email":f"{user}@example.com","password":"long-enough-password"});assert response.status_code==200
-    return {"Authorization":"Bearer "+response.json()["access_token"]}
+    return {"Authorization":"Bearer "+response.json()["access_token"],"X-Correlation-ID":"correlation-user-"+user}
 
 
 def payload(tenant):return {"to":"synthetic@example.net","sender":f"sender@{tenant}.example.com","subject":"Synthetic","html":"<p>safe mode</p>","stream":"transactional"}

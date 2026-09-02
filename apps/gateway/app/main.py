@@ -10,14 +10,17 @@ import httpx, jwt
 from jwt import PyJWKClient
 from argon2 import PasswordHasher
 from cryptography.exceptions import InvalidSignature
+from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
 from pydantic import BaseModel, EmailStr, Field, ValidationError, model_validator
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select, text
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 DATABASE_URL=os.getenv("KLYROW_DATABASE_URL", "sqlite:///./klyrow.db")
@@ -139,6 +142,8 @@ class Campaign(Base):
     __tablename__="campaigns"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); name:Mapped[str]=mapped_column(String); status:Mapped[str]=mapped_column(String,default="draft"); subject:Mapped[Optional[str]]=mapped_column(String,nullable=True); scheduled_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class Idempotency(Base):
     __tablename__="idempotency_keys"; id:Mapped[str]=mapped_column(String,primary_key=True,default=lambda:str(uuid.uuid4())); key:Mapped[str]=mapped_column(String); tenant_id:Mapped[str]=mapped_column(String,index=True); request_hash:Mapped[str]=mapped_column(String); resource_id:Mapped[str]=mapped_column(String); response_json:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); __table_args__=(UniqueConstraint("tenant_id","key",name="uq_idempotency_tenant_key"),)
+class DurableCommandOperation(Base):
+    __tablename__="durable_command_operations";id:Mapped[str]=mapped_column(String,primary_key=True,default=lambda:str(uuid.uuid4()));tenant_id:Mapped[str]=mapped_column(String,index=True);caller_identity:Mapped[str]=mapped_column(String);resource:Mapped[str]=mapped_column(String);action:Mapped[str]=mapped_column(String);api_version:Mapped[str]=mapped_column(String,default="v1");idempotency_key:Mapped[str]=mapped_column(String);semantic_sha256:Mapped[str]=mapped_column(String);correlation_id:Mapped[str]=mapped_column(String,index=True);state:Mapped[str]=mapped_column(String,default="CLAIMED",index=True);status_code:Mapped[Optional[int]]=mapped_column(Integer,nullable=True);resource_id:Mapped[Optional[str]]=mapped_column(String,nullable=True);response_ciphertext:Mapped[Optional[str]]=mapped_column(Text,nullable=True);error:Mapped[Optional[str]]=mapped_column(String,nullable=True);attempts:Mapped[int]=mapped_column(Integer,default=1);created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc));updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc));__table_args__=(UniqueConstraint("tenant_id","caller_identity","resource","action","api_version","idempotency_key",name="uq_durable_command_identity"),CheckConstraint("state IN ('CLAIMED', 'COMPLETED', 'RECONCILIATION_REQUIRED', 'CANCELLED')",name="durable_command_state_known"),CheckConstraint("state <> 'COMPLETED' OR (status_code IS NOT NULL AND response_ciphertext IS NOT NULL)",name="durable_command_completed_result"),CheckConstraint("attempts > 0",name="durable_command_attempts_positive"))
 class EmailOutbox(Base):
     __tablename__="email_outbox"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); message_id:Mapped[str]=mapped_column(String,unique=True,index=True); payload:Mapped[str]=mapped_column(Text); priority:Mapped[int]=mapped_column(Integer,default=20,index=True); state:Mapped[str]=mapped_column(String,default="pending",index=True); attempts:Mapped[int]=mapped_column(Integer,default=0); provider_message_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True); next_attempt_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class MiddlewareCommandOperation(Base):
@@ -155,6 +160,58 @@ def token(user,s):
     from .saas import SessionRecord
     sid=str(uuid.uuid4());s.add(SessionRecord(id=sid,user_id=user.id,tenant_id=user.tenant_id));s.commit();return jwt.encode({"sub":user.id,"tenant":user.tenant_id,"role":user.role,"sid":sid,"exp":datetime.now(timezone.utc)+timedelta(hours=8)},SECRET,algorithm="HS256")
 def audit(s, ctx, action): s.add(Audit(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],actor=ctx["sub"],action=action))
+def command_caller_identity(ctx:dict)->str:
+    if ctx.get("api_key"):kind="api-key"
+    elif ctx.get("service"):kind="service"
+    elif ctx.get("oidc_sub"):kind="oidc"
+    else:kind="user"
+    return kind+":"+str(ctx.get("oidc_sub") or ctx["sub"])
+def command_semantic_sha256(resource:str,action:str,semantic)->str:
+    payload={"api_version":"v1","resource":resource,"action":action,"request":jsonable_encoder(semantic)}
+    return hashlib.sha256(json.dumps(payload,separators=(",",":"),sort_keys=True).encode()).hexdigest()
+def command_result_fernet()->Fernet:
+    key=hashlib.sha256(("klyrow-durable-command-v1:"+SECRET).encode()).digest()
+    return Fernet(base64.urlsafe_b64encode(key))
+def command_result_encrypt(payload)->str:
+    value=json.dumps(jsonable_encoder(payload),separators=(",",":"),sort_keys=True).encode()
+    return command_result_fernet().encrypt(value).decode()
+def command_result_decrypt(item:DurableCommandOperation):
+    if not item.response_ciphertext:raise HTTPException(503,"idempotency_result_incomplete")
+    try:value=json.loads(command_result_fernet().decrypt(item.response_ciphertext.encode()))
+    except (InvalidToken,UnicodeDecodeError,json.JSONDecodeError):raise HTTPException(503,"idempotency_result_unavailable")
+    return value
+def command_replay_response(item:DurableCommandOperation):
+    if item.state!="COMPLETED":raise HTTPException(409,"idempotency_reconciliation_required",headers={"Retry-After":"30"})
+    headers={"Idempotency-Replayed":"true","X-Correlation-ID":item.correlation_id}
+    if item.status_code==204:return Response(status_code=204,headers=headers)
+    return JSONResponse(command_result_decrypt(item),status_code=item.status_code or 200,headers=headers)
+def replay_command(s:Session,ctx:dict,resource:str,action:str,idempotency_key:str,semantic):
+    caller=command_caller_identity(ctx);digest=command_semantic_sha256(resource,action,semantic)
+    prior=s.scalar(select(DurableCommandOperation).where(DurableCommandOperation.tenant_id==ctx["tenant"],DurableCommandOperation.caller_identity==caller,DurableCommandOperation.resource==resource,DurableCommandOperation.action==action,DurableCommandOperation.api_version=="v1",DurableCommandOperation.idempotency_key==idempotency_key))
+    if not prior:return None
+    if prior.semantic_sha256!=digest:raise HTTPException(409,"idempotency_key_reused_with_different_request")
+    return command_replay_response(prior)
+def claim_command(s:Session,ctx:dict,resource:str,action:str,idempotency_key:str,correlation_id:str,semantic):
+    replay=replay_command(s,ctx,resource,action,idempotency_key,semantic)
+    if replay:return None,replay
+    caller=command_caller_identity(ctx);digest=command_semantic_sha256(resource,action,semantic)
+    filters=(DurableCommandOperation.tenant_id==ctx["tenant"],DurableCommandOperation.caller_identity==caller,DurableCommandOperation.resource==resource,DurableCommandOperation.action==action,DurableCommandOperation.api_version=="v1",DurableCommandOperation.idempotency_key==idempotency_key)
+    item=DurableCommandOperation(tenant_id=ctx["tenant"],caller_identity=caller,resource=resource,action=action,api_version="v1",idempotency_key=idempotency_key,semantic_sha256=digest,correlation_id=correlation_id,state="CLAIMED")
+    s.add(item)
+    try:s.commit()
+    except IntegrityError:
+        s.rollback();prior=s.scalar(select(DurableCommandOperation).where(*filters))
+        if not prior:raise HTTPException(409,"idempotency_claim_conflict")
+        if prior.semantic_sha256!=digest:raise HTTPException(409,"idempotency_key_reused_with_different_request")
+        return None,command_replay_response(prior)
+    return item,None
+def complete_command(s:Session,item:DurableCommandOperation,payload,status_code:int=200,resource_id:Optional[str]=None):
+    item=s.get(DurableCommandOperation,item.id)
+    if not item or item.state!="CLAIMED":raise HTTPException(409,"idempotency_claim_lost")
+    item.state="COMPLETED";item.status_code=status_code;item.resource_id=resource_id;item.response_ciphertext=command_result_encrypt(payload);item.updated_at=datetime.now(timezone.utc);s.commit()
+    headers={"Idempotency-Replayed":"false","X-Correlation-ID":item.correlation_id}
+    if status_code==204:return Response(status_code=204,headers=headers)
+    return JSONResponse(jsonable_encoder(payload),status_code=status_code,headers=headers)
 def safe_webhook_url(value:str)->str:
     from urllib.parse import urlsplit
     parsed=urlsplit(value)
@@ -721,12 +778,14 @@ def login(x:Login,request:Request,s:Session=Depends(db)):
     if m and m.enabled and (not x.otp or not verify_totp(m.secret,x.otp)):raise HTTPException(401,"mfa_required")
     audit(s,{"tenant":u.tenant_id,"sub":u.id},"session.login");s.commit();return {"access_token":token(u,s),"token_type":"bearer","role":u.role,"tenant_id":u.tenant_id}
 @app.post("/v1/auth/logout",status_code=204)
-def logout(ctx=Depends(auth),s:Session=Depends(db)):
+def logout(ctx=Depends(auth),s:Session=Depends(db),idempotency_key:str=Header(alias="Idempotency-Key",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$"),x_correlation_id:str=Header(alias="X-Correlation-ID",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$")):
+    claim,replay=claim_command(s,ctx,"auth/session:"+str(ctx.get("sid") or ctx["sub"]),"logout",idempotency_key,x_correlation_id,{})
+    if replay:return replay
     from .saas import SessionRecord
     if ctx.get("sid"):
         session=s.get(SessionRecord,ctx["sid"])
         if session:session.revoked=True;audit(s,ctx,"session.logout");s.commit()
-    return None
+    return complete_command(s,claim,{},204,str(ctx.get("sid") or ctx["sub"]))
 @app.post("/v1/auth/forgot-password",status_code=202)
 def forgot(x:ResetRequest,request:Request,s:Session=Depends(db)):
     auth_rate(request,"forgot-password")
@@ -754,36 +813,51 @@ def revoke(kid:str,ctx=Depends(require("platform_admin","tenant_admin")),s:Sessi
 @app.get("/v1/domains")
 def domains(ctx=Depends(auth),s:Session=Depends(db)): return s.scalars(select(Domain).where(Domain.tenant_id==ctx["tenant"])).all()
 @app.post("/v1/domains")
-def domain_add(x:DomainIn,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db)):
-    d=Domain(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],domain=x.domain.lower(),token=secrets.token_urlsafe(24)); s.add(d); s.commit(); return {"id":d.id,"domain":d.domain,"verified":False,"dns":{"type":"TXT","name":"_klyrow-verification."+d.domain,"value":"klyrow="+d.token}}
+def domain_add(x:DomainIn,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db),idempotency_key:str=Header(alias="Idempotency-Key",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$"),x_correlation_id:str=Header(alias="X-Correlation-ID",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$")):
+    name=x.domain.lower().rstrip(".");semantic={"domain":name};replay=replay_command(s,ctx,"domains","create",idempotency_key,semantic)
+    if replay:return replay
+    if s.scalar(select(Domain).where(Domain.tenant_id==ctx["tenant"],Domain.domain==name)):raise HTTPException(409,"domain_already_exists")
+    claim,replay=claim_command(s,ctx,"domains","create",idempotency_key,x_correlation_id,semantic)
+    if replay:return replay
+    d=Domain(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],domain=name,token=secrets.token_urlsafe(24));s.add(d);s.commit();result={"id":d.id,"domain":d.domain,"verified":False,"dns":{"type":"TXT","name":"_klyrow-verification."+d.domain,"value":"klyrow="+d.token}};return complete_command(s,claim,result,200,d.id)
 @app.post("/v1/domains/{did}/verify")
-def domain_verify(did:str,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db)):
+def domain_verify(did:str,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db),idempotency_key:str=Header(alias="Idempotency-Key",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$"),x_correlation_id:str=Header(alias="X-Correlation-ID",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$")):
     import socket
+    replay=replay_command(s,ctx,"domains:"+did,"verify",idempotency_key,{})
+    if replay:return replay
     d=s.scalar(select(Domain).where(Domain.id==did,Domain.tenant_id==ctx["tenant"]));
     if not d: raise HTTPException(404,"not_found")
+    claim,replay=claim_command(s,ctx,"domains:"+did,"verify",idempotency_key,x_correlation_id,{})
+    if replay:return replay
     try:
         import dns.resolver; values=[str(r).strip('"') for r in dns.resolver.resolve("_klyrow-verification."+d.domain,"TXT")]; d.verified=("klyrow="+d.token) in values
     except Exception: d.verified=False
-    s.commit(); return {"verified":d.verified}
+    s.commit();return complete_command(s,claim,{"verified":d.verified},200,d.id)
 @app.post("/v1/messages",status_code=202)
 @app.post("/v1/email/send",status_code=202,include_in_schema=False)
-async def send(x:MailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
-    return await _send(x,ctx,s,idempotency_key)
+async def send(x:MailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:str=Header(alias="Idempotency-Key",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$"),x_correlation_id:str=Header(alias="X-Correlation-ID",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$")):
+    return await _send(x,ctx,s,idempotency_key,x_correlation_id)
 
 @app.post("/v1/internal/email/beyvra/send",status_code=202)
-async def beyvra_send(x:MailIn,ctx=Depends(beyvra_service_auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
+async def beyvra_send(x:MailIn,ctx=Depends(beyvra_service_auth),s:Session=Depends(db),idempotency_key:str=Header(alias="Idempotency-Key",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$"),x_correlation_id:str=Header(alias="X-Correlation-ID",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$")):
     if x.stream!="transactional":raise HTTPException(403,"transactional_only")
     allowed={"no-reply@beyvra.com","security@beyvra.com","trading@beyvra.com","statements@beyvra.com","support@beyvra.com"}
     if x.sender.lower() not in allowed:raise HTTPException(403,"sender_spoofing_denied")
-    return await _send(x,ctx,s,idempotency_key)
+    return await _send(x,ctx,s,idempotency_key,x_correlation_id)
 
-async def _send(x:MailIn,ctx,s,idempotency_key):
-    if not idempotency_key: raise HTTPException(400,"idempotency_key_required")
+async def _send(x:MailIn,ctx,s,idempotency_key,correlation_id):
+    if not idempotency_key:raise HTTPException(400,"idempotency_key_required")
+    if not correlation_id:raise HTTPException(400,"correlation_id_required")
+    semantic=x.model_dump(mode="json");semantic["to"]=str(x.to).lower();semantic["sender"]=str(x.sender).lower()
+    replay=replay_command(s,ctx,"email_messages","send",idempotency_key,semantic)
+    if replay:return replay
     request_hash=sha(x.model_dump_json())
     prior=s.scalar(select(Idempotency).where(Idempotency.key==idempotency_key,Idempotency.tenant_id==ctx["tenant"]))
     if prior:
         if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
-        return json.loads(prior.response_json)
+        claim,replay=claim_command(s,ctx,"email_messages","send",idempotency_key,correlation_id,semantic)
+        if replay:return replay
+        result=json.loads(prior.response_json);return complete_command(s,claim,result,202,prior.resource_id)
     from .operations import enforce_tenant_send_gate
     enforce_tenant_send_gate(s,ctx["tenant"])
     from .agent_mailboxes import authorize_agent_sender
@@ -805,15 +879,17 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
     from .billing import UsageEvent
     from .guards import billing_identity
     subscription_id,price_id=billing_identity(s,ctx["tenant"],sandbox=SAFE_MODE)
+    claim,replay=claim_command(s,ctx,"email_messages","send",idempotency_key,correlation_id,semantic)
+    if replay:return replay
     mid=str(uuid.uuid4()); status="accepted" if SAFE_MODE else "queued"
-    result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=authorization["recipient"],sender=authorization["sender"],subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload=json.dumps({"stream":x.stream}))); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],subscription_id=subscription_id,message_id=mid,event_key="accepted:api:"+idempotency_key,unit="accepted_message",quantity=1,price_id=price_id))
+    result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=authorization["recipient"],sender=authorization["sender"],subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload=json.dumps({"stream":x.stream})));s.add(UsageEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],subscription_id=subscription_id,message_id=mid,event_key="accepted:api:"+sha(command_caller_identity(ctx))[:16]+":"+idempotency_key,unit="accepted_message",quantity=1,price_id=price_id))
     if not SAFE_MODE:
         from .preferences import one_click_unsubscribe_headers
         delivery_payload={"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text,"campaign_id":x.campaign_id,"stream":x.stream}
         if x.stream=="marketing":delivery_payload["headers"]=one_click_unsubscribe_headers(ctx["tenant"],str(x.to))
         from .guards import stream_priority
         s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,payload=json.dumps(delivery_payload,separators=(",",":"),sort_keys=True),priority=stream_priority(x.stream)))
-    s.commit(); MAIL.labels("queued").inc(); await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{"stream":x.stream}}); return result
+    s.commit();response=complete_command(s,claim,result,202,mid);MAIL.labels("queued").inc();await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{"stream":x.stream}});return response
 
 def command_payload(x:MiddlewareCommandIn)->dict:
     payload=dict(x.payload or {})
@@ -830,7 +906,7 @@ def ensure_command_tenant(ctx:dict,tenant_id:str):
     if not tenant_id or tenant_id!=ctx["tenant"]:raise HTTPException(403,"tenant_mismatch")
 
 @app.post("/v1/commands",status_code=202)
-async def middleware_command(x:MiddlewareCommandIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:str=Header(alias="Idempotency-Key",min_length=8,max_length=200),x_tenant_id:str=Header(alias="X-Tenant-ID",min_length=1,max_length=120),x_correlation_id:str=Header(alias="X-Correlation-ID",min_length=8,max_length=200)):
+async def middleware_command(x:MiddlewareCommandIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:str=Header(alias="Idempotency-Key",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$"),x_tenant_id:str=Header(alias="X-Tenant-ID",min_length=1,max_length=120),x_correlation_id:str=Header(alias="X-Correlation-ID",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$")):
     ensure_command_tenant(ctx,x_tenant_id);require_middleware_command_scope(ctx)
     if x.tenant_id and x.tenant_id!=x_tenant_id:raise HTTPException(403,"tenant_mismatch")
     if x.correlation_id and x.correlation_id!=x_correlation_id:raise HTTPException(409,"correlation_id_mismatch")
@@ -845,7 +921,7 @@ async def middleware_command(x:MiddlewareCommandIn,ctx=Depends(auth),s:Session=D
     try:
         payload=command_payload(x)
         if x.command=="email.message.send.v1":
-            result=await _send(MailIn(**payload),ctx,s,idempotency_key);item.state="queued";item.result_json=json.dumps(result,separators=(",",":"),sort_keys=True)
+            send_response=await _send(MailIn(**payload),ctx,s,idempotency_key,x_correlation_id);result=json.loads(send_response.body);item.state="queued";item.result_json=json.dumps(result,separators=(",",":"),sort_keys=True)
         elif x.command=="email.message.cancel.v1":
             message_id=str(payload.get("message_id") or "");message=s.scalar(select(Message).where(Message.id==message_id,Message.tenant_id==ctx["tenant"]).with_for_update())
             if not message:raise HTTPException(404,"not_found")
@@ -858,7 +934,7 @@ async def middleware_command(x:MiddlewareCommandIn,ctx=Depends(auth),s:Session=D
         elif x.command=="email.domain.verify.v1":
             domain_id=str(payload.get("domain_id") or "");domain=s.scalar(select(Domain).where(Domain.id==domain_id,Domain.tenant_id==ctx["tenant"]))
             if not domain:raise HTTPException(404,"not_found")
-            domain_verify(domain.id,ctx,s);item.state="completed";item.result_json=json.dumps({"domain_id":domain.id,"verified":domain.verified})
+            domain_verify(domain.id,ctx,s,idempotency_key+":domain-verify",x_correlation_id);item.state="completed";item.result_json=json.dumps({"domain_id":domain.id,"verified":domain.verified})
         elif x.command=="email.suppression.upsert.v1":
             email=str(payload.get("email") or payload.get("recipient") or "").lower();reason=str(payload.get("reason") or "policy")[:100]
             if not email or "@" not in email:raise HTTPException(422,"email_required")
@@ -934,20 +1010,22 @@ async def postal_hook(request:Request,x_klyrow_timestamp:str=Header(),x_klyrow_e
 @app.get("/v1/contacts")
 def contacts(ctx=Depends(auth),s:Session=Depends(db)): return s.scalars(select(Contact).where(Contact.tenant_id==ctx["tenant"])).all()
 @app.post("/v1/contacts")
-def contact_upsert(x:ContactIn,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db)):
-    item=s.scalar(select(Contact).where(Contact.tenant_id==ctx["tenant"],Contact.email==x.email.lower())) or Contact(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],email=x.email.lower()); item.name=x.name; item.subscribed=x.subscribed; item.metadata_json=json.dumps(x.metadata); s.add(item); audit(s,ctx,"contact.upserted"); s.commit(); return item
+def contact_upsert(x:ContactIn,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db),idempotency_key:str=Header(alias="Idempotency-Key",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$"),x_correlation_id:str=Header(alias="X-Correlation-ID",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$")):
+    email=x.email.lower();semantic=x.model_dump(mode="json");semantic["email"]=email;replay=replay_command(s,ctx,"contacts","upsert",idempotency_key,semantic)
+    if replay:return replay
+    item=s.scalar(select(Contact).where(Contact.tenant_id==ctx["tenant"],Contact.email==email));claim,replay=claim_command(s,ctx,"contacts","upsert",idempotency_key,x_correlation_id,semantic)
+    if replay:return replay
+    item=item or Contact(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],email=email);item.name=x.name;item.subscribed=x.subscribed;item.metadata_json=json.dumps(x.metadata);s.add(item);audit(s,ctx,"contact.upserted");s.commit();return complete_command(s,claim,item,200,item.id)
 @app.get("/v1/campaigns")
 def campaigns(ctx=Depends(auth),s:Session=Depends(db)): return s.scalars(select(Campaign).where(Campaign.tenant_id==ctx["tenant"])).all()
 @app.post("/v1/campaigns",status_code=201)
-async def campaign_create(x:CampaignIn,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
+async def campaign_create(x:CampaignIn,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db),idempotency_key:str=Header(alias="Idempotency-Key",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$"),x_correlation_id:str=Header(alias="X-Correlation-ID",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$")):
+    semantic=x.model_dump(mode="json");replay=replay_command(s,ctx,"campaigns","create",idempotency_key,semantic)
+    if replay:return replay
     if not SAFE_MODE:raise HTTPException(403,"campaign_delivery_disabled_during_canary")
-    if not idempotency_key: raise HTTPException(400,"idempotency_key_required")
-    request_hash=sha(x.model_dump_json())
-    prior=s.scalar(select(Idempotency).where(Idempotency.key==idempotency_key,Idempotency.tenant_id==ctx["tenant"]));
-    if prior:
-        if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
-        return json.loads(prior.response_json)
-    c=Campaign(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],name=x.name,subject=x.subject); result={"id":c.id,"name":c.name,"status":c.status}; s.add(c); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=c.id,response_json=json.dumps(result))); audit(s,ctx,"campaign.created"); s.commit(); return result
+    claim,replay=claim_command(s,ctx,"campaigns","create",idempotency_key,x_correlation_id,semantic)
+    if replay:return replay
+    c=Campaign(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],name=x.name,subject=x.subject);result={"id":c.id,"name":c.name,"status":c.status};s.add(c);audit(s,ctx,"campaign.created");s.commit();return complete_command(s,claim,result,201,c.id)
 @app.get("/v1/campaigns/{cid}")
 def campaign_get(cid:str,ctx=Depends(auth),s:Session=Depends(db)):
     c=s.scalar(select(Campaign).where(Campaign.id==cid,Campaign.tenant_id==ctx["tenant"]));

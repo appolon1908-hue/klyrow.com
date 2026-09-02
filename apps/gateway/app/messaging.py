@@ -9,7 +9,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func, select
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from .main import AllowedSender, Base, Domain, Event, Message, Suppression, Tenant, audit, auth, db, safe_webhook_url, sha
+from .main import AllowedSender, Base, Domain, Event, Message, Suppression, Tenant, audit, auth, claim_command, complete_command, db, replay_command, safe_webhook_url, sha
 
 router=APIRouter(prefix="/v1",tags=["Email SaaS"])
 now=lambda:datetime.now(timezone.utc)
@@ -136,8 +136,14 @@ def streams(ctx=Depends(auth),s:Session=Depends(db)):
 def templates(ctx=Depends(auth),s:Session=Depends(db)):
     return s.scalars(select(Template).where(Template.tenant_id==ctx["tenant"]).order_by(Template.created_at.desc())).all()
 @router.post("/templates",status_code=201)
-def template_create(x:TemplateIn,ctx=Depends(auth),s:Session=Depends(db)):
-    validate_html(x.html_body);item=Template(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],slug=x.slug,name=x.name,locale=x.locale);version=TemplateVersion(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],template_id=item.id,version=1,subject=x.subject,html_body=x.html_body,text_body=x.text_body,variables_json=json.dumps(sorted(set(x.variables))),created_by=ctx["sub"]);s.add_all([item,version]);audit(s,ctx,"template.created");s.commit();return {"id":item.id,"version":1,"status":item.status}
+def template_create(x:TemplateIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:str=Header(alias="Idempotency-Key",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$"),x_correlation_id:str=Header(alias="X-Correlation-ID",min_length=8,max_length=200,pattern=r"^[A-Za-z0-9._:-]+$")):
+    semantic=x.model_dump(mode="json");semantic["variables"]=sorted(set(x.variables));replay=replay_command(s,ctx,"templates","create",idempotency_key,semantic)
+    if replay:return replay
+    validate_html(x.html_body)
+    if s.scalar(select(Template).where(Template.tenant_id==ctx["tenant"],Template.slug==x.slug)):raise HTTPException(409,"template_slug_exists")
+    claim,replay=claim_command(s,ctx,"templates","create",idempotency_key,x_correlation_id,semantic)
+    if replay:return replay
+    item=Template(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],slug=x.slug,name=x.name,locale=x.locale);version=TemplateVersion(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],template_id=item.id,version=1,subject=x.subject,html_body=x.html_body,text_body=x.text_body,variables_json=json.dumps(sorted(set(x.variables))),created_by=ctx["sub"]);s.add_all([item,version]);audit(s,ctx,"template.created");s.commit();return complete_command(s,claim,{"id":item.id,"version":1,"status":item.status},201,item.id)
 @router.put("/templates/{item_id}")
 def template_update(item_id:str,x:TemplateUpdate,ctx=Depends(auth),s:Session=Depends(db)):
     item=tenant_get(s,Template,item_id,ctx["tenant"]);validate_html(x.html_body);item.current_version+=1;item.status="DRAFT";version=TemplateVersion(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],template_id=item.id,version=item.current_version,subject=x.subject,html_body=x.html_body,text_body=x.text_body,variables_json=json.dumps(sorted(set(x.variables))),created_by=ctx["sub"]);s.add(version);audit(s,ctx,"template.version_created");s.commit();return {"id":item.id,"version":item.current_version,"status":item.status}

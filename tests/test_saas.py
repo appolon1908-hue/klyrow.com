@@ -15,7 +15,7 @@ def login(n,otp=None):
     body={"email":f"{n}@example.com","password":"long-enough-password"}
     if otp:body["otp"]=otp
     r=client.post("/v1/auth/login",json=body);assert r.status_code==200,r.text;return r.json()["access_token"]
-def hdr(n="a",otp=None):return {"Authorization":"Bearer "+login(n,otp)}
+def hdr(n="a",otp=None):return {"Authorization":"Bearer "+login(n,otp),"X-Correlation-ID":"correlation-user-"+n}
 def profile(email="person@example.net",tenant="a",attributes=None):
     r=client.post("/v1/profiles",headers=hdr(tenant),json={"email":email,"external_id":"crm-"+tenant+email,"attributes":attributes or {"country":"DE","score":12}});assert r.status_code==201,r.text;return r.json()["id"]
 

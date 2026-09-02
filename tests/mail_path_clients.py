@@ -151,7 +151,7 @@ class MailPathClients:
     ) -> Submission:
         response = self.http.post(
             "/v1/email/send",
-            headers={"Idempotency-Key": key},
+            headers={"Idempotency-Key": key, "X-Correlation-ID": "correlation-" + key},
             json={
                 "to": recipient,
                 "sender": sender_for(stream),
