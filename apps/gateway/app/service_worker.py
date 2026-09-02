@@ -9,8 +9,8 @@ from datetime import timedelta
 
 from sqlalchemy import select
 
-from .billing import BillingEvent, BillingWorkItem, now
 from .main import DB, email_outbox_loop, postal_retry_loop, recover_middleware_commands
+from .billing import BillingEvent, BillingWorkItem, now
 from .mautic_adapter import dispatch_mautic_outbox
 from .postal_provisioning import provisioning_tick
 from .provider import (
