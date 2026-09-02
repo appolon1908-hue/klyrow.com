@@ -207,6 +207,29 @@ def _find_operation(s: Session, operation_id: str, tenant_id: str) -> Any:
     return item
 
 
+def _find_operation_for_update(s: Session, operation_id: str, tenant_id: str) -> Any:
+    item = s.scalar(
+        select(MiddlewareCommandOperation)
+        .where(
+            MiddlewareCommandOperation.command_id == operation_id,
+            MiddlewareCommandOperation.tenant_id == tenant_id,
+        )
+        .with_for_update()
+    )
+    if item is None:
+        item = s.scalar(
+            select(IntegrationOutbox)
+            .where(
+                IntegrationOutbox.id == operation_id,
+                IntegrationOutbox.tenant_id == tenant_id,
+            )
+            .with_for_update()
+        )
+    if item is None:
+        raise HTTPException(404, "not_found")
+    return item
+
+
 def _has_permission(ctx: dict[str, Any], permission: str) -> bool:
     role = str(ctx.get("role") or "").upper()
     if role in {"OWNER", "ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN"}:
@@ -741,7 +764,7 @@ def operation_attempts(operation_id: str, ctx: dict = Depends(auth), s: Session 
 
 @router.post("/v1/operations/{operation_id}/cancel")
 def operation_cancel(operation_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
-    item = _find_operation(s, operation_id, ctx["tenant"])
+    item = _find_operation_for_update(s, operation_id, ctx["tenant"])
     _authorize_operation_mutation(ctx, item)
     if isinstance(item, MiddlewareCommandOperation):
         if item.state in {"completed", "failed", "cancelled"}:
@@ -764,7 +787,7 @@ def operation_cancel(operation_id: str, ctx: dict = Depends(auth), s: Session = 
 
 @router.post("/v1/operations/{operation_id}/reconcile")
 def operation_reconcile(operation_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
-    item = _find_operation(s, operation_id, ctx["tenant"])
+    item = _find_operation_for_update(s, operation_id, ctx["tenant"])
     _authorize_operation_mutation(ctx, item)
     if isinstance(item, MiddlewareCommandOperation):
         if item.state != "failed":

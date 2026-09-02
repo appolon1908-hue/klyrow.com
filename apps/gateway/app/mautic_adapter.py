@@ -214,7 +214,7 @@ def _recover_expired(session: Session, current: datetime) -> None:
             IntegrationOutbox.target == "MAUTIC",
             IntegrationOutbox.state == "PROCESSING",
             IntegrationOutbox.lease_expires_at < current,
-        )
+        ).with_for_update(skip_locked=True)
     ).all()
     for item in rows:
         item.state = "DEAD_LETTER"
@@ -252,7 +252,11 @@ def _claim(session: Session) -> IntegrationOutbox | None:
 
 def _failure(session: Session, item_id: str, error: str, *, retryable: bool) -> None:
     current = now()
-    item = session.get(IntegrationOutbox, item_id)
+    item = session.scalar(
+        select(IntegrationOutbox)
+        .where(IntegrationOutbox.id == item_id)
+        .with_for_update()
+    )
     circuit = session.get(MauticAdapterState, "primary") or MauticAdapterState(
         state_key="primary"
     )
@@ -274,7 +278,11 @@ def _failure(session: Session, item_id: str, error: str, *, retryable: bool) -> 
 
 def _success(session: Session, item_id: str, response: dict[str, Any]) -> None:
     current = now()
-    item = session.get(IntegrationOutbox, item_id)
+    item = session.scalar(
+        select(IntegrationOutbox)
+        .where(IntegrationOutbox.id == item_id)
+        .with_for_update()
+    )
     if not item:
         return
     if item.state != "PROCESSING":

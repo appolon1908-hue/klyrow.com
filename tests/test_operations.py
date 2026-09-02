@@ -1,12 +1,15 @@
 import os
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 os.environ.setdefault("KLYROW_MIDDLEWARE_API_KEY","integration-result-test-token")
 
 from apps.gateway.app.main import Base,DB,Message,Tenant,User,app,engine,ph,rate_buckets
 from apps.gateway.app.messaging import DeliveryJob,WebhookAttempt,WebhookSubscription
-from apps.gateway.app.operations import IntegrationOutbox
+from apps.gateway.app.operations import IntegrationOutbox,IntegrationResult,ResultIn,result
 
 client=TestClient(app)
 tokens={}
@@ -62,3 +65,36 @@ def test_n8n_and_odoo_outages_preserve_events_for_audited_recovery():
             row=s.get(IntegrationOutbox,item_id);assert row.payload_json and row.idempotency_key and row.last_error=="downstream unavailable"
         recovered=client.post(f"/v1/admin/operations/integrations/{item_id}/recover",headers=h("root"),json={"reason":"downstream restored"})
         assert recovered.status_code==200 and recovered.json()["state"]=="PENDING"
+
+def test_terminal_integration_cannot_be_requeued_by_admin_failure():
+    queued=client.post("/v1/automation/events",headers=h("a"),json={"event_type":"TerminalStateV1","aggregate_id":"terminal-item","payload":{"ok":True},"idempotency_key":"terminal-state-event-0001"}).json()
+    with DB() as s:
+        row=s.get(IntegrationOutbox,queued["id"]);row.state="CANCELLED";s.commit()
+    failed=client.post(f"/v1/admin/operations/integrations/{queued['id']}/fail",headers=h("root"),json={"reason":"late failure"})
+    assert failed.status_code==404
+    with DB() as s:assert s.get(IntegrationOutbox,queued["id"]).state=="CANCELLED"
+
+class ConcurrentResultSession:
+    def __init__(self,prior):
+        self.outbox=IntegrationOutbox(id="concurrent-outbox",tenant_id="a",target="N8N",event_type="ConcurrentV1",aggregate_id="aggregate",payload_json="{}",idempotency_key="concurrent-command",state="PENDING")
+        self.prior=prior;self.scalar_calls=0;self.rolled_back=False
+    def scalar(self,statement):
+        del statement;self.scalar_calls+=1
+        return self.outbox if self.scalar_calls==1 else None if self.scalar_calls==2 else self.prior
+    def add(self,item):del item
+    def commit(self):raise IntegrityError("INSERT integration_results",{},RuntimeError("concurrent unique key"))
+    def rollback(self):self.rolled_back=True
+
+def test_concurrent_scoped_result_key_returns_durable_winner():
+    payload_json='{"ok":true}'
+    prior=IntegrationResult(id="winner",tenant_id="a",outbox_id="concurrent-outbox",source="N8N",result_key="concurrent-result-key",payload_json=payload_json)
+    session=ConcurrentResultSession(prior)
+    response=result(ResultIn(outbox_id="concurrent-outbox",source="N8N",result_key="concurrent-result-key",payload={"ok":True}),{"tenant":"a","sub":"middleware-service"},session)
+    assert response=={"id":"winner","duplicate":True} and session.rolled_back
+
+def test_concurrent_scoped_result_key_semantic_conflict_is_409():
+    prior=IntegrationResult(id="winner",tenant_id="a",outbox_id="different-outbox",source="N8N",result_key="concurrent-result-key",payload_json='{"ok":true}')
+    session=ConcurrentResultSession(prior)
+    with pytest.raises(HTTPException) as caught:
+        result(ResultIn(outbox_id="concurrent-outbox",source="N8N",result_key="concurrent-result-key",payload={"ok":True}),{"tenant":"a","sub":"middleware-service"},session)
+    assert getattr(caught.value,"status_code",None)==409 and getattr(caught.value,"detail",None)=="integration_result_idempotency_conflict" and session.rolled_back

@@ -157,6 +157,17 @@ def test_resolver_requires_write_permission_for_mutating_routes():
     assert 'request.url.path=="/v1/integrations/results":permission="klyrow.integration.result.write"' in source
 
 
+def test_integration_state_transitions_share_row_lock_and_unique_race_recovery():
+    operations = (ROOT / "apps/gateway/app/operations.py").read_text()
+    production_api = (ROOT / "apps/gateway/app/production_api.py").read_text()
+    mautic = (ROOT / "apps/gateway/app/mautic_adapter.py").read_text()
+    assert operations.count("locked_integration_outbox(") >= 4
+    assert "except IntegrityError:" in operations
+    assert "s.rollback();prior=integration_result_by_key" in operations
+    assert production_api.count("_find_operation_for_update(") >= 3
+    assert mautic.count(".with_for_update(") >= 4
+
+
 def test_health_counts_outbox_and_reflects_durable_canary_capacity():
     source = (ROOT / "apps/gateway/app/main.py").read_text()
     assert "select(func.count()).select_from(EmailOutbox)" in source

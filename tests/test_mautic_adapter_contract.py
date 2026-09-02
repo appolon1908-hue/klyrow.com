@@ -271,7 +271,7 @@ def test_provider_completion_after_state_change_requires_reconciliation():
     class ChangedSession:
         committed = False
 
-        def get(self, _model, _item_id):
+        def scalar(self, _statement):
             return item
 
         def commit(self):
