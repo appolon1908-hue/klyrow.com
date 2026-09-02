@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -17,6 +18,8 @@ def test_runtime_secret_bootstrap_never_prints_credentials():
     assert "KLYROW_PROVIDER_CREDENTIAL_KEY_FILE=$runtime_secret_dir/provider-credential-key" in script
     assert "KLYROW_POSTAL_PROVISIONER_TOKEN_FILE=$runtime_secret_dir/postal-provisioner-token" in script
     assert "KLYROW_SECURITY_PAYLOAD_KEY_FILE=$runtime_secret_dir/security-payload-key" in script
+    assert "$runtime_secret_dir/database-owner-password" in script
+    assert "$runtime_secret_dir/database-runtime-password" in script
     assert "Initial admin password:" not in script
     assert "chown root:root .env" in script
 
@@ -25,7 +28,13 @@ def test_schema_migration_is_a_required_gateway_dependency():
     compose = (ROOT / "docker-compose.yml").read_text()
     runner = (ROOT / "scripts/migrate").read_text()
     assert "gateway-migrate: {condition: service_completed_successfully}" in compose
-    assert "2026090101_mail_contract_and_command_plane.sql" in compose
+    assert "2026090208_runtime_database_least_privilege.sql" in compose
+    assert 'KLYROW_REQUIRE_LEAST_PRIVILEGE_DB: "true"' in compose
+    source = (ROOT / "apps/gateway/app/main.py").read_text()
+    assert "runtime database role has cluster-level privileges" in source
+    least_privilege = (ROOT / "migrations/2026090208_runtime_database_least_privilege.sql").read_text()
+    for privilege in ("NOSUPERUSER", "NOCREATEDB", "NOCREATEROLE", "NOREPLICATION", "NOBYPASSRLS"):
+        assert privilege in least_privilege
     assert "KLYROW_MIGRATE_IMAGE" in compose
     assert "docker/migrate.Dockerfile" not in compose
     assert "pg_advisory_xact_lock" in runner
@@ -57,6 +66,8 @@ def test_upgrade_migrates_legacy_environment_secrets_before_compose():
     assert 'os.geteuid() != 0' in migration
     assert 'os.chmod(target, 0o600)' in migration
     assert 'removed = set(specs)' in migration
+    assert '"POSTGRES_PASSWORD": ("KLYROW_DATABASE_OWNER_PASSWORD_FILE"' in migration
+    assert "KLYROW_DATABASE_URL=postgresql+psycopg://klyrow_runtime@postgres:5432/klyrow" in migration
 
 
 def test_standard_launchers_use_the_complete_digest_pinned_release():
@@ -65,6 +76,7 @@ def test_standard_launchers_use_the_complete_digest_pinned_release():
         assert "-f docker-compose.web.yml" in source
         assert "-f docker-compose.postal-provisioning.yml" in source
         assert "scripts/validate-production-images" in source
+        assert "scripts/verify-release-authority" in source
         assert " build " not in source
         assert "--build" not in source
         assert "scripts/migrate\n" not in source
@@ -84,6 +96,10 @@ def test_production_compose_forbids_local_builds_and_requires_release_images():
     ):
         assert variable in combined
     assert "./migrations:/migrations:ro" not in base
+    gateway_override = provisioning.split("  postal-provisioner:", 1)[0]
+    assert "KLYROW_PROVIDER_CREDENTIAL_KEY_FILE" in gateway_override
+    assert "KLYROW_POSTAL_PROVISIONER_TOKEN_FILE" in gateway_override
+    assert "secrets: [klyrow_provider_credential_key, klyrow_postal_provisioner_token]" in gateway_override
 
 
 def test_production_image_validator_requires_digests_and_canonical_repositories():
@@ -94,6 +110,28 @@ def test_production_image_validator_requires_digests_and_canonical_repositories(
     assert "ghcr.io/appolon1908-hue/klyrow-migrate" in source
     assert "ghcr.io/appolon1908-hue/klyrow-web" in source
     assert "ghcr.io/appolon1908-hue/klyrow-postal-provisioner" in source
+
+
+def test_deploy_requires_protected_source_config_and_rollback_authority():
+    source = (ROOT / "scripts/verify-release-authority").read_text()
+    validator = (ROOT / "scripts/verify-release-authority.py").read_text()
+    assert "PUBLISH_SOURCE_SHA" in source and "PUBLISH_SHA256SUMS" in source
+    assert "git status --porcelain" in source
+    assert "refs/remotes/origin/main" in source
+    assert "Runtime configuration checksum mismatch" in source
+    assert "rollback authority must reference a prior source SHA" in validator
+    assert "org.opencontainers.image.revision" in source
+    checksum = (ROOT / "scripts/config-checksum").read_text()
+    assert "config --format json" in checksum and "hashlib.sha256" in checksum
+
+
+def test_database_passwords_are_file_only_and_runtime_role_is_separate():
+    compose = (ROOT / "docker-compose.yml").read_text()
+    assert "POSTGRES_PASSWORD:" not in compose
+    assert "postgresql+psycopg://klyrow:${POSTGRES_PASSWORD" not in compose
+    assert "POSTGRES_PASSWORD_FILE: /run/secrets/klyrow_database_owner_password" in compose
+    assert compose.count("postgresql+psycopg://klyrow_runtime@postgres:5432/klyrow") >= 6
+    assert "KLYROW_DATABASE_RUNTIME_PASSWORD_FILE" in compose
 
 
 def test_outbox_recovers_abandoned_sending_leases():
@@ -154,6 +192,19 @@ def test_resolver_requires_write_permission_for_mutating_routes():
     source = (ROOT / "apps/gateway/app/main.py").read_text()
     assert 'request.method not in {"GET","HEAD","OPTIONS"}' in source
     assert 'permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send"' in source
+    assert 'request.url.path=="/v1/integrations/results":permission="klyrow.integration.result.write"' in source
+
+
+def test_integration_state_transitions_share_row_lock_and_unique_race_recovery():
+    operations = (ROOT / "apps/gateway/app/operations.py").read_text()
+    production_api = (ROOT / "apps/gateway/app/production_api.py").read_text()
+    mautic = (ROOT / "apps/gateway/app/mautic_adapter.py").read_text()
+    assert operations.count("locked_integration_outbox(") >= 4
+    assert 'item.state not in {"PENDING","RETRY"}' in operations
+    assert "except IntegrityError:" in operations
+    assert "s.rollback();prior=integration_result_by_key" in operations
+    assert production_api.count("_find_operation_for_update(") >= 3
+    assert mautic.count(".with_for_update(") >= 4
 
 
 def test_health_counts_outbox_and_reflects_durable_canary_capacity():
@@ -161,6 +212,24 @@ def test_health_counts_outbox_and_reflects_durable_canary_capacity():
     assert "select(func.count()).select_from(EmailOutbox)" in source
     assert "gate.reserved_deliveries<maximum" in source
     assert "production_gate_open(s)" in source
+
+
+def test_every_long_running_production_service_has_meaningful_health():
+    compose = (ROOT / "docker-compose.yml").read_text()
+
+    def service_block(name):
+        match = re.search(rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)", compose)
+        assert match
+        return match.group(1)
+
+    for service in ("mautic-cron", "mautic-worker"):
+        block = service_block(service)
+        assert "doctrine:query:sql" in block and "healthcheck:" in block
+    postal_worker = service_block("postal-worker")
+    assert "rabbitmq" in postal_worker and "postal-db" in postal_worker
+    for service in ("prometheus", "grafana", "node-exporter"):
+        block = service_block(service)
+        assert "healthcheck:" in block
 
 
 def test_prometheus_uses_the_private_metrics_credential():

@@ -10,7 +10,8 @@ Path(SERVICE_TOKEN_FILE).write_text("bounded-beyvra-test-token",encoding="utf-8"
 os.environ.update(KLYROW_DATABASE_URL="sqlite:///./test.db",KLYROW_SESSION_SECRET="test-session-secret-at-least-32-bytes",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_MIDDLEWARE_API_KEY="middleware-command-test-token",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple",BEYVRA_EMAIL_SERVICE_TOKEN_FILE=SERVICE_TOKEN_FILE,BEYVRA_EMAIL_TENANT_ID="a",KLYROW_AUTH_RATE_PER_MINUTE="1000")
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from apps.gateway.app.main import AllowedSender,Audit,Base,DB,Domain,EmailOutbox,Event,Message,MiddlewareCommandOperation,PostalEvent,Suppression,Tenant,User,app,engine,ph,runtime_secret
+from sqlalchemy.exc import IntegrityError
+from apps.gateway.app.main import AllowedSender,Audit,Base,DB,Domain,EmailOutbox,Event,Message,MiddlewareCommandIn,MiddlewareCommandOperation,PostalEvent,Suppression,Tenant,User,app,engine,middleware_command,ph,recover_middleware_commands,runtime_secret
 
 def setup_module():
     Base.metadata.drop_all(engine); Base.metadata.create_all(engine)
@@ -62,6 +63,7 @@ def test_middleware_command_submit_readback_and_replay():
     command_id=first.json()["command_id"]
     read=client.get(f"/v1/operations/{command_id}",headers={"Authorization":h["Authorization"],"X-Klyrow-Tenant-Id":"a","X-Tenant-ID":"a"})
     assert read.status_code==200 and read.json()["result"]["status"]=="accepted"
+    assert read.json()["state"]=="accepted"
     assert client.post("/v1/commands",headers={**h,"X-Tenant-ID":"b"},json=payload).status_code==403
 
 def test_middleware_command_cancel_and_suppression_upsert():
@@ -103,6 +105,48 @@ def test_middleware_commands_require_command_scope_and_record_bad_payload():
     with DB() as s:
         operation=s.scalar(select(MiddlewareCommandOperation).where(MiddlewareCommandOperation.idempotency_key=="command-invalid-payload"))
         assert operation and operation.state=="failed" and operation.error=="invalid_command_payload"
+
+def test_middleware_send_readback_persists_unknown_outcome_without_retry():
+    with DB() as s:
+        s.add(Message(id="unknown-command-message",tenant_id="a",recipient="person@example.net",sender="sender@a.example.com",subject="unknown",status="indeterminate"))
+        s.add(EmailOutbox(id="unknown-command-outbox",tenant_id="a",message_id="unknown-command-message",payload="{}",state="INDETERMINATE"))
+        s.add(MiddlewareCommandOperation(command_id="unknown-command",tenant_id="a",command="email.message.send.v1",idempotency_key="unknown-command-key",correlation_id="unknown-command-correlation",request_hash="hash",state="queued",result_json='{"id":"unknown-command-message"}'))
+        s.commit()
+    headers=middleware_hdr("a","unknown-command-correlation","unused-read-key")
+    result=client.get("/v1/operations/unknown-command",headers=headers)
+    assert result.status_code==200 and result.json()["state"]=="unknown_outcome"
+    with DB() as s:
+        assert s.get(MiddlewareCommandOperation,"unknown-command").state=="unknown_outcome"
+        assert s.get(EmailOutbox,"unknown-command-outbox").state=="INDETERMINATE"
+
+def test_concurrent_middleware_command_insert_returns_durable_winner():
+    class ConcurrentSession:
+        def __init__(self):self.calls=0;self.winner=None;self.rolled_back=False
+        def scalar(self,statement):
+            del statement;self.calls+=1
+            return None if self.calls==1 else self.winner
+        def add(self,item):
+            if isinstance(item,MiddlewareCommandOperation):self.winner=item
+        def commit(self):raise IntegrityError("INSERT middleware_command_operations",{},RuntimeError("concurrent unique key"))
+        def rollback(self):self.rolled_back=True
+    session=ConcurrentSession()
+    payload=MiddlewareCommandIn(command="email.reputation.snapshot.request.v1",payload={})
+    response=asyncio.run(middleware_command(payload,{"tenant":"a","sub":"middleware-service","service":True},session,"concurrent-command-key","a","concurrent-correlation"))
+    assert response["command_id"]==session.winner.command_id and response["state"]=="accepted"
+    assert session.rolled_back is True
+
+def test_interrupted_middleware_command_replays_from_durable_request():
+    request={"payload":{"to":"recovered@example.net","sender":"sender@a.example.com","subject":"recovered","html":"<p>recovered</p>"},"target":None}
+    with DB() as s:
+        s.add(MiddlewareCommandOperation(command_id="recovered-command",tenant_id="a",command="email.message.send.v1",idempotency_key="recovered-command-key",correlation_id="recovered-command-correlation",request_hash="durable-request-hash",request_json=json.dumps(request,separators=(",",":"),sort_keys=True),state="accepted"))
+        s.commit()
+    assert asyncio.run(recover_middleware_commands())>=1
+    with DB() as s:
+        operation=s.get(MiddlewareCommandOperation,"recovered-command")
+        result=json.loads(operation.result_json)
+        assert operation.state=="queued" and result["status"]=="accepted"
+        assert s.scalar(select(Message).where(Message.id==result["id"],Message.tenant_id=="a"))
+    assert asyncio.run(recover_middleware_commands())==0
 def test_unapproved_local_part_is_denied():
     x={"to":"ok@example.net","sender":"admin@a.example.com","subject":"test","html":"<p>test</p>"}
     assert client.post("/v1/email/send",headers={**hdr("a"),"Idempotency-Key":"unapproved-local"},json=x).status_code==403

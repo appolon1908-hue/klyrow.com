@@ -5,6 +5,7 @@ import uuid
 import base64
 import secrets
 import asyncio
+import time
 import dns.resolver
 from email import policy as mime_policy
 from email.parser import BytesParser
@@ -16,6 +17,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from email_validator import EmailNotValidError, validate_email
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, case, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
@@ -24,7 +26,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from .guards import authorize_send, enforce_consent, suppression_record
 from .guards import enforce_suppression
-from .main import AllowedSender, Audit, Base, Domain, InboundRouteConfig, Message, Tenant, auth, db
+from .main import AllowedSender, Audit, Base, Domain, InboundRouteConfig, Message, Tenant, auth, db, verify_postal_signature
 
 router = APIRouter(prefix="/v1/internal/email", tags=["Klyrow provider"])
 status_router = APIRouter(tags=["Klyrow provider status"])
@@ -390,6 +392,44 @@ class InboundFixtureIn(BaseModel):
     dmarc_fail_action: str = Field(pattern="^(REJECT|QUARANTINE|ACCEPT)$")
 
 
+class PostalInboundAttachment(BaseModel):
+    filename: str = Field(min_length=1, max_length=255)
+    content_type: str = Field(min_length=1, max_length=255)
+    size: int = Field(ge=0, le=25_000_000)
+    data: str = Field(max_length=35_000_000)
+
+
+class PostalInboundHash(BaseModel):
+    """Postal 3.3 Hash/BodyAsJSON payload signed over its exact body."""
+
+    id: int = Field(ge=1)
+    rcpt_to: EmailStr
+    mail_from: str = Field(default="", max_length=320)
+    subject: str = Field(default="", max_length=998)
+    message_id: Optional[str] = Field(default=None, max_length=998)
+    timestamp: float
+    size: int = Field(ge=0, le=50_000_000)
+    spam_status: str = Field(pattern="^(NotChecked|NotSpam|Spam)$")
+    bounce: bool = False
+    received_with_ssl: bool = False
+    to: Optional[str] = Field(default=None, max_length=2000)
+    cc: Optional[str] = Field(default=None, max_length=2000)
+    from_address: Optional[str] = Field(default=None, alias="from", max_length=2000)
+    date: Optional[str] = Field(default=None, max_length=200)
+    in_reply_to: Optional[str] = Field(default=None, max_length=998)
+    references: Optional[str] = Field(default=None, max_length=4000)
+    html_body: Optional[str] = Field(default=None, max_length=1_000_000)
+    plain_body: Optional[str] = Field(default=None, max_length=1_000_000)
+    attachment_quantity: int = Field(default=0, ge=0, le=20)
+    attachments: list[PostalInboundAttachment] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode="after")
+    def validate_attachments(self):
+        if self.attachment_quantity != len(self.attachments):
+            raise ValueError("postal_attachment_count_mismatch")
+        return self
+
+
 class SmtpCredentialIn(BaseModel):
     allowed_sender_ids: list[str] = Field(min_length=1, max_length=100)
     allowed_streams: list[str] = Field(default_factory=lambda: ["TRANSACTIONAL"], min_length=1, max_length=5)
@@ -417,6 +457,7 @@ def parse_inbound(raw: bytes, max_message_bytes: int, max_attachment_bytes: int)
     text_body = None
     html_body = None
     attachments = []
+    attachment_contents = []
     disposition = "ACCEPT"
     for part in message.walk():
         if part.is_multipart():
@@ -433,6 +474,7 @@ def parse_inbound(raw: bytes, max_message_bytes: int, max_attachment_bytes: int)
             if PurePath(clean.lower()).suffix in EXECUTABLE_SUFFIXES:
                 disposition = "QUARANTINE"
             attachments.append({"filename": clean, "content_type": content_type, "size": len(content), "sha256": hashlib.sha256(content).hexdigest()})
+            attachment_contents.append(content)
         elif content_type == "text/plain" and text_body is None:
             text_body = content.decode(part.get_content_charset() or "utf-8", errors="replace")
         elif content_type == "text/html" and html_body is None:
@@ -440,7 +482,8 @@ def parse_inbound(raw: bytes, max_message_bytes: int, max_attachment_bytes: int)
     return {"message_id": message.get("Message-ID"), "from": message.get("From", ""), "to": message.get("To", ""),
         "cc": message.get("Cc"), "date": message.get("Date"), "in_reply_to": message.get("In-Reply-To"),
         "references": message.get("References"), "subject": message.get("Subject", ""), "text": text_body,
-        "html": html_body, "attachments": attachments, "disposition": disposition}
+        "html": html_body, "attachments": attachments, "attachment_contents": attachment_contents,
+        "disposition": disposition}
 
 
 def smtp_authorize(s: Session, payload: SmtpPreflightIn, tenant_id: str) -> SmtpCredential:
@@ -764,15 +807,29 @@ async def dispatch_provider_outbox(limit: int = 50) -> dict:
     delivered = 0
     failed = 0
     with DB() as s:
+        stale = list(s.scalars(select(ProviderEvent).where(
+            ProviderEvent.state == "PROCESSING",
+            ProviderEvent.updated_at < now() - timedelta(minutes=5),
+        ).with_for_update(skip_locked=True).limit(limit)).all())
+        for event in stale:
+            event.state = "RETRY"
+            event.available_at = now()
+            event.last_error = "delivery_lease_expired"
+            event.updated_at = now()
         events = list(s.scalars(select(ProviderEvent).where(ProviderEvent.state.in_(["PENDING", "RETRY"]),
-            ProviderEvent.available_at <= now()).order_by(ProviderEvent.created_at).limit(limit)).all())
-    for snapshot in events:
-        payload = json.loads(snapshot.payload_json)
-        canonical_event = SMTP_EVENT_MAP.get(snapshot.kind)
+            ProviderEvent.available_at <= now()).order_by(ProviderEvent.created_at).with_for_update(skip_locked=True).limit(limit)).all())
+        snapshots=[]
+        for event in events:
+            event.state="PROCESSING";event.updated_at=now()
+            snapshots.append((event.id,event.kind,event.payload_json))
+        s.commit()
+    for event_id,event_kind,payload_json in snapshots:
+        payload = json.loads(payload_json)
+        canonical_event = SMTP_EVENT_MAP.get(event_kind)
         ok = await emit_middleware(canonical_event, payload) if canonical_event else False
         with DB() as s:
-            item = s.get(ProviderEvent, snapshot.id)
-            if not item or item.state not in {"PENDING", "RETRY"}:
+            item = s.get(ProviderEvent, event_id)
+            if not item or item.state != "PROCESSING":
                 continue
             item.attempts += 1
             item.updated_at = now()
@@ -1266,10 +1323,180 @@ def inbound_receive(payload: InboundFixtureIn, ctx=Depends(auth), s: Session = D
             "auth_verdict": item.auth_verdict, "spf_result": item.spf_result,
             "dkim_result": item.dkim_result, "dmarc_result": item.dmarc_result,
             "arc_result": item.arc_result, "dmarc_fail_action": item.dmarc_fail_action}, separators=(",", ":"), sort_keys=True)))
+    # The provider pipeline remains authoritative for SPF/DKIM/DMARC and spam
+    # disposition. Webmail receives only the already-attributed, accepted or
+    # quarantined tenant record; rejected messages are ignored by the helper.
+    from .webmail import capture_provider_inbound
+
+    capture_provider_inbound(s, route, item, parsed)
     audit_provider(s, ctx, "inbound.received", item.disposition, resource_id=item.id)
     s.commit()
     return {"inbound_id": item.id, "duplicate": False, "disposition": item.disposition,
         "route_id": route.id, "attachments": parsed["attachments"]}
+
+
+@status_router.post("/v1/webhooks/postal-inbound", status_code=202)
+async def postal_inbound(
+    request: Request,
+    x_postal_signature_256: str = Header(default=""),
+    s: Session = Depends(db),
+):
+    """Persist one timestamp-bounded Postal-signed message before projection."""
+    body = await request.body()
+    if len(body) > 70_000_000:
+        raise HTTPException(413, "postal_payload_too_large")
+    verify_postal_signature(body, x_postal_signature_256)
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        raise HTTPException(415, "postal_json_required")
+    try:
+        payload = PostalInboundHash.model_validate_json(body)
+    except Exception as exc:
+        raise HTTPException(422, "invalid_postal_inbound_payload") from exc
+    current_time = time.time()
+    if payload.timestamp > current_time + 300 or payload.timestamp < current_time - 86_400:
+        raise HTTPException(401, "expired_postal_event")
+
+    recipient = str(payload.rcpt_to).lower()
+    configured_routes = list(s.scalars(select(InboundRouteConfig).where(
+        InboundRouteConfig.address == recipient,
+        InboundRouteConfig.verified == True,
+        InboundRouteConfig.enabled == True,
+    )).all())
+    from .messaging import DomainClaim, InboundRoute
+
+    api_routes = list(s.scalars(select(InboundRoute).join(
+        DomainClaim, DomainClaim.id == InboundRoute.domain_claim_id,
+    ).where(
+        InboundRoute.recipient == recipient,
+        InboundRoute.enabled == True,
+        InboundRoute.wildcard == False,
+        DomainClaim.state.in_({"VERIFIED", "SENDING_ENABLED"}),
+    )).all())
+    routes = configured_routes + api_routes
+    if len(routes) != 1:
+        raise HTTPException(404, "inbound_recipient_not_configured")
+    route = routes[0]
+    tenant = s.scalar(select(Tenant).where(Tenant.id == route.tenant_id, Tenant.enabled == True))
+    if not tenant:
+        raise HTTPException(403, "tenant_suspended")
+
+    provider_event_id = f"postal:{route.id}:{payload.id}"
+    existing = s.scalar(select(ProviderInbound).where(
+        ProviderInbound.tenant_id == route.tenant_id,
+        ProviderInbound.provider_event_id == provider_event_id,
+    ))
+    if existing:
+        return {"accepted": True, "inbound_id": existing.id, "duplicate": True,
+            "disposition": existing.disposition}
+
+    tenant_policy = policy_for(s, route.tenant_id)
+    route_message_limit = getattr(route, "max_bytes", tenant_policy.max_message_bytes)
+    if payload.size > min(tenant_policy.max_message_bytes, route_message_limit):
+        raise HTTPException(413, "inbound_message_too_large")
+    attachment_metadata = []
+    attachment_contents = []
+    for attachment in payload.attachments:
+        filename = PurePath(attachment.filename).name
+        if filename != attachment.filename or filename in {".", ".."} or "\\" in attachment.filename:
+            raise HTTPException(422, "unsafe_attachment_filename")
+        try:
+            compact = b"".join(attachment.data.encode("ascii").split())
+            content = base64.b64decode(compact, validate=True)
+        except (UnicodeEncodeError, ValueError) as exc:
+            raise HTTPException(422, "invalid_attachment_encoding") from exc
+        if len(content) != attachment.size:
+            raise HTTPException(422, "postal_attachment_size_mismatch")
+        if len(content) > tenant_policy.max_attachment_bytes:
+            raise HTTPException(413, "inbound_attachment_too_large")
+        attachment_metadata.append({
+            "filename": filename,
+            "content_type": attachment.content_type,
+            "size": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        })
+        attachment_contents.append(content)
+
+    parsed = {
+        "message_id": payload.message_id,
+        "from": payload.from_address or payload.mail_from,
+        "to": payload.to or recipient,
+        "cc": payload.cc,
+        "date": payload.date,
+        "in_reply_to": payload.in_reply_to,
+        "references": payload.references,
+        "subject": payload.subject,
+        "text": payload.plain_body,
+        "html": payload.html_body,
+        "attachments": attachment_metadata,
+        "attachment_contents": attachment_contents,
+        # Postal authenticates the transport, but Hash does not carry trusted
+        # SPF/DKIM/DMARC results. Keep all such mail quarantined fail closed.
+        "disposition": "QUARANTINE",
+    }
+    if parsed["message_id"]:
+        duplicate = s.scalar(select(ProviderInbound).where(
+            ProviderInbound.tenant_id == route.tenant_id,
+            ProviderInbound.route_id == route.id,
+            ProviderInbound.message_id_header == parsed["message_id"],
+        ))
+        if duplicate:
+            return {"accepted": True, "inbound_id": duplicate.id, "duplicate": True,
+                "disposition": duplicate.disposition}
+
+    item = ProviderInbound(
+        id=str(uuid.uuid4()), tenant_id=route.tenant_id,
+        provider_event_id=provider_event_id, route_id=route.id,
+        message_id_header=parsed["message_id"], sender=parsed["from"], recipient=recipient,
+        subject=parsed["subject"], text_body=parsed["text"], html_body=parsed["html"],
+        attachments_json=json.dumps(attachment_metadata, separators=(",", ":"), sort_keys=True),
+        auth_verdict="LEGACY_UNVERIFIED", spf_result="NONE", dkim_result="NONE",
+        dmarc_result="NONE", arc_result="NONE", dmarc_fail_action="QUARANTINE",
+        disposition="QUARANTINE",
+    )
+    s.add(item)
+    event_id = str(uuid.uuid4())
+    destination_kind = route.destination_kind
+    if destination_kind == "SUPPORT":
+        destination_kind = "odoo_helpdesk"
+    elif destination_kind == "ODOO":
+        destination_kind = "odoo_accounting" if "account" in (route.destination_ref or "").lower() else "odoo_helpdesk"
+    normalized = {
+        "event_id": event_id, "schema_version": "1.0", "event": "inbound.received",
+        "occurred_at": datetime.fromtimestamp(payload.timestamp, tz=timezone.utc).isoformat(),
+        "payload_hash": hashlib.sha256(body).hexdigest(), "tenant_id": route.tenant_id,
+        "inbound_id": item.id, "provider_event_id": provider_event_id, "route_id": route.id,
+        "destination_kind": destination_kind, "destination_ref": route.destination_ref,
+        "disposition": item.disposition, "recipient": recipient, "sender": parsed["from"],
+        "subject": parsed["subject"], "message_id": parsed["message_id"],
+        "in_reply_to": parsed["in_reply_to"], "references": parsed["references"],
+        "date": parsed["date"], "cc": parsed["cc"], "text": parsed["text"],
+        "html": parsed["html"], "attachments": attachment_metadata,
+    }
+    s.add(ProviderEvent(
+        id=event_id, tenant_id=route.tenant_id, message_id=item.id, kind="inbound.received",
+        payload_json=json.dumps(normalized, separators=(",", ":"), sort_keys=True),
+    ))
+    if isinstance(route, InboundRouteConfig):
+        from .webmail import capture_provider_inbound
+        capture_provider_inbound(s, route, item, parsed)
+    s.add(ProviderAudit(
+        id=str(uuid.uuid4()), tenant_id=route.tenant_id, actor="provider:postal",
+        action="inbound.received", outcome=item.disposition, resource_id=item.id,
+    ))
+    try:
+        s.commit()
+    except IntegrityError:
+        s.rollback()
+        winner = s.scalar(select(ProviderInbound).where(
+            ProviderInbound.tenant_id == route.tenant_id,
+            ProviderInbound.provider_event_id == provider_event_id,
+        ))
+        if winner:
+            return {"accepted": True, "inbound_id": winner.id, "duplicate": True,
+                "disposition": winner.disposition}
+        raise
+    return {"accepted": True, "inbound_id": item.id, "duplicate": False,
+        "disposition": item.disposition, "route_id": route.id}
 
 
 @router.post("/messages/{message_id}/tracking/{kind}", status_code=201)

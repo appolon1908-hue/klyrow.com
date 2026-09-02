@@ -16,11 +16,25 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import Counter, Gauge, Histogram, generate_latest
-from pydantic import BaseModel, EmailStr, Field, ValidationError, model_validator
+from pydantic import BaseModel, EmailStr, Field, ValidationError, field_validator, model_validator
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, or_, select, text
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
-DATABASE_URL=os.getenv("KLYROW_DATABASE_URL", "sqlite:///./klyrow.db")
+def database_url():
+    value=os.getenv("KLYROW_DATABASE_URL", "sqlite:///./klyrow.db")
+    password_file=os.getenv("KLYROW_DATABASE_PASSWORD_FILE","").strip()
+    production=os.getenv("KLYROW_ENV","development").lower()=="production"
+    if production and not password_file:raise RuntimeError("production requires KLYROW_DATABASE_PASSWORD_FILE")
+    if not password_file:return value
+    path=Path(password_file)
+    if production and (not path.is_absolute() or path.is_symlink()):raise RuntimeError("database password file must be absolute and not a symlink")
+    try:password=path.read_text(encoding="utf-8").strip()
+    except OSError as exc:raise RuntimeError("database password file unavailable") from exc
+    if not password or len(password)>1024:raise RuntimeError("database password file is empty or oversized")
+    return make_url(value).set(password=password)
+
 def runtime_secret(name:str)->str:
     """Read a rotatable secret without permitting production env injection."""
 
@@ -51,6 +65,7 @@ def required_session_secret():
     return value
 SECRET=required_session_secret()
 if len(SECRET) < 32: raise RuntimeError("KLYROW_SESSION_SECRET must contain at least 32 characters")
+DATABASE_URL=database_url()
 SAFE_MODE=safe_mode_enabled()
 engine=create_engine(DATABASE_URL, pool_pre_ping=True)
 DB=sessionmaker(engine, expire_on_commit=False)
@@ -88,16 +103,19 @@ rate_buckets=defaultdict(deque)
 _jwks_clients={}
 
 SMTP_EVENT_MAP={
-    "email.queued":"klyrow.email.queued","email.sent":"klyrow.email.sent",
+    "email.accepted":"klyrow.email.accepted","email.queued":"klyrow.email.queued",
+    "email.submitted":"klyrow.email.submitted","email.sent":"klyrow.email.sent",
     "email.delivered":"klyrow.email.delivered","email.deferred":"klyrow.email.deferred",
     "email.bounced":"klyrow.email.bounced","email.complained":"klyrow.email.complained",
+    "email.rejected":"klyrow.email.rejected","email.failed":"klyrow.email.failed",
+    "email.cancelled":"klyrow.email.cancelled","email.unknown_outcome":"klyrow.email.unknown_outcome",
     "email.opened":"klyrow.email.opened","email.clicked":"klyrow.email.clicked",
     "email.unsubscribed":"klyrow.email.unsubscribed","email.inbound_received":"klyrow.email.inbound_received",
     "message.submitted":"klyrow.email.submitted","message.delivered":"klyrow.email.delivered",
     "message.opened":"klyrow.email.opened","message.clicked":"klyrow.email.clicked",
     "inbound.received":"klyrow.email.inbound_received",
 }
-CANONICAL_SMTP_STATUSES={"accepted","queued","submitted","provider_accepted","delivered","deferred","bounced","complained","suppressed","failed","cancelled","indeterminate"}
+CANONICAL_SMTP_STATUSES={"accepted","queued","processing","submitted","provider_accepted","delivered","deferred","bounced","complained","rejected","suppressed","failed","cancelled","unknown_outcome","indeterminate"}
 MIDDLEWARE_ALLOWED_COMMANDS={"email.message.send.v1","email.message.cancel.v1","email.domain.verify.v1","email.suppression.upsert.v1","email.reputation.snapshot.request.v1"}
 
 def set_core_message_status(message,value:str)->None:
@@ -136,13 +154,13 @@ class Contact(Base):
     __tablename__="contacts"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); email:Mapped[str]=mapped_column(String,index=True); name:Mapped[Optional[str]]=mapped_column(String,nullable=True); subscribed:Mapped[bool]=mapped_column(Boolean,default=True); metadata_json:Mapped[str]=mapped_column(Text,default="{}")
     __table_args__=(UniqueConstraint("tenant_id","email",name="uq_contact_tenant_email"),)
 class Campaign(Base):
-    __tablename__="campaigns"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); name:Mapped[str]=mapped_column(String); status:Mapped[str]=mapped_column(String,default="draft"); subject:Mapped[Optional[str]]=mapped_column(String,nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+    __tablename__="campaigns"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); name:Mapped[str]=mapped_column(String); status:Mapped[str]=mapped_column(String,default="draft"); subject:Mapped[Optional[str]]=mapped_column(String,nullable=True); scheduled_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class Idempotency(Base):
     __tablename__="idempotency_keys"; id:Mapped[str]=mapped_column(String,primary_key=True,default=lambda:str(uuid.uuid4())); key:Mapped[str]=mapped_column(String); tenant_id:Mapped[str]=mapped_column(String,index=True); request_hash:Mapped[str]=mapped_column(String); resource_id:Mapped[str]=mapped_column(String); response_json:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); __table_args__=(UniqueConstraint("tenant_id","key",name="uq_idempotency_tenant_key"),)
 class EmailOutbox(Base):
-    __tablename__="email_outbox"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); message_id:Mapped[str]=mapped_column(String,unique=True,index=True); payload:Mapped[str]=mapped_column(Text); priority:Mapped[int]=mapped_column(Integer,default=20,index=True); state:Mapped[str]=mapped_column(String,default="pending",index=True); attempts:Mapped[int]=mapped_column(Integer,default=0); provider_message_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True); next_attempt_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+    __tablename__="email_outbox"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); message_id:Mapped[str]=mapped_column(String,unique=True,index=True); operation_id:Mapped[Optional[str]]=mapped_column(String,nullable=True,index=True); correlation_id:Mapped[Optional[str]]=mapped_column(String,nullable=True,index=True); payload:Mapped[str]=mapped_column(Text); priority:Mapped[int]=mapped_column(Integer,default=20,index=True); state:Mapped[str]=mapped_column(String,default="pending",index=True); attempts:Mapped[int]=mapped_column(Integer,default=0); provider_message_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True); next_attempt_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class MiddlewareCommandOperation(Base):
-    __tablename__="middleware_command_operations";command_id:Mapped[str]=mapped_column(String,primary_key=True);tenant_id:Mapped[str]=mapped_column(String,index=True);command:Mapped[str]=mapped_column(String,index=True);idempotency_key:Mapped[str]=mapped_column(String,index=True);correlation_id:Mapped[str]=mapped_column(String,index=True);state:Mapped[str]=mapped_column(String,default="accepted",index=True);request_hash:Mapped[str]=mapped_column(String);result_json:Mapped[str]=mapped_column(Text,default="{}");error:Mapped[Optional[str]]=mapped_column(String,nullable=True);created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc));updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc));__table_args__=(UniqueConstraint("tenant_id","idempotency_key",name="uq_middleware_command_tenant_idempotency"),)
+    __tablename__="middleware_command_operations";command_id:Mapped[str]=mapped_column(String,primary_key=True);tenant_id:Mapped[str]=mapped_column(String,index=True);command:Mapped[str]=mapped_column(String,index=True);idempotency_key:Mapped[str]=mapped_column(String,index=True);correlation_id:Mapped[str]=mapped_column(String,index=True);state:Mapped[str]=mapped_column(String,default="accepted",index=True);request_hash:Mapped[str]=mapped_column(String);request_json:Mapped[str]=mapped_column(Text,default="{}");result_json:Mapped[str]=mapped_column(Text,default="{}");error:Mapped[Optional[str]]=mapped_column(String,nullable=True);created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc));updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc));__table_args__=(UniqueConstraint("tenant_id","idempotency_key",name="uq_middleware_command_tenant_idempotency"),)
 class ProductionCanaryGate(Base):
     __tablename__="production_canary_gate"; gate_key:Mapped[str]=mapped_column(String,primary_key=True); reserved_deliveries:Mapped[int]=mapped_column(Integer,default=0); claimed_deliveries:Mapped[int]=mapped_column(Integer,default=0); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class WebhookEndpoint(Base):
@@ -179,7 +197,8 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
         if resolver:
             if any(name.lower() in {"x-codestra-tenant-id","x-codestra-identity-id","x-codestra-tenant","x-codestra-subject"} for name in request.headers):raise HTTPException(403,"not_found")
             if request.url.path=="/v1/commands":permission="klyrow.middleware.command.write"
-            elif request.url.path.startswith("/v1/operations/"):permission="klyrow.middleware.operation.read"
+            elif request.url.path=="/v1/integrations/results":permission="klyrow.integration.result.write"
+            elif request.url.path.startswith("/v1/operations/"):permission="klyrow.middleware.operation.read" if request.method in {"GET","HEAD","OPTIONS"} else "klyrow.middleware.operation.write"
             else:permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send" if request.method not in {"GET","HEAD","OPTIONS"} else "klyrow.read"
             headers={"Authorization":"Bearer "+raw,"X-Codestra-Required-Permission":permission}
             if requested_tenant:headers["X-Klyrow-Tenant-Id"]=requested_tenant
@@ -195,7 +214,7 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
             except (TypeError,ValueError):raise HTTPException(503,"authorization_unavailable")
             if not resolved.get("authorized") or resolved.get("permission")!=permission:raise HTTPException(403,"not_found")
             if not resolved.get("identity_id") or not resolved.get("tenant_id"):raise HTTPException(503,"authorization_unavailable")
-            ctx={"sub":resolved["identity_id"],"tenant":resolved["tenant_id"],"role":resolved.get("role","tenant_user"),"service":True,"permissions":[permission]}
+            ctx={"sub":resolved["identity_id"],"tenant":resolved["tenant_id"],"role":resolved.get("role","tenant_user"),"identity_type":resolved.get("identity_type"),"service":True,"permissions":[permission]}
             tenant=s.get(Tenant,ctx["tenant"])
             if not tenant or not tenant.enabled:raise HTTPException(403,"tenant_suspended")
         else:
@@ -353,12 +372,19 @@ class Reset(BaseModel): token:str; password:str=Field(min_length=14)
 class KeyIn(BaseModel): name:str=Field(min_length=1,max_length=80)
 class DomainIn(BaseModel): domain:str=Field(pattern=r"^[a-z0-9][a-z0-9.-]+$")
 class MailIn(BaseModel):
-    customer_id:Optional[str]=None; to:EmailStr; sender:EmailStr; reply_to:Optional[EmailStr]=None; subject:str=Field(max_length=998); html:str=Field(max_length=100000); text:Optional[str]=None; template_id:Optional[str]=None; campaign_id:Optional[str]=None; tags:list[str]=Field(default_factory=list,max_length=50); tracking:dict=Field(default_factory=dict); callback_metadata:dict=Field(default_factory=dict); stream:str=Field(default="transactional",pattern="^(marketing|transactional|security|system|bulk)$"); topic:str="marketing"
+    customer_id:Optional[str]=None; to:EmailStr; sender:EmailStr; reply_to:Optional[EmailStr]=None; subject:str=Field(max_length=998); html:str=Field(max_length=100000); text:Optional[str]=None; template_id:Optional[str]=None; campaign_id:Optional[str]=None; tags:list[str]=Field(default_factory=list,max_length=50); tracking:dict=Field(default_factory=dict); callback_metadata:dict=Field(default_factory=dict); headers:dict[str,str]=Field(default_factory=dict); stream:str=Field(default="transactional",pattern="^(marketing|transactional|security|system|bulk)$"); topic:str="marketing"
     @model_validator(mode="before")
     @classmethod
     def accept_from_alias(cls,data):
         if isinstance(data,dict) and "sender" not in data and "from" in data:data={**data,"sender":data["from"]}
         return data
+    @field_validator("headers")
+    @classmethod
+    def validate_governed_headers(cls,value):
+        allowed={"Message-ID","In-Reply-To","References"}
+        if not set(value)<=allowed:raise ValueError("unsupported_mail_header")
+        if any(not item or len(item)>4096 or "\r" in item or "\n" in item for item in value.values()):raise ValueError("invalid_mail_header")
+        return value
 class BulkMailIn(BaseModel): messages:list[MailIn]=Field(min_length=1,max_length=100)
 class ContactIn(BaseModel): email:EmailStr; name:Optional[str]=Field(default=None,max_length=200); subscribed:bool=True; metadata:dict={}
 class CampaignIn(BaseModel): name:str=Field(min_length=1,max_length=200); subject:Optional[str]=Field(default=None,max_length=998)
@@ -371,10 +397,13 @@ class MiddlewareCommandIn(BaseModel):
 async def emit_middleware(event_type:str,payload:dict)->bool:
     base=os.getenv("KLYROW_MIDDLEWARE_URL","").rstrip("/"); key=runtime_secret("KLYROW_MIDDLEWARE_API_KEY"); secret=runtime_secret("KLYROW_WEBHOOK_SECRET")
     if not base or not key or not secret:return False
+    source_payload=dict(payload)
+    source_payload_hash=str(source_payload.get("payload_hash") or hashlib.sha256(json.dumps(source_payload,separators=(",",":"),sort_keys=True,default=str).encode()).hexdigest())
     event_id=payload.get("event_id") or str(uuid.uuid4())
     if event_type.startswith(("klyrow.email.", "klyrow.message.")):
-        payload={"event_id":event_id,"source_system":"klyrow","event_type":event_type,"event_version":str(payload.get("event_version") or "1.0"),
+        payload={"event_id":event_id,"schema_version":str(payload.get("schema_version") or payload.get("event_version") or "1.0"),"source_system":"klyrow","event_type":event_type,"event_version":str(payload.get("event_version") or "1.0"),
             "occurred_at":str(payload.get("occurred_at") or datetime.now(timezone.utc).isoformat()),"tenant_id":str(payload.get("tenant_id") or payload.get("customer_id") or ""),
+            "operation_id":str(payload.get("operation_id") or payload.get("message_id") or event_id),"payload_hash":source_payload_hash,
             "message_id":str(payload.get("message_id") or ""),"provider_message_id":str(payload.get("provider_message_id") or payload.get("message_id") or ""),
             "stream":str(payload.get("stream") or "transactional"),"recipient_reference":str(payload.get("recipient_reference") or "sha256:"+hashlib.sha256(str(payload.get("recipient") or "").lower().encode()).hexdigest()),
             "status":str(payload.get("canonical_status") or payload.get("status") or event_type.rsplit(".",1)[-1]),"provider":str(payload.get("provider") or "postal"),
@@ -462,6 +491,10 @@ def persist_email_event(s:Session, *, event_id:str, tenant_id:str, message_id:st
             "bounced":"BOUNCED_HARD","complained":"COMPLAINED","failed":"FAILED"}.get(canonical_status,canonical_status.upper())
         if provider_status in {"SENT","DELIVERED","BOUNCED_SOFT","BOUNCED_HARD","COMPLAINED","FAILED","DEFERRED"}:
             provider_message.status=provider_status;provider_message.updated_at=datetime.now(timezone.utc)
+    # Keep the browser webmail projection synchronized with the same signed,
+    # tenant-attributed provider lifecycle event as the core message.
+    from .webmail import update_outbound_status
+    update_outbound_status(s, tenant_id, message_id, canonical_status)
     if not s.get(Event,event_id):
         s.add(Event(id=event_id,tenant_id=tenant_id,message_id=local_message.id if local_message else message_id,kind="klyrow."+event_type,payload=payload))
         s.add(Audit(id=str(uuid.uuid4()),tenant_id=tenant_id,actor="provider:postal",action="email.status."+canonical_status))
@@ -527,6 +560,10 @@ def startup():
         if not required:raise RuntimeError("production requires KLYROW_REQUIRED_SCHEMA_VERSION")
         with engine.connect() as connection:
             present=connection.execute(text("SELECT count(*) FROM klyrow_schema_migrations WHERE version=:version"),{"version":required}).scalar_one()
+            if os.getenv("KLYROW_REQUIRE_LEAST_PRIVILEGE_DB","true").lower()=="true":
+                role, *privileges=connection.execute(text("SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, rolreplication, rolbypassrls FROM pg_roles WHERE rolname=current_user")).one()
+                if role!=os.getenv("KLYROW_DATABASE_RUNTIME_ROLE","klyrow_runtime"):raise RuntimeError("unexpected runtime database role")
+                if any(bool(value) for value in privileges):raise RuntimeError("runtime database role has cluster-level privileges")
         if present!=1:raise RuntimeError("required database migration is not applied")
     else:
         Base.metadata.create_all(engine)
@@ -598,13 +635,14 @@ async def email_outbox_loop():
                     item.state="quarantined";item.last_error="production_canary_policy_denied";item.updated_at=current
                     message=s.get(Message,item.message_id)
                     if message:set_core_message_status(message,"suppressed")
+                    queue_email_lifecycle_event(s,kind="email.rejected",tenant_id=item.tenant_id,message_id=item.message_id,operation_id=item.operation_id or item.message_id,correlation_id=item.correlation_id or item.message_id,provider_message_id=item.provider_message_id,recipient=message.recipient if message else None,attempt=max(1,item.attempts or 1))
                     s.commit();continue
                 if first_attempt:
                     if gate:gate.claimed_deliveries+=1;gate.updated_at=current
                 item.state="sending";item.attempts+=1;item.next_attempt_at=None;item.updated_at=current
                 message=s.get(Message,item.message_id)
                 if message:set_core_message_status(message,"submitted")
-                snapshot=(item.id,item.message_id,item.payload);s.commit()
+                snapshot=(item.id,item.message_id,item.payload,item.operation_id,item.correlation_id,item.tenant_id);s.commit()
             key_file=os.getenv("KLYROW_POSTAL_API_KEY_FILE","")
             key=Path(key_file).read_text(encoding="utf-8").strip() if key_file else ""
             if not key:raise RuntimeError("postal credential unavailable")
@@ -617,6 +655,7 @@ async def email_outbox_loop():
                 item=s.get(EmailOutbox,snapshot[0]);message=s.get(Message,snapshot[1])
                 if item:item.state="delivered";item.provider_message_id=provider_id;item.last_error=None;item.updated_at=datetime.now(timezone.utc)
                 if message:set_core_message_status(message,"provider_accepted")
+                if item:queue_email_lifecycle_event(s,kind="email.submitted",tenant_id=item.tenant_id,message_id=item.message_id,operation_id=item.operation_id or item.message_id,correlation_id=item.correlation_id or item.message_id,provider_message_id=provider_id,recipient=message.recipient if message else None,attempt=max(1,item.attempts))
                 s.commit()
         except Exception as exc:
             with DB() as s:
@@ -628,6 +667,7 @@ async def email_outbox_loop():
                             item.state=INDETERMINATE;item.last_error=type(exc).__name__;item.updated_at=datetime.now(timezone.utc);item.next_attempt_at=None
                             message=s.get(Message,item.message_id)
                             if message:set_core_message_status(message,"indeterminate")
+                            queue_email_lifecycle_event(s,kind="email.unknown_outcome",tenant_id=item.tenant_id,message_id=item.message_id,operation_id=item.operation_id or item.message_id,correlation_id=item.correlation_id or item.message_id,provider_message_id=item.provider_message_id,recipient=message.recipient if message else None,attempt=max(1,item.attempts))
                         else:
                             failed=item.attempts>=5;item.state="failed" if failed else "retry";item.last_error=type(exc).__name__;item.updated_at=datetime.now(timezone.utc);item.next_attempt_at=None if failed else item.updated_at+timedelta(seconds=min(300,2**max(item.attempts,1)))
                             message=s.get(Message,item.message_id)
@@ -635,6 +675,7 @@ async def email_outbox_loop():
                             if failed:
                                 if message:set_core_message_status(message,"failed")
                                 s.add(Event(id=str(uuid.uuid4()),tenant_id=item.tenant_id,message_id=item.message_id,kind="klyrow.email.failed",payload=json.dumps({"reason":"provider_retry_exhausted"})))
+                                queue_email_lifecycle_event(s,kind="email.failed",tenant_id=item.tenant_id,message_id=item.message_id,operation_id=item.operation_id or item.message_id,correlation_id=item.correlation_id or item.message_id,provider_message_id=item.provider_message_id,recipient=message.recipient if message else None,attempt=max(1,item.attempts))
                         s.commit()
             print(json.dumps({"level":"warning","system":"klyrow","event":"email_outbox_delivery_failed","error":type(exc).__name__}))
 
@@ -656,10 +697,41 @@ async def headers(request, call_next):
 def health(s:Session=Depends(db)):
     s.execute(select(1));active=s.scalar(select(func.count()).select_from(EmailOutbox).where(EmailOutbox.state.in_(("pending","sending","retry"))))
     return {"status":"ok","safe_mode":SAFE_MODE,"production_gate_approved":os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()=="true","production_gate_open":production_gate_open(s),"database":"healthy","outbox":"healthy","outbox_active":active}
+@app.get("/health")
+def health_alias(s:Session=Depends(db)):
+    """Stable orchestrator health alias with no credential or recipient data."""
+    return health(s)
 @app.get("/healthz")
 def healthz(s:Session=Depends(db)):s.execute(select(1));return {"status":"ok"}
 @app.get("/readyz")
 def readyz(s:Session=Depends(db)):s.execute(select(1));return {"status":"ready","safe_mode":SAFE_MODE}
+@app.get("/readiness")
+def readiness_alias(s:Session=Depends(db)):
+    result=readyz(s)
+    result.update({
+        "postal_configured":bool(os.getenv("KLYROW_POSTAL_API_URL") and os.getenv("KLYROW_POSTAL_API_KEY_FILE")),
+        "source_revision_configured":os.getenv("KLYROW_RELEASE_SHA","unknown")!="unknown",
+    })
+    return result
+@app.get("/dependencies")
+def dependencies(s:Session=Depends(db)):
+    s.execute(select(1))
+    return {
+        "status":"ok",
+        "database":"configured",
+        "postal_api":"configured" if os.getenv("KLYROW_POSTAL_API_URL") and os.getenv("KLYROW_POSTAL_API_KEY_FILE") else "unconfigured",
+        "middleware_callback":"configured" if os.getenv("KLYROW_MIDDLEWARE_CALLBACK_URL") else "unconfigured",
+        "secrets":"file_only" if os.getenv("KLYROW_ENV","development").lower()=="production" else "development",
+    }
+@app.get("/capabilities")
+def capabilities():
+    return {
+        "service":"klyrow-gateway",
+        "commands":sorted(MIDDLEWARE_ALLOWED_COMMANDS),
+        "events":sorted({value for value in SMTP_EVENT_MAP.values()}),
+        "external_delivery_enabled":not SAFE_MODE and os.getenv("LIVE_EMAIL_DELIVERY","false").lower()=="true",
+        "provider":"postal",
+    }
 @app.get("/version")
 def version():
     return {
@@ -777,6 +849,27 @@ async def beyvra_send(x:MailIn,ctx=Depends(beyvra_service_auth),s:Session=Depend
     if x.sender.lower() not in allowed:raise HTTPException(403,"sender_spoofing_denied")
     return await _send(x,ctx,s,idempotency_key)
 
+def queue_email_lifecycle_event(s:Session, *, kind:str, tenant_id:str, message_id:str,
+                                operation_id:str, correlation_id:str,
+                                provider_message_id:Optional[str]=None,
+                                recipient:Optional[str]=None, attempt:int=1)->str:
+    """Persist one sanitized Middleware callback event before async delivery."""
+    from .provider import ProviderEvent
+    event_id=str(uuid.uuid5(uuid.NAMESPACE_URL,f"klyrow:{kind}:{message_id}:{attempt}"))
+    if s.get(ProviderEvent,event_id):return event_id
+    occurred_at=datetime.now(timezone.utc).isoformat()
+    payload={"event_id":event_id,"schema_version":"1.0","tenant_id":tenant_id,
+        "operation_id":operation_id,"correlation_id":correlation_id,
+        "provider_message_id":provider_message_id or message_id,"message_id":message_id,
+        "event_type":kind,"occurred_at":occurred_at,"status":kind.rsplit(".",1)[-1],
+        "provider":"postal","attempt":attempt,
+        "recipient_reference":"sha256:"+hashlib.sha256((recipient or "").lower().encode()).hexdigest()}
+    payload["payload_hash"]=hashlib.sha256(json.dumps(payload,separators=(",",":"),sort_keys=True).encode()).hexdigest()
+    s.add(ProviderEvent(id=event_id,tenant_id=tenant_id,message_id=message_id,kind=kind,
+        payload_json=json.dumps(payload,separators=(",",":"),sort_keys=True)))
+    return event_id
+
+
 async def _send(x:MailIn,ctx,s,idempotency_key):
     if not idempotency_key: raise HTTPException(400,"idempotency_key_required")
     request_hash=sha(x.model_dump_json())
@@ -806,14 +899,18 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
     from .guards import billing_identity
     subscription_id,price_id=billing_identity(s,ctx["tenant"],sandbox=SAFE_MODE)
     mid=str(uuid.uuid4()); status="accepted" if SAFE_MODE else "queued"
-    result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=authorization["recipient"],sender=authorization["sender"],subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.queued",payload=json.dumps({"stream":x.stream}))); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],subscription_id=subscription_id,message_id=mid,event_key="accepted:api:"+idempotency_key,unit="accepted_message",quantity=1,price_id=price_id))
+    operation_id=str(x.callback_metadata.get("operation_id") or mid);correlation_id=str(x.callback_metadata.get("correlation_id") or mid)
+    result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=authorization["recipient"],sender=authorization["sender"],subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.accepted",payload=json.dumps({"stream":x.stream})));queue_email_lifecycle_event(s,kind="email.accepted",tenant_id=ctx["tenant"],message_id=mid,operation_id=operation_id,correlation_id=correlation_id,recipient=x.to.lower());s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],subscription_id=subscription_id,message_id=mid,event_key="accepted:api:"+idempotency_key,unit="accepted_message",quantity=1,price_id=price_id))
     if not SAFE_MODE:
         from .preferences import one_click_unsubscribe_headers
         delivery_payload={"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text,"campaign_id":x.campaign_id,"stream":x.stream}
-        if x.stream=="marketing":delivery_payload["headers"]=one_click_unsubscribe_headers(ctx["tenant"],str(x.to))
+        delivery_headers=dict(x.headers)
+        if x.stream=="marketing":delivery_headers.update(one_click_unsubscribe_headers(ctx["tenant"],str(x.to)))
+        if delivery_headers:delivery_payload["headers"]=delivery_headers
         from .guards import stream_priority
-        s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,payload=json.dumps(delivery_payload,separators=(",",":"),sort_keys=True),priority=stream_priority(x.stream)))
-    s.commit(); MAIL.labels("queued").inc(); await emit_middleware("klyrow.email.queued",{"customer_id":ctx["tenant"],"message_id":mid,"recipient":x.to.lower(),"sender":x.sender.lower(),"status":status,"provider":"postal","metadata":{"stream":x.stream}}); return result
+        s.add(EmailOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,operation_id=operation_id,correlation_id=correlation_id,payload=json.dumps(delivery_payload,separators=(",",":"),sort_keys=True),priority=stream_priority(x.stream)))
+        queue_email_lifecycle_event(s,kind="email.queued",tenant_id=ctx["tenant"],message_id=mid,operation_id=operation_id,correlation_id=correlation_id,recipient=x.to.lower())
+    s.commit(); MAIL.labels("queued").inc(); return result
 
 def command_payload(x:MiddlewareCommandIn)->dict:
     payload=dict(x.payload or {})
@@ -826,8 +923,119 @@ def command_request_hash(x:MiddlewareCommandIn)->str:
 def command_response(item:MiddlewareCommandOperation)->dict:
     return {"command_id":item.command_id,"tenant_id":item.tenant_id,"command":item.command,"state":item.state,"correlation_id":item.correlation_id,"result":json.loads(item.result_json or "{}"),"error":item.error}
 
+def reconcile_email_command_operation(item:MiddlewareCommandOperation,s:Session)->MiddlewareCommandOperation:
+    """Project the durable message/outbox outcome onto command read-back."""
+    if item.command!="email.message.send.v1":return item
+    try:message_id=str(json.loads(item.result_json or "{}").get("id") or "")
+    except (TypeError,ValueError):message_id=""
+    if not message_id:return item
+    message=s.scalar(select(Message).where(Message.id==message_id,Message.tenant_id==item.tenant_id))
+    outbox=s.scalar(select(EmailOutbox).where(EmailOutbox.message_id==message_id,EmailOutbox.tenant_id==item.tenant_id))
+    message_state=str(message.status if message else "").lower()
+    outbox_state=str(outbox.state if outbox else "").lower()
+    state={
+        "accepted":"accepted","queued":"queued","submitted":"submitted",
+        "provider_accepted":"submitted","delivered":"delivered","deferred":"deferred",
+        "bounced":"bounced","complained":"complained","suppressed":"rejected",
+        "failed":"failed","cancelled":"cancelled","indeterminate":"unknown_outcome",
+    }.get(message_state,item.state)
+    if outbox_state=="sending":state="processing"
+    elif outbox_state=="indeterminate":state="unknown_outcome"
+    elif outbox_state=="failed" and state not in {"delivered","bounced","complained","cancelled"}:state="failed"
+    elif outbox_state=="cancelled":state="cancelled"
+    if item.state!=state:
+        item.state=state;item.updated_at=datetime.now(timezone.utc);s.commit()
+    return item
+
 def ensure_command_tenant(ctx:dict,tenant_id:str):
     if not tenant_id or tenant_id!=ctx["tenant"]:raise HTTPException(403,"tenant_mismatch")
+
+async def execute_middleware_command(command_id:str, *, raise_errors:bool=False)->dict:
+    """Claim and execute one durably recorded Middleware command exactly once."""
+    with DB() as s:
+        item=s.scalar(select(MiddlewareCommandOperation).where(
+            MiddlewareCommandOperation.command_id==command_id,
+        ).with_for_update())
+        if not item:raise RuntimeError("middleware_command_missing")
+        if item.state!="accepted":return command_response(reconcile_email_command_operation(item,s))
+        item.state="processing";item.updated_at=datetime.now(timezone.utc);s.commit()
+        tenant_id=item.tenant_id;command=item.command;idempotency_key=item.idempotency_key
+        correlation_id=item.correlation_id
+        try:
+            recorded=json.loads(item.request_json or "{}")
+            payload=recorded["payload"]
+            if not isinstance(payload,dict):raise ValueError("invalid payload")
+        except (KeyError,TypeError,ValueError):
+            item.state="failed";item.error="invalid_command_payload";item.updated_at=datetime.now(timezone.utc);s.commit()
+            if raise_errors:raise HTTPException(422,"invalid_command_payload")
+            return command_response(item)
+        ctx={"tenant":tenant_id,"sub":"middleware-service","service":True,
+            "scopes":{"klyrow.middleware.command.write"}}
+        try:
+            if command=="email.message.send.v1":
+                mail=MailIn(**payload);mail.callback_metadata={**mail.callback_metadata,
+                    "operation_id":item.command_id,"correlation_id":correlation_id}
+                result=await _send(mail,ctx,s,idempotency_key);item.state="queued";item.result_json=json.dumps(result,separators=(",",":"),sort_keys=True)
+            elif command=="email.message.cancel.v1":
+                message_id=str(payload.get("message_id") or "");message=s.scalar(select(Message).where(Message.id==message_id,Message.tenant_id==tenant_id).with_for_update())
+                if not message:raise HTTPException(404,"not_found")
+                outbox=s.scalar(select(EmailOutbox).where(EmailOutbox.message_id==message.id,EmailOutbox.tenant_id==tenant_id).with_for_update())
+                if message.status=="cancelled" and (not outbox or outbox.state=="cancelled"):
+                    item.state="cancelled";item.result_json=json.dumps({"message_id":message.id,"status":"cancelled","outbox_state":outbox.state if outbox else None})
+                else:
+                    if message.status in {"delivered","bounced","complained","failed"}:raise HTTPException(409,"terminal_message_cannot_cancel")
+                    if outbox and outbox.state not in {"pending","retry"}:raise HTTPException(409,"provider_submission_requires_reconciliation")
+                    if not outbox and message.status!="accepted":raise HTTPException(409,"message_not_cancellable")
+                    if outbox:outbox.state="cancelled";outbox.last_error="cancelled_by_middleware_command";outbox.updated_at=datetime.now(timezone.utc)
+                    set_core_message_status(message,"cancelled");item.state="cancelled";item.result_json=json.dumps({"message_id":message.id,"status":"cancelled","outbox_state":outbox.state if outbox else None});queue_email_lifecycle_event(s,kind="email.cancelled",tenant_id=tenant_id,message_id=message.id,operation_id=item.command_id,correlation_id=correlation_id,provider_message_id=outbox.provider_message_id if outbox else None,recipient=message.recipient)
+            elif command=="email.domain.verify.v1":
+                domain_id=str(payload.get("domain_id") or "");domain=s.scalar(select(Domain).where(Domain.id==domain_id,Domain.tenant_id==tenant_id))
+                if not domain:raise HTTPException(404,"not_found")
+                domain_verify(domain.id,ctx,s);item.state="completed";item.result_json=json.dumps({"domain_id":domain.id,"verified":domain.verified})
+            elif command=="email.suppression.upsert.v1":
+                email=str(payload.get("email") or payload.get("recipient") or "").lower();reason=str(payload.get("reason") or "policy")[:100]
+                if not email or "@" not in email:raise HTTPException(422,"email_required")
+                suppression=s.scalar(select(Suppression).where(Suppression.tenant_id==tenant_id,Suppression.email==email)) or Suppression(id=str(uuid.uuid4()),tenant_id=tenant_id,email=email,reason=reason)
+                suppression.reason=reason;s.add(suppression);item.state="completed";item.result_json=json.dumps({"email":email,"reason":reason})
+            elif command=="email.reputation.snapshot.request.v1":
+                item.state="completed";item.result_json=json.dumps({"status":"accepted","safe_mode":SAFE_MODE})
+            else:raise HTTPException(422,"unsupported_command")
+            item.error=None;item.updated_at=datetime.now(timezone.utc);s.commit();return command_response(item)
+        except HTTPException as exc:
+            item.state="failed";item.error=str(exc.detail);item.updated_at=datetime.now(timezone.utc);s.commit()
+            if raise_errors:raise
+            return command_response(item)
+        except ValidationError:
+            item.state="failed";item.error="invalid_command_payload";item.updated_at=datetime.now(timezone.utc);s.commit()
+            if raise_errors:raise HTTPException(422,"invalid_command_payload")
+            return command_response(item)
+        except Exception:
+            s.rollback()
+            failed=s.get(MiddlewareCommandOperation,command_id)
+            if failed and failed.state=="processing":
+                failed.state="accepted";failed.error="command_execution_interrupted";failed.updated_at=datetime.now(timezone.utc);s.commit()
+            if raise_errors:raise
+            return command_response(failed) if failed else {"command_id":command_id,"state":"accepted"}
+
+
+async def recover_middleware_commands(limit:int=20)->int:
+    """Reclaim interrupted commands; provider send replay remains idempotent."""
+    cutoff=datetime.now(timezone.utc)-timedelta(minutes=5)
+    with DB() as s:
+        stale=list(s.scalars(select(MiddlewareCommandOperation).where(
+            MiddlewareCommandOperation.state=="processing",
+            MiddlewareCommandOperation.updated_at<cutoff,
+        ).with_for_update(skip_locked=True).limit(limit)).all())
+        for item in stale:
+            item.state="accepted";item.error="command_execution_lease_expired";item.updated_at=datetime.now(timezone.utc)
+        s.commit()
+        command_ids=list(s.scalars(select(MiddlewareCommandOperation.command_id).where(
+            MiddlewareCommandOperation.state=="accepted",
+        ).order_by(MiddlewareCommandOperation.created_at).limit(limit)).all())
+    for pending_id in command_ids:
+        await execute_middleware_command(pending_id)
+    return len(command_ids)
+
 
 @app.post("/v1/commands",status_code=202)
 async def middleware_command(x:MiddlewareCommandIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:str=Header(alias="Idempotency-Key",min_length=8,max_length=200),x_tenant_id:str=Header(alias="X-Tenant-ID",min_length=1,max_length=120),x_correlation_id:str=Header(alias="X-Correlation-ID",min_length=8,max_length=200)):
@@ -840,44 +1048,27 @@ async def middleware_command(x:MiddlewareCommandIn,ctx=Depends(auth),s:Session=D
     if prior:
         if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
         return command_response(prior)
-    item=MiddlewareCommandOperation(command_id=str(uuid.uuid4()),tenant_id=ctx["tenant"],command=x.command,idempotency_key=idempotency_key,correlation_id=x_correlation_id,request_hash=request_hash,state="accepted")
-    s.add(item);s.commit()
-    try:
-        payload=command_payload(x)
-        if x.command=="email.message.send.v1":
-            result=await _send(MailIn(**payload),ctx,s,idempotency_key);item.state="queued";item.result_json=json.dumps(result,separators=(",",":"),sort_keys=True)
-        elif x.command=="email.message.cancel.v1":
-            message_id=str(payload.get("message_id") or "");message=s.scalar(select(Message).where(Message.id==message_id,Message.tenant_id==ctx["tenant"]).with_for_update())
-            if not message:raise HTTPException(404,"not_found")
-            if message.status in {"cancelled","delivered","bounced","complained","failed"}:raise HTTPException(409,"terminal_message_cannot_cancel")
-            outbox=s.scalar(select(EmailOutbox).where(EmailOutbox.message_id==message.id,EmailOutbox.tenant_id==ctx["tenant"]).with_for_update())
-            if outbox and outbox.state not in {"pending","retry"}:raise HTTPException(409,"provider_submission_requires_reconciliation")
-            if not outbox and message.status!="accepted":raise HTTPException(409,"message_not_cancellable")
-            if outbox:outbox.state="cancelled";outbox.last_error="cancelled_by_middleware_command";outbox.updated_at=datetime.now(timezone.utc)
-            set_core_message_status(message,"cancelled");item.state="cancelled";item.result_json=json.dumps({"message_id":message.id,"status":"cancelled","outbox_state":outbox.state if outbox else None})
-        elif x.command=="email.domain.verify.v1":
-            domain_id=str(payload.get("domain_id") or "");domain=s.scalar(select(Domain).where(Domain.id==domain_id,Domain.tenant_id==ctx["tenant"]))
-            if not domain:raise HTTPException(404,"not_found")
-            domain_verify(domain.id,ctx,s);item.state="completed";item.result_json=json.dumps({"domain_id":domain.id,"verified":domain.verified})
-        elif x.command=="email.suppression.upsert.v1":
-            email=str(payload.get("email") or payload.get("recipient") or "").lower();reason=str(payload.get("reason") or "policy")[:100]
-            if not email or "@" not in email:raise HTTPException(422,"email_required")
-            suppression=s.scalar(select(Suppression).where(Suppression.tenant_id==ctx["tenant"],Suppression.email==email)) or Suppression(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],email=email,reason=reason)
-            suppression.reason=reason;s.add(suppression);item.state="completed";item.result_json=json.dumps({"email":email,"reason":reason})
-        elif x.command=="email.reputation.snapshot.request.v1":
-            item.state="completed";item.result_json=json.dumps({"status":"accepted","safe_mode":SAFE_MODE})
-        item.updated_at=datetime.now(timezone.utc);s.commit();return command_response(item)
-    except HTTPException as exc:
-        item.state="failed";item.error=str(exc.detail);item.updated_at=datetime.now(timezone.utc);s.commit();raise
-    except ValidationError:
-        item.state="failed";item.error="invalid_command_payload";item.updated_at=datetime.now(timezone.utc);s.commit();raise HTTPException(422,"invalid_command_payload")
+    item=MiddlewareCommandOperation(command_id=str(uuid.uuid4()),tenant_id=ctx["tenant"],command=x.command,idempotency_key=idempotency_key,correlation_id=x_correlation_id,request_hash=request_hash,request_json=json.dumps({"payload":command_payload(x),"target":x.target},separators=(",",":"),sort_keys=True),state="accepted")
+    s.add(item)
+    try:s.commit()
+    except IntegrityError:
+        s.rollback();prior=s.scalar(select(MiddlewareCommandOperation).where(MiddlewareCommandOperation.tenant_id==ctx["tenant"],MiddlewareCommandOperation.idempotency_key==idempotency_key))
+        if not prior:raise
+        if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
+        return command_response(reconcile_email_command_operation(prior,s))
+    return await execute_middleware_command(item.command_id,raise_errors=True)
 
 @app.get("/v1/operations/{command_id}")
 def middleware_operation(command_id:str,ctx=Depends(auth),s:Session=Depends(db),x_tenant_id:str=Header(alias="X-Tenant-ID",min_length=1,max_length=120)):
     ensure_command_tenant(ctx,x_tenant_id)
     item=s.scalar(select(MiddlewareCommandOperation).where(MiddlewareCommandOperation.command_id==command_id,MiddlewareCommandOperation.tenant_id==ctx["tenant"]))
-    if not item:raise HTTPException(404,"not_found")
-    return command_response(item)
+    if item:return command_response(reconcile_email_command_operation(item,s))
+    from .operations import IntegrationOutbox
+    from .production_api import _authorize_operation_read, _operation_json
+    integration=s.scalar(select(IntegrationOutbox).where(IntegrationOutbox.id==command_id,IntegrationOutbox.tenant_id==ctx["tenant"]))
+    if not integration:raise HTTPException(404,"not_found")
+    _authorize_operation_read(ctx,integration)
+    return _operation_json(integration,s)
 
 @app.post("/v1/email/bulk",status_code=202)
 async def bulk(x:BulkMailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
@@ -1013,12 +1204,15 @@ from .messaging import router as messaging_router
 app.include_router(messaging_router)
 from .operations import router as operations_router
 app.include_router(operations_router)
+from .production_api import router as production_api_router
+app.include_router(production_api_router)
 from .reseller import router as reseller_router
 app.include_router(reseller_router)
 from .delivery_controls import router as delivery_controls_router
 app.include_router(delivery_controls_router)
 from .preferences import router as preferences_router
 app.include_router(preferences_router)
+from . import webmail_models as _webmail_models
 from .provider import provider_worker_loop, reconcile_legacy_registry, router as provider_router, status_router as provider_status_router
 app.include_router(provider_router)
 app.include_router(provider_status_router)
@@ -1027,6 +1221,8 @@ app.include_router(provider_status_router)
 def reconcile_provider_registry_on_startup():
     with DB() as s:
         reconcile_legacy_registry(s)
+        from .webmail import sync_verified_mailboxes
+        sync_verified_mailboxes(s)
 
 @app.on_event("startup")
 async def start_provider_worker():

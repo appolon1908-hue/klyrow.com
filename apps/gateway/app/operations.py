@@ -6,6 +6,7 @@ from typing import Optional
 from fastapi import APIRouter,Depends,HTTPException
 from pydantic import BaseModel,Field
 from sqlalchemy import Boolean,DateTime,Integer,String,Text,UniqueConstraint,func,select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped,Session,mapped_column
 
 from .main import Audit,Base,EmailOutbox,Event,Message,PostalEvent,Tenant,audit,auth,db,require
@@ -14,9 +15,9 @@ from .messaging import DeliveryJob,WebhookAttempt
 router=APIRouter(prefix="/v1",tags=["Operations and integrations"]);now=lambda:datetime.now(timezone.utc)
 
 class IntegrationOutbox(Base):
-    __tablename__="integration_outbox";id:Mapped[str]=mapped_column(String,primary_key=True);tenant_id:Mapped[str]=mapped_column(String,index=True);target:Mapped[str]=mapped_column(String,index=True);event_type:Mapped[str]=mapped_column(String,index=True);aggregate_id:Mapped[str]=mapped_column(String,index=True);payload_json:Mapped[str]=mapped_column(Text);idempotency_key:Mapped[str]=mapped_column(String);state:Mapped[str]=mapped_column(String,default="PENDING",index=True);attempts:Mapped[int]=mapped_column(Integer,default=0);next_attempt_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True);created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);__table_args__=(UniqueConstraint("tenant_id","target","idempotency_key",name="uq_integration_outbox_key"),)
+    __tablename__="integration_outbox";id:Mapped[str]=mapped_column(String,primary_key=True);tenant_id:Mapped[str]=mapped_column(String,index=True);target:Mapped[str]=mapped_column(String,index=True);event_type:Mapped[str]=mapped_column(String,index=True);aggregate_id:Mapped[str]=mapped_column(String,index=True);payload_json:Mapped[str]=mapped_column(Text);idempotency_key:Mapped[str]=mapped_column(String);state:Mapped[str]=mapped_column(String,default="PENDING",index=True);attempts:Mapped[int]=mapped_column(Integer,default=0);next_attempt_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);lease_expires_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True);last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True);created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);__table_args__=(UniqueConstraint("tenant_id","target","idempotency_key",name="uq_integration_outbox_key"),)
 class IntegrationResult(Base):
-    __tablename__="integration_results";id:Mapped[str]=mapped_column(String,primary_key=True);tenant_id:Mapped[str]=mapped_column(String,index=True);outbox_id:Mapped[str]=mapped_column(String,index=True);source:Mapped[str]=mapped_column(String);result_key:Mapped[str]=mapped_column(String,unique=True);payload_json:Mapped[str]=mapped_column(Text);created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+    __tablename__="integration_results";id:Mapped[str]=mapped_column(String,primary_key=True);tenant_id:Mapped[str]=mapped_column(String,index=True);outbox_id:Mapped[str]=mapped_column(String,index=True);source:Mapped[str]=mapped_column(String);result_key:Mapped[str]=mapped_column(String);payload_json:Mapped[str]=mapped_column(Text);created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);__table_args__=(UniqueConstraint("tenant_id","source","result_key",name="uq_integration_result_source_key"),)
 class SupportTicket(Base):
     __tablename__="support_tickets";id:Mapped[str]=mapped_column(String,primary_key=True);tenant_id:Mapped[str]=mapped_column(String,index=True);created_by:Mapped[str]=mapped_column(String);category:Mapped[str]=mapped_column(String);subject:Mapped[str]=mapped_column(String);description:Mapped[str]=mapped_column(Text);status:Mapped[str]=mapped_column(String,default="OPEN");priority:Mapped[str]=mapped_column(String,default="NORMAL");odoo_reference:Mapped[Optional[str]]=mapped_column(String,nullable=True);created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class ExportJob(Base):
@@ -30,7 +31,7 @@ class ReconciliationRun(Base):
 
 class SupportIn(BaseModel):category:str=Field(pattern="^(technical|deliverability|billing|account|abuse|domain)$");subject:str=Field(min_length=3,max_length=200);description:str=Field(min_length=3,max_length=10000);priority:str=Field(default="NORMAL",pattern="^(LOW|NORMAL|HIGH|URGENT)$")
 class AutomationIn(BaseModel):event_type:str=Field(min_length=3,max_length=120);aggregate_id:str=Field(min_length=1,max_length=200);payload:dict=Field(default_factory=dict);idempotency_key:str=Field(min_length=8,max_length=200)
-class ResultIn(BaseModel):outbox_id:str;result_key:str=Field(min_length=8,max_length=200);payload:dict=Field(default_factory=dict)
+class ResultIn(BaseModel):outbox_id:str;source:str=Field(pattern="^(N8N|ODOO)$");result_key:str=Field(min_length=8,max_length=200);payload:dict=Field(default_factory=dict)
 class ExportIn(BaseModel):scopes:list[str]=Field(min_length=1,max_length=20)
 class ClosureIn(BaseModel):grace_days:int=Field(default=30,ge=7,le=365);retention_policy:str=Field(default="STANDARD",pattern="^(STANDARD|LEGAL_HOLD|MINIMAL)$")
 class ConfirmIn(BaseModel):confirmation:str
@@ -51,6 +52,20 @@ def enqueue(s,ctx,target,event_type,aggregate_id,payload,key):
     if prior:return prior,True
     item=IntegrationOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],target=target,event_type=event_type,aggregate_id=aggregate_id,payload_json=json.dumps(payload,separators=(",",":"),sort_keys=True),idempotency_key=key);s.add(item);return item,False
 
+def trusted_result_auth(ctx=Depends(auth)):
+    permissions=set(ctx.get("permissions") or [])|set(ctx.get("scopes") or [])
+    if ctx.get("sub")=="middleware-service":return ctx
+    if ctx.get("service") and str(ctx.get("identity_type") or "").upper() in {"SERVICE","SERVICE_ACCOUNT"} and "klyrow.integration.result.write" in permissions:return ctx
+    raise HTTPException(403,"trusted_integration_service_required")
+
+def integration_result_by_key(s:Session,tenant_id:str,source:str,result_key:str):
+    return s.scalar(select(IntegrationResult).where(IntegrationResult.tenant_id==tenant_id,IntegrationResult.source==source,IntegrationResult.result_key==result_key))
+
+def locked_integration_outbox(s:Session,item_id:str,tenant_id:Optional[str]=None):
+    query=select(IntegrationOutbox).where(IntegrationOutbox.id==item_id)
+    if tenant_id is not None:query=query.where(IntegrationOutbox.tenant_id==tenant_id)
+    return s.scalar(query.with_for_update())
+
 @router.post("/support/tickets",status_code=201)
 def support(x:SupportIn,ctx=Depends(auth),s:Session=Depends(db)):
     ticket=SupportTicket(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],created_by=ctx["sub"],category=x.category,subject=x.subject,description=x.description,priority=x.priority);s.add(ticket);outbox,_=enqueue(s,ctx,"ODOO","SupportTicketCreatedV1",ticket.id,{"ticket_id":ticket.id,"category":x.category,"subject":x.subject,"priority":x.priority},"support:"+ticket.id);audit(s,ctx,"support.ticket.created");s.commit();return {"id":ticket.id,"status":ticket.status,"odoo_sync":"QUEUED","outbox_id":outbox.id}
@@ -63,10 +78,25 @@ def automation(x:AutomationIn,ctx=Depends(auth),s:Session=Depends(db)):
 def billing_sync(x:AutomationIn,ctx=Depends(auth),s:Session=Depends(db)):
     item,duplicate=enqueue(s,ctx,"ODOO","KlyrowBillingSyncV1",x.aggregate_id,x.payload,x.idempotency_key);s.commit();return {"id":item.id,"state":item.state,"duplicate":duplicate,"direct_odoo_database_write":False}
 @router.post("/integrations/results",status_code=202)
-def result(x:ResultIn,ctx=Depends(auth),s:Session=Depends(db)):
-    outbox=owned(s,IntegrationOutbox,x.outbox_id,ctx["tenant"]);prior=s.scalar(select(IntegrationResult).where(IntegrationResult.result_key==x.result_key))
-    if prior:return {"id":prior.id,"duplicate":True}
-    item=IntegrationResult(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],outbox_id=outbox.id,source=outbox.target,result_key=x.result_key,payload_json=json.dumps(x.payload,sort_keys=True));outbox.state="COMPLETED";outbox.updated_at=now();s.add(item);s.commit();return {"id":item.id,"duplicate":False}
+def result(x:ResultIn,ctx=Depends(trusted_result_auth),s:Session=Depends(db)):
+    outbox=locked_integration_outbox(s,x.outbox_id,ctx["tenant"])
+    if not outbox:raise HTTPException(404,"not_found")
+    if outbox.target not in {"N8N","ODOO"} or x.source!=outbox.target:raise HTTPException(403,"integration_result_source_mismatch")
+    payload_json=json.dumps(x.payload,separators=(",",":"),sort_keys=True)
+    prior=integration_result_by_key(s,ctx["tenant"],x.source,x.result_key)
+    if prior:
+        if prior.outbox_id!=outbox.id or prior.payload_json!=payload_json:raise HTTPException(409,"integration_result_idempotency_conflict")
+        return {"id":prior.id,"duplicate":True}
+    if outbox.state not in {"PENDING","PROCESSING","RETRY"}:raise HTTPException(409,"integration_operation_not_resultable")
+    item=IntegrationResult(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],outbox_id=outbox.id,source=x.source,result_key=x.result_key,payload_json=payload_json);outbox.state="COMPLETED";outbox.lease_expires_at=None;outbox.last_error=None;outbox.updated_at=now();s.add(item);audit(s,ctx,"integration.result.accepted:"+x.source)
+    try:s.commit()
+    except IntegrityError:
+        s.rollback();prior=integration_result_by_key(s,ctx["tenant"],x.source,x.result_key)
+        if prior:
+            if prior.outbox_id!=x.outbox_id or prior.payload_json!=payload_json:raise HTTPException(409,"integration_result_idempotency_conflict")
+            return {"id":prior.id,"duplicate":True}
+        raise
+    return {"id":item.id,"duplicate":False}
 
 @router.post("/exports",status_code=202)
 def export(x:ExportIn,ctx=Depends(auth),s:Session=Depends(db)):
@@ -102,12 +132,12 @@ def replay_webhook(item_id:str,x:RecoverIn,ctx=Depends(require("platform_admin")
     item.state="PENDING";item.next_attempt_at=now();item.last_error=None;audit(s,{**ctx,"tenant":item.tenant_id},"webhook.replay_requested:"+x.reason);s.commit();return {"state":item.state,"attempts":item.attempts}
 @router.post("/admin/operations/integrations/{item_id}/fail")
 def fail_integration(item_id:str,x:RecoverIn,ctx=Depends(require("platform_admin")),s:Session=Depends(db)):
-    item=s.get(IntegrationOutbox,item_id)
-    if not item or item.state=="COMPLETED":raise HTTPException(404,"pending_integration_not_found")
+    item=locked_integration_outbox(s,item_id)
+    if not item or item.state not in {"PENDING","RETRY"}:raise HTTPException(404,"pending_integration_not_found")
     item.attempts+=1;item.last_error=x.reason;item.state="DEAD_LETTER" if item.attempts>=8 else "RETRY";item.next_attempt_at=now()+timedelta(seconds=min(900,2**item.attempts));item.updated_at=now();audit(s,{**ctx,"tenant":item.tenant_id},"integration.delivery_failed:"+item.target);s.commit();return {"state":item.state,"attempts":item.attempts,"target":item.target}
 @router.post("/admin/operations/integrations/{item_id}/recover")
 def recover_integration(item_id:str,x:RecoverIn,ctx=Depends(require("platform_admin")),s:Session=Depends(db)):
-    item=s.get(IntegrationOutbox,item_id)
+    item=locked_integration_outbox(s,item_id)
     if not item or item.state not in {"RETRY","DEAD_LETTER"}:raise HTTPException(404,"recoverable_integration_not_found")
     item.state="PENDING";item.next_attempt_at=now();item.last_error=None;item.updated_at=now();audit(s,{**ctx,"tenant":item.tenant_id},"integration.delivery_recovered:"+item.target+":"+x.reason);s.commit();return {"state":item.state,"attempts":item.attempts,"target":item.target}
 @router.post("/admin/reconciliation",status_code=201)

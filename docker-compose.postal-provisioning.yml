@@ -1,9 +1,12 @@
 services:
   gateway:
     environment:
-      KLYROW_REQUIRED_SCHEMA_VERSION: 2026090101_mail_contract_and_command_plane.sql
+      KLYROW_REQUIRED_SCHEMA_VERSION: 2026090208_runtime_database_least_privilege.sql
       KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED: "true"
       KLYROW_ALLOW_LEGACY_GLOBAL_POSTAL_KEY: "false"
+      KLYROW_PROVIDER_CREDENTIAL_KEY_FILE: /run/secrets/klyrow_provider_credential_key
+      KLYROW_POSTAL_PROVISIONER_TOKEN_FILE: /run/secrets/klyrow_postal_provisioner_token
+    secrets: [klyrow_provider_credential_key, klyrow_postal_provisioner_token]
 
   postal-provisioner:
     image: '${KLYROW_POSTAL_PROVISIONER_IMAGE:?set the exact protected Postal provisioner image by digest}'
@@ -32,13 +35,14 @@ services:
     environment:
       KLYROW_ENV: production
       KLYROW_WORKER_ROLE: provisioning
-      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
+      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow_runtime@postgres:5432/klyrow
+      KLYROW_DATABASE_PASSWORD_FILE: /run/secrets/klyrow_database_runtime_password
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
       KLYROW_PROVIDER_CREDENTIAL_KEY_FILE: /run/secrets/klyrow_provider_credential_key
       KLYROW_POSTAL_PROVISIONER_TOKEN_FILE: /run/secrets/klyrow_postal_provisioner_token
       KLYROW_POSTAL_PROVISIONER_URL: http://postal-provisioner:9090
     command: ["python", "-m", "app.service_worker"]
-    secrets: [klyrow_session_secret, klyrow_provider_credential_key, klyrow_postal_provisioner_token]
+    secrets: [klyrow_session_secret, klyrow_provider_credential_key, klyrow_postal_provisioner_token, klyrow_database_runtime_password]
     depends_on:
       postgres: {condition: service_healthy}
       gateway-migrate: {condition: service_completed_successfully}
@@ -49,6 +53,11 @@ services:
     tmpfs: [/tmp]
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/')"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
 
   worker:
     environment:
