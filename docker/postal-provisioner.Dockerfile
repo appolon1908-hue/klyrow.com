@@ -1,4 +1,9 @@
 FROM ghcr.io/postalserver/postal:3.3.7@sha256:e54b4a7eb106ee15eda5664311c4b9415546d4196f5c4336d23a78d6ce57b819
+ARG SOURCE_SHA
+ARG SOURCE_REPOSITORY=https://github.com/appolon1908-hue/klyrow.com
+LABEL org.opencontainers.image.source=$SOURCE_REPOSITORY \
+      org.opencontainers.image.revision=$SOURCE_SHA
+RUN test "$(printf '%s' "$SOURCE_SHA" | wc -c)" -eq 40
 USER root
 COPY docker/postal-security/debian.sources.list /etc/apt/sources.list
 RUN rm -f /etc/apt/sources.list.d/* \
