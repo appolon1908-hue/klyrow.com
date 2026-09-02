@@ -1,9 +1,37 @@
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 from apps.gateway.app import service_worker
 
 
 ROOT = Path(__file__).parents[1]
+
+
+def test_worker_module_is_importable_as_process_entrypoint():
+    env = os.environ.copy()
+    for name in (
+        "KLYROW_SESSION_SECRET_FILE",
+        "KLYROW_DATABASE_PASSWORD_FILE",
+        "KLYROW_REQUIRED_SCHEMA_VERSION",
+    ):
+        env.pop(name, None)
+    env.update(
+        KLYROW_ENV="test",
+        KLYROW_DATABASE_URL="sqlite://",
+        KLYROW_SESSION_SECRET="worker-entrypoint-test-secret-value-0000000000000000",
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", "import apps.gateway.app.service_worker"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_base_worker_preserves_legacy_delivery_without_complete_provisioning_stack(

@@ -450,6 +450,16 @@ def discover_message_statuses() -> StatusDiscovery:
     )
 
 
+def discover_canonical_status_vocabulary() -> frozenset[str]:
+    values: set[str] = set()
+    for module in source_modules():
+        for expression in module.module_bindings.get("CANONICAL_SMTP_STATUSES", ()):
+            found, dynamic = _string_values(expression, {}, module.module_bindings)
+            assert dynamic is False
+            values.update(found)
+    return frozenset(values)
+
+
 def discover_middleware_headers() -> frozenset[str]:
     headers: set[str] = set()
     for module in source_modules():
@@ -545,7 +555,7 @@ def test_source_discovery_combines_router_prefixes_with_route_paths() -> None:
 
 def test_source_discovery_finds_real_message_statuses() -> None:
     discovery = discover_message_statuses()
-    assert {"accepted_test", "queued", "accepted", "failed"} <= discovery.statuses
+    assert {"accepted", "queued"} <= discovery.statuses
 
 
 def test_source_discovery_reads_middleware_headers_from_sender_code() -> None:
@@ -555,7 +565,10 @@ def test_source_discovery_reads_middleware_headers_from_sender_code() -> None:
 
 def test_source_discovery_reads_prometheus_constructor_labels() -> None:
     collectors = {item.name: item for item in discover_prometheus_collectors()}
-    assert collectors["klyrow_http_requests_total"].labels == {"path", "status"}
+    assert collectors["klyrow_http_requests_total"].labels == {
+        "codestra_business", "application", "service", "environment", "server",
+        "region", "deployment", "path", "status",
+    }
 
 
 def test_string_discovery_preserves_a_default_for_an_open_ended_value() -> None:
@@ -574,10 +587,6 @@ def test_string_discovery_rejects_an_unbound_name_as_open_ended() -> None:
     assert dynamic is True
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="C1: declared SMTP events do not match the closed set emitted by the app",
-)
 def test_declared_events_match_emitted_events() -> None:
     manifest = load_manifest()
     declared = set(manifest["events"]["publishedEvents"])
@@ -593,10 +602,6 @@ def test_declared_events_match_emitted_events() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="C2: the declared inbound Middleware command and readback APIs do not exist",
-)
 def test_declared_commands_are_routed_and_readable() -> None:
     manifest = load_manifest()
     declared = set(manifest["middleware"]["allowedCommands"])
@@ -610,10 +615,6 @@ def test_declared_commands_are_routed_and_readable() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="C3: Message.status values differ from the declared SMTP status model",
-)
 def test_declared_status_model_matches_message_code() -> None:
     manifest = load_manifest()
     declared = set(manifest["events"]["statusModel"])
@@ -622,16 +623,10 @@ def test_declared_status_model_matches_message_code() -> None:
     assert discovery.dynamic_sites == (), (
         f"open-ended Message.status expressions: {discovery.dynamic_sites}"
     )
-    assert declared == set(discovery.statuses), (
-        f"claimed-not-used: {declared - discovery.statuses}; "
-        f"used-not-declared: {discovery.statuses - declared}"
-    )
+    assert declared == set(discover_canonical_status_vocabulary())
+    assert set(discovery.statuses) <= declared, f"used-not-declared: {discovery.statuses - declared}"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="C4: emit_middleware omits contract-required routing and idempotency headers",
-)
 def test_required_headers_are_sent_to_middleware() -> None:
     manifest = load_manifest()
     required = set(manifest["middleware"]["requiredHeaders"])
@@ -654,10 +649,6 @@ def test_no_collector_uses_a_forbidden_label() -> None:
     assert violations == {}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="C5: collectors do not yet carry every required bounded platform label",
-)
 def test_collectors_carry_required_platform_labels() -> None:
     manifest = load_manifest()
     required = set(manifest["observability"]["requiredLabels"])

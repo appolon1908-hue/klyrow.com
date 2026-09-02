@@ -1,6 +1,8 @@
 import base64
 import asyncio
+import json
 import os
+import time
 import pytest
 
 os.environ.update(
@@ -12,6 +14,8 @@ os.environ.update(
 )
 
 from fastapi.testclient import TestClient
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from apps.gateway.app.main import AllowedSender, Base, DB, Domain, InboundRouteConfig, Tenant, app, auth, engine
 from apps.gateway.app.provider import DkimKey, ProviderDomain, ProviderEvent, ProviderInbound, ProviderMessage, ProviderUsageEvent, SandboxCapture, SenderIdentity, SmtpCredential, dispatch_provider_outbox, now, recover_expired_leases
@@ -125,7 +129,9 @@ def inbound_payload(event="postal-event-0001", filename="invoice.pdf"):
            f"Message-ID: <{event}@example.net>\r\nSubject: Help\r\nMIME-Version: 1.0\r\n"
            f"Content-Type: application/octet-stream; name=\"{filename}\"\r\n"
            f"Content-Disposition: attachment; filename=\"{filename}\"\r\n\r\ndata\r\n").encode()
-    return {"provider_event_id": event, "envelope_to": "support@codestra.co", "raw_message_b64": base64.b64encode(raw).decode()}
+    return {"provider_event_id": event, "envelope_to": "support@codestra.co", "raw_message_b64": base64.b64encode(raw).decode(),
+        "spf_result": "PASS", "dkim_result": "PASS", "dmarc_result": "PASS",
+        "arc_result": "NONE", "dmarc_fail_action": "REJECT"}
 
 
 def test_inbound_exact_route_mime_idempotency_and_quarantine():
@@ -147,8 +153,83 @@ def test_inbound_exact_route_mime_idempotency_and_quarantine():
 
 def test_inbound_dangerous_filename_rejected():
     raw = b"From: x@example.net\r\nTo: support@codestra.co\r\nMessage-ID: <unsafe@example.net>\r\nContent-Disposition: attachment; filename=\"../x.exe\"\r\n\r\nx"
-    payload = {"provider_event_id": "postal-event-unsafe", "envelope_to": "support@codestra.co", "raw_message_b64": base64.b64encode(raw).decode()}
+    payload = {**inbound_payload("postal-event-unsafe"), "raw_message_b64": base64.b64encode(raw).decode()}
     assert client.post("/v1/internal/email/inbound/receive", json=payload).status_code == 422
+
+
+def test_inbound_authentication_verdict_is_required_and_dmarc_action_is_enforced():
+    incomplete = inbound_payload("postal-event-auth-missing")
+    incomplete.pop("dmarc_result")
+    assert client.post("/v1/internal/email/inbound/receive", json=incomplete).status_code == 422
+    rejected = {**inbound_payload("postal-event-auth-reject"), "dmarc_result": "FAIL", "dmarc_fail_action": "REJECT"}
+    response = client.post("/v1/internal/email/inbound/receive", json=rejected)
+    assert response.status_code == 202 and response.json()["disposition"] == "REJECT"
+    with DB() as session:
+        item = session.query(ProviderInbound).filter_by(provider_event_id="postal-event-auth-reject").one()
+        assert (item.auth_verdict, item.spf_result, item.dkim_result, item.dmarc_result, item.arc_result) == ("FAIL", "PASS", "PASS", "FAIL", "NONE")
+
+
+def test_postal_hash_inbound_requires_signature_timestamp_exact_route_and_replay_dedupe(tmp_path):
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_path = tmp_path / "postal-inbound-public.pem"
+    public_path.write_bytes(private_key.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ))
+    os.environ["KLYROW_POSTAL_WEBHOOK_PUBLIC_KEY"] = str(public_path)
+
+    def deliver(delivery_id: int, recipient: str, timestamp: float, *, signed: bool = True):
+        attachment = b"same-name-content"
+        payload = {
+            "id": delivery_id,
+            "rcpt_to": recipient,
+            "mail_from": "person@example.net",
+            "subject": "Signed inbound",
+            "message_id": f"<postal-hash-{delivery_id}@example.net>",
+            "timestamp": timestamp,
+            "size": 512,
+            "spam_status": "NotSpam",
+            "bounce": False,
+            "received_with_ssl": True,
+            "to": recipient,
+            "from": "Person <person@example.net>",
+            "plain_body": "authenticated transport",
+            "html_body": None,
+            "attachment_quantity": 1,
+            "attachments": [{
+                "filename": "evidence.txt",
+                "content_type": "text/plain",
+                "size": len(attachment),
+                "data": base64.encodebytes(attachment).decode(),
+            }],
+        }
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        headers = {"Content-Type": "application/json"}
+        if signed:
+            headers["X-Postal-Signature-256"] = base64.b64encode(private_key.sign(
+                body, padding.PKCS1v15(), hashes.SHA256(),
+            )).decode()
+        return client.post("/v1/webhooks/postal-inbound", content=body, headers=headers)
+
+    assert deliver(7001, "support@codestra.co", time.time(), signed=False).status_code == 401
+    assert deliver(7002, "support@codestra.co", time.time() - 86_401).status_code == 401
+    assert deliver(7003, "unknown@codestra.co", time.time()).status_code == 404
+    first = deliver(7004, "support@codestra.co", time.time())
+    assert first.status_code == 202
+    assert first.json()["disposition"] == "QUARANTINE"
+    assert first.json()["duplicate"] is False
+    replay = deliver(7004, "support@codestra.co", time.time())
+    # A different signed timestamp is a different body but the provider ID is
+    # still the durable idempotency authority for this exact route.
+    assert replay.status_code == 202 and replay.json()["duplicate"] is True
+    with DB() as session:
+        item = session.query(ProviderInbound).filter(
+            ProviderInbound.provider_event_id == "postal:route-support:7004"
+        ).one()
+        event = session.query(ProviderEvent).filter_by(message_id=item.id, kind="inbound.received").one()
+        normalized = json.loads(event.payload_json)
+        assert normalized["payload_hash"] and normalized["occurred_at"]
+        assert normalized["tenant_id"] == "tenant-a"
 
 
 def test_smtp_credential_once_rotation_revocation_and_tenant_isolation():
@@ -189,7 +270,7 @@ def test_worker_lease_recovery_and_dead_letter():
             status="PROCESSING", attempts=5, lease_expires_at=now()-timedelta(seconds=1), **base)
         session.add_all([retry, dead]);session.commit()
         assert recover_expired_leases(session) == 2
-        assert session.get(ProviderMessage, "lease-retry").status == "DEFERRED"
+        assert session.get(ProviderMessage, "lease-retry").status == "INDETERMINATE"
         assert session.get(ProviderMessage, "lease-dead").status == "DEAD_LETTER"
 
 
@@ -336,7 +417,7 @@ def test_smtp_rechecks_domain_stream_quota_and_suppression_at_submission():
             secret_hash="unused", allowed_senders_json='["sender@smtp-policy.example"]',
             allowed_streams_json='["TRANSACTIONAL"]', status="ACTIVE")
         session.add_all([domain, sender, credential, Suppression(id="smtp-policy-suppression", tenant_id="tenant-a",
-            email="blocked@example.net", reason="test")])
+            email="blocked@example.net", reason="policy")])
         session.commit()
     relay = GovernedRelay()
     smtp_session = type("SmtpSession", (), {"auth_data": "smtp-policy-credential"})()

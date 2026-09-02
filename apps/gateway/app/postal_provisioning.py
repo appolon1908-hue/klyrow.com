@@ -14,7 +14,7 @@ from typing import Optional
 import httpx
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import DateTime, Integer, String, Text, or_, select
+from sqlalchemy import DateTime, Integer, String, Text, UniqueConstraint, or_, select
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .auth_bff import BrowserSession, browser_context, csrf_guard
@@ -35,6 +35,7 @@ from .main import (
     canary_gate_key,
     canary_payload_allowed,
     db,
+    set_core_message_status,
 )
 from .tenancy_onboarding import resolve_identity_context
 
@@ -56,6 +57,29 @@ class PostalTenantMapping(Base):
     provider_mode: Mapped[str] = mapped_column(String, default="Development")
     api_key_ciphertext: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     api_key_fingerprint: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PostalDomainCredential(Base):
+    """Encrypted credential for the live Postal server owning one domain."""
+
+    __tablename__ = "postal_domain_credentials"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "domain", name="uq_postal_domain_credential_tenant_domain"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String, index=True)
+    domain: Mapped[str] = mapped_column(String, index=True)
+    state: Mapped[str] = mapped_column(String, default="PENDING", index=True)
+    provider_server_id: Mapped[str] = mapped_column(String)
+    provider_server_permalink: Mapped[str] = mapped_column(String)
+    provider_mode: Mapped[str] = mapped_column(String)
+    api_key_ciphertext: Mapped[str] = mapped_column(Text)
+    api_key_fingerprint: Mapped[str] = mapped_column(String)
     last_error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
@@ -168,6 +192,94 @@ async def _call_bridge(tenant: Tenant) -> dict:
     return result
 
 
+async def _call_live_domain_bridge(tenant_id: str, domains: list[str]) -> dict:
+    base = os.getenv(
+        "KLYROW_POSTAL_PROVISIONER_URL", "http://postal-provisioner:9090"
+    ).rstrip("/")
+    headers = {
+        "Authorization": "Bearer " + _bridge_token(),
+        "Content-Type": "application/json",
+    }
+    async with httpx.AsyncClient(
+        timeout=30, trust_env=False, follow_redirects=False
+    ) as client:
+        response = await client.post(
+            base + "/v1/reconcile-outbound",
+            headers=headers,
+            json={"tenant_id": tenant_id, "domains": sorted(set(domains))},
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+async def reconcile_live_domain_credentials(
+    s: Session, tenant_id: str, domains: list[str]
+) -> dict:
+    """Attest each live Postal owner and persist its credential encrypted."""
+
+    expected = sorted(set(domain.lower() for domain in domains))
+    result = await _call_live_domain_bridge(tenant_id, expected)
+    items = result.get("domains")
+    if not isinstance(items, list):
+        raise RuntimeError("postal outbound reconciliation returned invalid domains")
+    returned = sorted(
+        str(item.get("domain") or "").lower()
+        for item in items
+        if isinstance(item, dict)
+    )
+    if returned != expected:
+        raise RuntimeError("postal outbound reconciliation incomplete")
+    validated = []
+    for item in items:
+        domain = str(item.get("domain") or "").lower()
+        server_id = str(item.get("server_id") or "")
+        server_permalink = str(item.get("server_permalink") or server_id)
+        mode = str(item.get("mode") or "")
+        key = str(item.get("api_key") or "")
+        if (
+            not domain
+            or not server_id
+            or not server_permalink
+            or mode != "Live"
+            or len(key) < 20
+        ):
+            raise RuntimeError(
+                "postal outbound reconciliation returned invalid credential"
+            )
+        validated.append((domain, server_id, server_permalink, mode, key))
+    fingerprints = {}
+    for domain, server_id, server_permalink, mode, key in validated:
+        credential = s.scalar(
+            select(PostalDomainCredential).where(
+                PostalDomainCredential.tenant_id == tenant_id,
+                PostalDomainCredential.domain == domain,
+            )
+        )
+        if credential is None:
+            credential = PostalDomainCredential(
+                id=str(uuid.uuid4()),
+                tenant_id=tenant_id,
+                domain=domain,
+                provider_server_id=server_id,
+                provider_server_permalink=server_permalink,
+                provider_mode=mode,
+                api_key_ciphertext="",
+                api_key_fingerprint="",
+            )
+            s.add(credential)
+        credential.state = READY
+        credential.provider_server_id = server_id
+        credential.provider_server_permalink = server_permalink
+        credential.provider_mode = mode
+        credential.api_key_ciphertext = encrypt_provider_secret(key)
+        credential.api_key_fingerprint = credential_fingerprint(key)
+        credential.last_error = None
+        credential.updated_at = now()
+        fingerprints[domain] = credential.api_key_fingerprint
+    s.commit()
+    return {"domains": expected, "credential_fingerprints": fingerprints}
+
+
 def _recover_expired_leases(s: Session) -> None:
     current = now()
     rows = s.scalars(select(PostalProvisioningOutbox).where(PostalProvisioningOutbox.state == "RUNNING", PostalProvisioningOutbox.lease_expires_at < current)).all()
@@ -263,7 +375,24 @@ async def provisioning_tick() -> int:
         return 0
 
 
-def tenant_postal_api_key(s: Session, tenant_id: str) -> str:
+def tenant_postal_api_key(
+    s: Session, tenant_id: str, sender_domain: Optional[str] = None
+) -> str:
+    if sender_domain:
+        credential = s.scalar(
+            select(PostalDomainCredential).where(
+                PostalDomainCredential.tenant_id == tenant_id,
+                PostalDomainCredential.domain == sender_domain.lower(),
+                PostalDomainCredential.state == READY,
+                PostalDomainCredential.provider_mode == "Live",
+            )
+        )
+        if credential and credential.api_key_ciphertext:
+            return decrypt_provider_secret(credential.api_key_ciphertext)
+        # Production must never cross a sender domain onto another tenant or
+        # its development server when the exact live-domain owner is absent.
+        if os.getenv("KLYROW_ENV", "development").lower() == "production":
+            raise RuntimeError("postal sender domain is not provisioned")
     mapping = s.get(PostalTenantMapping, tenant_id)
     if mapping and mapping.state == READY and mapping.api_key_ciphertext:
         return decrypt_provider_secret(mapping.api_key_ciphertext)
@@ -274,89 +403,23 @@ def tenant_postal_api_key(s: Session, tenant_id: str) -> str:
             key = Path(path).read_text(encoding="utf-8").strip()
             if key:
                 return key
+    if sender_domain:
+        raise RuntimeError("postal sender domain is not provisioned")
     raise RuntimeError("postal tenant is not provisioned")
 
 
 async def tenant_email_outbox_loop() -> None:
-    """Existing safe delivery policy with tenant-specific Postal credentials."""
-    while True:
-        await asyncio.sleep(2)
-        if SAFE_MODE:
-            continue
-        snapshot = None
-        try:
-            with DB() as s:
-                stale = now() - timedelta(minutes=5)
-                current = now()
-                item = s.scalar(
-                    select(EmailOutbox)
-                    .where(
-                        or_(
-                            EmailOutbox.state == "pending",
-                            (EmailOutbox.state == "retry") & or_(EmailOutbox.next_attempt_at.is_(None), EmailOutbox.next_attempt_at <= current),
-                            (EmailOutbox.state == "sending") & (EmailOutbox.updated_at < stale),
-                        ),
-                        EmailOutbox.attempts < 5,
-                    )
-                    .order_by(EmailOutbox.created_at)
-                    .with_for_update(skip_locked=True)
-                )
-                if not item:
-                    continue
-                try:
-                    payload = json.loads(item.payload)
-                except (TypeError, ValueError):
-                    item.state = "quarantined"; item.last_error = "invalid_outbox_payload"; item.updated_at = current; s.commit(); continue
-                if not isinstance(payload, dict):
-                    item.state = "quarantined"; item.last_error = "invalid_outbox_payload"; item.updated_at = current; s.commit(); continue
-                campaign_payload = payload.get("stream") == "marketing"
-                campaign_production = campaign_payload and campaign_execution_mode() == "CAMPAIGN_PRODUCTION_ENABLED"
-                gate_key = ("campaign:" + str(payload.get("campaign_id"))) if campaign_payload else canary_gate_key()
-                gate = None if campaign_production else s.scalar(select(ProductionCanaryGate).where(ProductionCanaryGate.gate_key == gate_key).with_for_update())
-                maximum = 1 if campaign_payload else canary_configuration()[3]
-                first_attempt = (item.attempts or 0) == 0
-                reservation_denied = False if campaign_production else (not gate or (first_attempt and (gate.claimed_deliveries >= gate.reserved_deliveries or gate.claimed_deliveries >= maximum)))
-                payload_allowed = campaign_worker_payload_allowed(payload, item.tenant_id) if campaign_payload else canary_payload_allowed(payload)
-                if not payload_allowed or reservation_denied:
-                    item.state = "quarantined"; item.last_error = "production_canary_policy_denied"; item.updated_at = current
-                    message = s.get(Message, item.message_id)
-                    if message: message.status = "quarantined"
-                    s.commit(); continue
-                if first_attempt and gate:
-                    gate.claimed_deliveries += 1; gate.updated_at = current
-                key = tenant_postal_api_key(s, item.tenant_id)
-                item.state = "sending"; item.attempts += 1; item.next_attempt_at = None; item.updated_at = current
-                snapshot = (item.id, item.message_id, item.tenant_id, item.payload, key)
-                s.commit()
-            headers = {"X-Server-API-Key": snapshot[4], "Idempotency-Key": "klyrow:" + snapshot[1]}
-            postal_host = os.getenv("KLYROW_POSTAL_API_HOST_HEADER", "").strip()
-            if postal_host:
-                headers["Host"] = postal_host
-            async with httpx.AsyncClient(timeout=10, trust_env=False, follow_redirects=False) as client:
-                response = await client.post(os.environ["KLYROW_POSTAL_API_URL"] + "/api/v1/send/message", headers=headers, json=json.loads(snapshot[3]))
-                response.raise_for_status()
-                provider_id = str(response.json().get("data", {}).get("message_id") or snapshot[1])
-            with DB() as s:
-                item = s.get(EmailOutbox, snapshot[0]); message = s.get(Message, snapshot[1])
-                if item: item.state = "delivered"; item.provider_message_id = provider_id; item.last_error = None; item.updated_at = now()
-                if message: message.status = "accepted"
-                s.commit()
-        except Exception as exc:
-            with DB() as s:
-                if snapshot is not None:
-                    item = s.get(EmailOutbox, snapshot[0])
-                    if item:
-                        failed = item.attempts >= 5
-                        item.state = "failed" if failed else "retry"
-                        item.last_error = type(exc).__name__
-                        item.updated_at = now()
-                        item.next_attempt_at = None if failed else item.updated_at + timedelta(seconds=min(300, 2 ** max(item.attempts, 1)))
-                        if failed:
-                            message = s.get(Message, item.message_id)
-                            if message: message.status = "failed"
-                            s.add(Event(id=str(uuid.uuid4()), tenant_id=item.tenant_id, message_id=item.message_id, kind="klyrow.email.failed", payload=json.dumps({"reason": "provider_retry_exhausted"})))
-                        s.commit()
-            print(json.dumps({"level": "warning", "system": "klyrow", "event": "tenant_email_outbox_delivery_failed", "error": type(exc).__name__}))
+    """Delegate to the sole hardened delivery implementation.
+
+    The import is intentionally deferred because the canonical worker imports
+    ``tenant_postal_api_key`` from this module. Keeping one implementation
+    prevents the web and service worker entrypoints from diverging on lease,
+    cancellation, priority, and ambiguous provider-outcome behavior.
+    """
+
+    from .tenant_postal_delivery import tenant_email_outbox_loop as hardened_loop
+
+    await hardened_loop()
 
 
 def _mapping_status(s: Session, tenant_id: str) -> dict:

@@ -131,6 +131,8 @@ def test_signed_callback_resolves_tenant_from_local_outbound_mapping(
                     id=f"outbox-{suffix}",
                     tenant_id=correct_tenant,
                     message_id=local_message_id,
+                    operation_id=f"operation-{suffix}",
+                    correlation_id=f"correlation-{suffix}",
                     payload="{}",
                     state="delivered",
                     provider_message_id=provider_message_id,
@@ -157,6 +159,9 @@ def test_signed_callback_resolves_tenant_from_local_outbound_mapping(
         assert postal_event.message_id == local_message_id
         normalized = json.loads(postal_event.payload)
         assert normalized["tenant_id"] == correct_tenant
+        assert normalized["operation_id"] == f"operation-{suffix}"
+        assert normalized["correlation_id"] == f"correlation-{suffix}"
+        assert len(normalized["payload_hash"]) == 64
         assert normalized["metadata"]["tenant_attribution"] in {
             "outbox_tag",
             "message_tag",
@@ -170,7 +175,7 @@ def test_signed_callback_resolves_tenant_from_local_outbound_mapping(
                 Suppression.email == recipient,
             )
         )
-        assert suppression and suppression.reason == "hard_bounce"
+        assert suppression and suppression.reason == "bounced"
         assert not session.scalar(
             select(Suppression).where(
                 Suppression.tenant_id == wrong_tenant,
@@ -180,7 +185,7 @@ def test_signed_callback_resolves_tenant_from_local_outbound_mapping(
         audit = session.scalar(
             select(Audit).where(
                 Audit.tenant_id == correct_tenant,
-                Audit.action == "email.status.hard_bounce",
+                Audit.action == "email.status.bounced",
             )
         )
         assert audit is not None

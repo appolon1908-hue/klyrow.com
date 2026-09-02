@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import httpx
 from cryptography.fernet import Fernet
 from fastapi import HTTPException
 from sqlalchemy import UniqueConstraint
@@ -26,6 +27,12 @@ from apps.gateway.app.provider import (
     TenantMailPolicy,
     parse_inbound,
 )
+from apps.gateway.app.provider_outcome import (
+    INDETERMINATE,
+    provider_outcome_is_ambiguous,
+    reconcile_before_retry,
+)
+from apps.gateway.app.guards import stream_priority
 from apps.gateway.app.security_payload import (
     decrypt_security_payload,
     encrypted_security_payload,
@@ -52,7 +59,6 @@ def _reset_schema() -> None:
     Base.metadata.create_all(engine)
 
 
-@pytest.mark.xfail(strict=True, reason="M1/M2: P1 canonical guard chain is absent")
 def test_p1_every_send_path_uses_the_identical_guard_chain():
     guards = APP / "guards.py"
     assert guards.exists()
@@ -62,7 +68,6 @@ def test_p1_every_send_path_uses_the_identical_guard_chain():
     assert "authorize_send(" in inspect.getsource(provider.email_send)
 
 
-@pytest.mark.xfail(strict=True, reason="M3: P2 SMTP/provider suppression is not stream-aware")
 def test_p2_suppression_has_one_stream_aware_implementation():
     relay = _source("smtp_relay.py")
     provider_source = _source("provider.py")
@@ -72,14 +77,12 @@ def test_p2_suppression_has_one_stream_aware_implementation():
     assert "select(Suppression)" not in provider_source
 
 
-@pytest.mark.xfail(strict=True, reason="M2: P3 authoritative marketing consent is absent on B/C")
 def test_p3_marketing_consent_is_authoritative_on_every_path():
     assert "enforce_consent(" in inspect.getsource(smtp_relay.GovernedRelay.handle_DATA)
     assert "enforce_consent(" in inspect.getsource(provider.email_send)
     assert "marketing_consent_granted" not in _source("provider.py")
 
 
-@pytest.mark.xfail(strict=True, reason="M4: P4 metering is not transactional on every path")
 def test_p4_every_accepted_send_writes_the_canonical_usage_event_in_transaction():
     for relative in ("main.py", "provider.py", "smtp_relay.py"):
         source = _source(relative)
@@ -87,13 +90,11 @@ def test_p4_every_accepted_send_writes_the_canonical_usage_event_in_transaction(
         assert "UsageEvent(" in source
 
 
-@pytest.mark.xfail(strict=True, reason="M5: P5 messaging.py still issues simulated DKIM")
 def test_p5_no_tenant_dkim_record_is_simulated():
     offenders = [path for path in APP.rglob("*.py") if "SIMULATED" in path.read_text(encoding="utf-8")]
     assert offenders == []
 
 
-@pytest.mark.xfail(strict=True, reason="M6: P6 inbound authentication verdict is not persisted")
 def test_p6_inbound_cannot_route_without_an_authentication_verdict():
     source = _source("provider.py")
     assert "auth_verdict" in source
@@ -101,36 +102,42 @@ def test_p6_inbound_cannot_route_without_an_authentication_verdict():
     assert "dmarc_fail_action" in source
 
 
-@pytest.mark.xfail(strict=True, reason="M7: P7 ambiguous Postal outcomes are retried")
 def test_p7_ambiguous_provider_outcome_reconciles_before_retry():
     sources = _source("main.py") + _source("provider.py") + _source("security_smtp_worker.py")
     assert "INDETERMINATE" in sources
     assert "reconcile_before_retry" in sources
+    assert provider_outcome_is_ambiguous(httpx.ReadTimeout("unknown provider outcome"))
+    assert not reconcile_before_retry(state=INDETERMINATE, provider_message_id=None, provider_absence_confirmed=False)
+    assert reconcile_before_retry(state=INDETERMINATE, provider_message_id=None, provider_absence_confirmed=True)
+    assert not reconcile_before_retry(state=INDETERMINATE, provider_message_id="postal-accepted", provider_absence_confirmed=True)
 
 
-@pytest.mark.xfail(strict=True, reason="M8: P8 marketing unsubscribe headers are not injected")
 def test_p8_every_marketing_message_has_one_click_unsubscribe_headers():
     senders = _source("main.py") + _source("provider.py") + _source("smtp_relay.py")
-    assert "List-Unsubscribe" in senders
-    assert "List-Unsubscribe-Post" in senders
+    preferences = _source("preferences.py")
+    assert senders.count("one_click_unsubscribe_headers") >= 3
+    assert "List-Unsubscribe" in preferences
+    assert "List-Unsubscribe-Post" in preferences
 
 
-@pytest.mark.xfail(strict=True, reason="M9: P9 enhanced bounce classification is absent")
 def test_p9_spam_policy_bounce_never_creates_a_suppression():
     source = _source("main.py") + _source("provider.py")
     assert "def classify_bounce" in source
     assert "5.7.1" in source
     assert "reputation_signal" in source
+    assert main.classify_bounce("550 5.7.1 rejected by policy") == ("failed", False)
+    assert main.reputation_signal("550 5.7.1 rejected by policy") is True
+    assert main.classify_bounce("550 5.1.1 mailbox unavailable") == ("bounced", True)
+    assert main.classify_bounce("451 4.2.2 mailbox temporarily full") == ("deferred", False)
 
 
-@pytest.mark.xfail(strict=True, reason="M10: P10 queues have no stream priority")
 def test_p10_security_and_transactional_precede_marketing():
     sources = _source("main.py") + _source("provider.py") + _source("security_smtp_worker.py")
     assert "stream_priority" in sources
     assert "SECURITY" in sources and "TRANSACTIONAL" in sources and "MARKETING" in sources
+    assert stream_priority("SECURITY") < stream_priority("TRANSACTIONAL") < stream_priority("MARKETING") < stream_priority("BULK")
 
 
-@pytest.mark.xfail(strict=True, reason="M11: P11 warm-up is not enforced by the canonical chain")
 def test_p11_warmup_limits_are_enforced_before_every_submission():
     guards = (APP / "guards.py").read_text(encoding="utf-8")
     assert "warmup_daily_limit" in guards
@@ -201,17 +208,7 @@ def test_p12_suppressed_recipient_is_rejected_at_smtp_rcpt():
 
 @pytest.mark.parametrize(
     "path",
-    [
-        pytest.param(
-            "api",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="M1: P13 API accepts arbitrary recipients in global safe mode",
-            ),
-        ),
-        "smtp",
-        "provider",
-    ],
+    ["api", "smtp", "provider"],
 )
 def test_p13_sandbox_delivery_is_confined_to_allowlist_or_sink(path):
     assert main.SAFE_MODE is True
@@ -313,3 +310,11 @@ def test_p20_middleware_recipient_reference_is_sha256_and_not_cleartext():
     assert '"recipient_reference"' in emit_source
     assert '"sha256:"+hashlib.sha256' in emit_source
     assert '"recipient":' not in emit_source.split("if event_type.startswith", 1)[1].split("else:", 1)[0]
+
+
+def test_tenant_worker_preserves_authenticated_provider_acceptance_after_submit():
+    worker = _source("tenant_postal_delivery.py")
+    success_path = worker.split("with DB() as session:", 2)[2]
+    assert 'item.provider_message_id = provider_id' in success_path
+    assert 'set_core_message_status(message, "provider_accepted")' in success_path
+    assert 'item.state == "cancelled"' not in success_path

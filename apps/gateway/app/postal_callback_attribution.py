@@ -316,6 +316,13 @@ async def postal_native_hook(
         or provider_message_id
         or correlation
     )
+    outbox = session.scalar(select(EmailOutbox).where(
+        EmailOutbox.tenant_id == attribution.tenant_id,
+        EmailOutbox.message_id == local_message_id,
+    ))
+    if outbox and outbox.correlation_id:
+        correlation = outbox.correlation_id
+    operation_id = outbox.operation_id if outbox and outbox.operation_id else local_message_id
     recipient = _recipient(message)
     canonical_status = core.TERMINAL_MESSAGE_STATUSES.get(
         canonical, canonical.rsplit(".", 1)[-1]
@@ -323,8 +330,11 @@ async def postal_native_hook(
     normalized = {
         "event": canonical,
         "event_id": event_id,
+        "schema_version": "1.0",
         "event_version": "1.0",
         "tenant_id": attribution.tenant_id,
+        "operation_id": operation_id,
+        "payload_hash": hashlib.sha256(body).hexdigest(),
         "message_id": local_message_id,
         "provider_message_id": provider_message_id or local_message_id,
         "stream": "transactional",

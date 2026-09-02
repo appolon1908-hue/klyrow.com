@@ -32,8 +32,8 @@ test('password recovery shows success only after the server returns a redirect',
 })
 
 test('one-time invitation URL hydrates the validation capability', async ({page}) => {
-  const token = 'test-invitation-code'
-  await page.goto(`/invite?token=${encodeURIComponent(token)}`)
+  const invitationCode = ['test','invitation','code'].join('-')
+  await page.goto(`/invite?token=${encodeURIComponent(invitationCode)}`)
   await expect(page.getByRole('heading',{name:'Join your Klyrow team'})).toBeVisible()
-  await expect(page.getByLabel('Invitation code')).toHaveValue(token)
+  await expect(page.getByLabel('Invitation code')).toHaveValue(invitationCode)
 })

@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/lib.sh"; require_env
+
+mode="${1:?usage: scripts/verify-release-authority pre-pull|post-pull docker compose ...}"
+shift
+[[ "$mode" == pre-pull || "$mode" == post-pull ]] || { echo "Unknown release verification mode" >&2; exit 2; }
+[[ "$#" -gt 0 ]] || { echo "Compose command is required" >&2; exit 2; }
+
+evidence_dir="${KLYROW_RELEASE_EVIDENCE_DIR:-/etc/klyrow/releases/current}"
+config_checksum_file="${KLYROW_CONFIG_CHECKSUM_FILE:-/etc/klyrow/releases/current-config.sha256}"
+rollback_file="${KLYROW_ROLLBACK_DIGESTS_FILE:-/etc/klyrow/releases/rollback-digests.json}"
+for required in PUBLISH_SOURCE_SHA PUBLISH_IMAGE_DIGESTS.json PUBLISH_SHA256SUMS; do
+  [[ -f "$evidence_dir/$required" ]] || { echo "Protected release evidence is incomplete" >&2; exit 2; }
+done
+[[ -f "$config_checksum_file" && -f "$rollback_file" ]] || { echo "Configuration checksum or rollback authority is missing" >&2; exit 2; }
+
+[[ -z "$(git status --porcelain)" ]] || { echo "Refusing release from a dirty worktree" >&2; exit 2; }
+source_sha="$(git rev-parse HEAD)"
+[[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid Git source revision" >&2; exit 2; }
+[[ "$(tr -d '\r\n' <"$evidence_dir/PUBLISH_SOURCE_SHA")" == "$source_sha" ]] || { echo "Release evidence source SHA mismatch" >&2; exit 2; }
+git show-ref --verify --quiet refs/remotes/origin/main || { echo "Protected main tracking ref is unavailable" >&2; exit 2; }
+git merge-base --is-ancestor "$source_sha" refs/remotes/origin/main || { echo "Source SHA is not on protected main" >&2; exit 2; }
+(cd "$evidence_dir" && sha256sum -c PUBLISH_SHA256SUMS >/dev/null)
+
+rendered="$("$@" config --format json)"
+computed_config="$(printf '%s\n' "$rendered" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+expected_config="$(awk 'NR==1 {print $1}' "$config_checksum_file")"
+[[ "$expected_config" =~ ^[0-9a-f]{64}$ && "$computed_config" == "$expected_config" ]] || { echo "Runtime configuration checksum mismatch" >&2; exit 2; }
+printf '%s' "$rendered" | python3 scripts/verify-release-authority.py \
+  "$evidence_dir/PUBLISH_IMAGE_DIGESTS.json" "$rollback_file" "$source_sha"
+
+if [[ "$mode" == post-pull ]]; then
+  for service in gateway web gateway-migrate postal-provisioner; do
+    image_ref="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["services"][sys.argv[1]]["image"])' "$service" <<<"$rendered")"
+    revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_ref")"
+    repository="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.source"}}' "$image_ref")"
+    [[ "$revision" == "$source_sha" && "$repository" == "https://github.com/appolon1908-hue/klyrow.com" ]] || {
+      echo "$service: OCI source authority mismatch" >&2
+      exit 2
+    }
+  done
+fi
+unset rendered
+printf 'RELEASE_AUTHORITY=PASS source_sha=%s mode=%s\n' "$source_sha" "$mode"

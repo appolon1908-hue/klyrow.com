@@ -27,6 +27,7 @@ from .postal_provisioning import (
     resolve_identity_context_with_provisioning,
     router as postal_provisioning_router,
 )
+from .webmail import router as webmail_router
 SHELL_PATHS = {"/app", "/onboarding", "/app/{path:path}"}
 
 # Replace historical account/session/invitation/callback routes before route
@@ -65,6 +66,7 @@ if not getattr(app.state, "klyrow_browser_api_routes_registered", False):
         invitation_flow_router,
         browser_email_setup_router,
         postal_provisioning_router,
+        webmail_router,
     ):
         app.router.routes.extend(platform_router.routes)
     app.state.klyrow_browser_api_routes_registered = True

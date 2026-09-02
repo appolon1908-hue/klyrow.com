@@ -7,9 +7,7 @@ services:
       KLYROW_OIDC_REDIRECT_URI: https://app.klyrow.com/auth/callback
 
   web:
-    build:
-      context: .
-      dockerfile: apps/web/Dockerfile
+    image: '${KLYROW_WEB_IMAGE:?set the exact protected web image by digest}'
     depends_on:
       gateway:
         condition: service_healthy

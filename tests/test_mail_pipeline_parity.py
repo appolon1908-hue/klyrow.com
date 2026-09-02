@@ -60,11 +60,7 @@ def test_suppressed_recipient_rejected(path):
 
 @pytest.mark.parametrize(
     "path",
-    [
-        "api",
-        pytest.param("smtp", marks=pytest.mark.xfail(strict=True, reason="M3: SMTP blocks transactional mail after marketing unsubscribe")),
-        pytest.param("provider", marks=pytest.mark.xfail(strict=True, reason="M3: provider path blocks transactional mail after marketing unsubscribe")),
-    ],
+    ALL_PATHS,
 )
 def test_marketing_unsubscribe_does_not_block_transactional(path):
     with DB() as session:
@@ -75,11 +71,7 @@ def test_marketing_unsubscribe_does_not_block_transactional(path):
 
 @pytest.mark.parametrize(
     "path",
-    [
-        "api",
-        pytest.param("smtp", marks=pytest.mark.xfail(strict=True, reason="M2: SMTP trusts marketing submission without authoritative consent")),
-        pytest.param("provider", marks=pytest.mark.xfail(strict=True, reason="M2: provider trusts a caller-supplied consent boolean")),
-    ],
+    ALL_PATHS,
 )
 def test_marketing_requires_authoritative_consent(path):
     result = submit(
@@ -93,11 +85,7 @@ def test_marketing_requires_authoritative_consent(path):
 
 @pytest.mark.parametrize(
     "path",
-    [
-        pytest.param("api", marks=pytest.mark.xfail(strict=True, reason="M4: API writes UsageLedger, not canonical UsageEvent")),
-        pytest.param("smtp", marks=pytest.mark.xfail(strict=True, reason="M4: SMTP acceptance writes no usage event")),
-        pytest.param("provider", marks=pytest.mark.xfail(strict=True, reason="M4: provider meters on delivery, not acceptance")),
-    ],
+    ALL_PATHS,
 )
 def test_exactly_one_canonical_usage_event_on_acceptance(path):
     assert submit(path, key="usage-" + path).accepted is True
@@ -107,11 +95,7 @@ def test_exactly_one_canonical_usage_event_on_acceptance(path):
 
 @pytest.mark.parametrize(
     "path",
-    [
-        "api",
-        pytest.param("smtp", marks=pytest.mark.xfail(strict=True, reason="M1: SMTP sandbox accepts an unverified provider domain")),
-        pytest.param("provider", marks=pytest.mark.xfail(strict=True, reason="M1: provider sandbox accepts an unverified provider domain")),
-    ],
+    ALL_PATHS,
 )
 def test_unverified_sender_domain_rejected(path):
     with DB() as session:
@@ -136,11 +120,7 @@ def test_quota_exhaustion_rejected(path):
 
 @pytest.mark.parametrize(
     "path",
-    [
-        "api",
-        pytest.param("smtp", marks=pytest.mark.xfail(strict=True, reason="M1: SMTP does not call the production canary guard")),
-        pytest.param("provider", marks=pytest.mark.xfail(strict=True, reason="M1: provider does not call the production canary guard")),
-    ],
+    ALL_PATHS,
 )
 def test_production_canary_guard_is_present(path):
     functions = {
@@ -163,11 +143,7 @@ def test_unauthorized_sender_rejected(path):
 
 @pytest.mark.parametrize(
     "path",
-    [
-        pytest.param("api", marks=pytest.mark.xfail(strict=True, reason="M1: API send relies on auth to recheck tenant state")),
-        "smtp",
-        "provider",
-    ],
+    ALL_PATHS,
 )
 def test_disabled_tenant_rejected_inside_send_path(path):
     with DB() as session:
@@ -178,11 +154,7 @@ def test_disabled_tenant_rejected_inside_send_path(path):
 
 @pytest.mark.parametrize(
     "path",
-    [
-        pytest.param("api", marks=pytest.mark.xfail(strict=True, reason="M1: API accepts arbitrary recipients in global safe mode")),
-        "smtp",
-        "provider",
-    ],
+    ALL_PATHS,
 )
 def test_sandbox_external_recipient_rejected(path):
     assert submit(path, recipient=EXTERNAL, key="sandbox-" + path).accepted is False
@@ -205,11 +177,7 @@ def test_identical_replay_persists_one_message(path):
 
 @pytest.mark.parametrize(
     "path",
-    [
-        "api",
-        pytest.param("smtp", marks=pytest.mark.xfail(strict=True, reason="M1: SMTP altered replay is silently accepted")),
-        "provider",
-    ],
+    ALL_PATHS,
 )
 def test_altered_replay_is_rejected(path):
     first = submit(path, key="altered-" + path, subject="Original")

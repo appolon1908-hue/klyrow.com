@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/lib.sh"
+
+umask 077
+archive="${1:?usage: scripts/archive-offhost ENCRYPTED_BACKUP.tar.gz.gpg}"
+checksum="$archive.sha256"
+offhost_dir="${KLYROW_BACKUP_OFFHOST_DIR:-}"
+
+[[ -f "$archive" && -f "$checksum" ]] || { echo "Encrypted backup or checksum missing" >&2; exit 1; }
+[[ -n "$offhost_dir" ]] || { echo "KLYROW_BACKUP_OFFHOST_DIR is required" >&2; exit 2; }
+offhost_dir="$(realpath -e -- "$offhost_dir")"
+[[ -d "$offhost_dir" && "$offhost_dir" != / && "$offhost_dir" != "$ROOT" ]] || {
+  echo "Unsafe off-host backup destination" >&2
+  exit 2
+}
+if [[ "${KLYROW_ENV:-production}" != test || "${KLYROW_BACKUP_ALLOW_TEST_DIRECTORY:-false}" != true ]]; then
+  mountpoint -q -- "$offhost_dir" || { echo "Off-host backup destination is not a mounted filesystem" >&2; exit 2; }
+fi
+
+archive_name="$(basename -- "$archive")"
+digest="$(sha256sum "$archive" | awk '{print $1}')"
+[[ "$digest" =~ ^[0-9a-f]{64}$ ]] || { echo "Backup checksum is invalid" >&2; exit 2; }
+grep -Eq "^${digest}  ${archive_name}$" "$checksum" || { echo "Backup checksum manifest mismatch" >&2; exit 2; }
+
+partial_archive="$offhost_dir/.${archive_name}.partial.$$"
+partial_checksum="$offhost_dir/.${archive_name}.sha256.partial.$$"
+partial_receipt="$offhost_dir/.${archive_name}.receipt.json.partial.$$"
+cleanup(){ rm -f -- "$partial_archive" "$partial_checksum" "$partial_receipt"; }
+trap cleanup EXIT
+
+install -m 0600 -- "$archive" "$partial_archive"
+printf '%s  %s\n' "$digest" "$archive_name" >"$partial_checksum"
+copied_digest="$(sha256sum "$partial_archive" | awk '{print $1}')"
+[[ "$copied_digest" == "$digest" ]] || { echo "Off-host backup copy checksum mismatch" >&2; exit 2; }
+python3 - "$partial_receipt" "$archive_name" "$digest" "${KLYROW_RELEASE_SHA:-unknown}" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+path, archive, digest, source_sha = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump({
+        "archive": archive,
+        "sha256": digest,
+        "source_sha": source_sha,
+        "copied_at": datetime.now(timezone.utc).isoformat(),
+        "storage": "mounted_offhost",
+    }, stream, separators=(",", ":"), sort_keys=True)
+    stream.write("\n")
+PY
+chmod 0600 "$partial_checksum" "$partial_receipt"
+mv -- "$partial_archive" "$offhost_dir/$archive_name"
+mv -- "$partial_checksum" "$offhost_dir/$archive_name.sha256"
+mv -- "$partial_receipt" "$offhost_dir/$archive_name.receipt.json"
+sync -f "$offhost_dir/$archive_name" "$offhost_dir/$archive_name.sha256" "$offhost_dir/$archive_name.receipt.json"
+trap - EXIT
+printf 'OFFHOST_BACKUP=PASS archive=%s sha256=%s\n' "$archive_name" "$digest"

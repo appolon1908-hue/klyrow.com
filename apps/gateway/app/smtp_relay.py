@@ -11,9 +11,12 @@ from email.parser import BytesParser
 
 from aiosmtpd.smtp import AuthResult, LoginPassword, SMTP
 from argon2.exceptions import VerifyMismatchError
+from fastapi import HTTPException
 from sqlalchemy import func, select
 
-from .main import DB, Suppression, Tenant
+from .guards import authorize_send, enforce_consent
+from .guards import enforce_suppression
+from .main import DB, Tenant
 from .provider import (
     ProviderAudit,
     ProviderDomain,
@@ -117,7 +120,7 @@ class GovernedRelay:
                 or not identity
                 or identity.stream.upper() != stream
                 or not domain
-                or domain.status in {"SUSPENDED", "REMOVED"}
+                or domain.status not in {"VERIFIED", "SENDING_ENABLED"}
                 or not tenant
                 or not tenant.enabled
                 or (
@@ -143,14 +146,15 @@ class GovernedRelay:
                 if tenant_policy
                 else set()
             )
-            suppressed = db.scalar(
-                select(Suppression).where(
-                    Suppression.tenant_id == credential.tenant_id,
-                    Suppression.email == normalized_address,
+            try:
+                enforce_suppression(
+                    db,
+                    credential.tenant_id,
+                    normalized_address,
+                    stream,
                 )
-            )
-        if suppressed:
-            return "550 5.7.1 recipient suppressed"
+            except HTTPException:
+                return "550 5.7.1 recipient suppressed"
         if (
             sandbox
             and normalized_address not in allowed
@@ -166,11 +170,14 @@ class GovernedRelay:
                 return "550 5.7.1 security recipient not authorized"
             if not security_production_approved() and envelope.rcpt_tos:
                 return "550 5.7.1 security canary allows one recipient"
+        if stream == "MARKETING" and envelope.rcpt_tos:
+            return "550 5.7.1 marketing submission allows one recipient"
         envelope.rcpt_tos.append(normalized_address)
         return "250 2.1.5 recipient accepted"
 
     async def handle_DATA(self, _server, session, envelope):
         raw = envelope.original_content
+        original_raw_digest = hashlib.sha256(raw).hexdigest()
         parsed = BytesParser(policy=policy.default).parsebytes(raw)
         message_id = (
             parsed.get("Message-ID")
@@ -240,6 +247,34 @@ class GovernedRelay:
             ):
                 return "550 5.7.1 live security delivery not authorized"
 
+            for recipient in envelope.rcpt_tos:
+                try:
+                    authorize_send(
+                        db,
+                        tenant_id=credential.tenant_id,
+                        sender=envelope.mail_from,
+                        recipient=recipient,
+                        stream=stream,
+                        sandbox=sandbox,
+                    )
+                    enforce_consent(
+                        db,
+                        credential.tenant_id,
+                        recipient,
+                        stream,
+                    )
+                except HTTPException:
+                    return "550 5.7.1 submission policy denied"
+
+            if stream == "MARKETING":
+                from .preferences import one_click_unsubscribe_headers
+                headers = one_click_unsubscribe_headers(credential.tenant_id, envelope.rcpt_tos[0])
+                for name, value in headers.items():
+                    if parsed.get(name) is not None:
+                        del parsed[name]
+                    parsed[name] = value
+                raw = parsed.as_bytes(policy=policy.SMTP)
+
             raw_digest = hashlib.sha256(raw).hexdigest()
             if stream == "SECURITY":
                 payload = encrypted_security_payload(
@@ -257,6 +292,14 @@ class GovernedRelay:
                     "stream": stream,
                 }
 
+            from .billing import UsageEvent
+            from .guards import billing_identity
+            try:
+                subscription_id, price_id = billing_identity(
+                    db, credential.tenant_id, sandbox=sandbox
+                )
+            except HTTPException:
+                return "550 5.7.1 subscription not billable"
             for recipient in envelope.rcpt_tos:
                 digest = hashlib.sha256(
                     (credential.id + message_id + recipient).encode()
@@ -268,6 +311,8 @@ class GovernedRelay:
                     )
                 )
                 if prior:
+                    if prior.request_hash != original_raw_digest:
+                        return "550 5.7.1 idempotency payload mismatch"
                     continue
                 if not sandbox and stream == "SECURITY":
                     try:
@@ -294,7 +339,7 @@ class GovernedRelay:
                     tenant_id=credential.tenant_id,
                     correlation_id="smtp-" + uuid.uuid4().hex,
                     idempotency_key="smtp:" + digest,
-                    request_hash=raw_digest,
+                    request_hash=original_raw_digest,
                     sender=envelope.mail_from,
                     recipient=recipient,
                     subject=subject,
@@ -308,6 +353,18 @@ class GovernedRelay:
                     sandbox=sandbox,
                 )
                 db.add(item)
+                db.add(
+                    UsageEvent(
+                        id=str(uuid.uuid4()),
+                        tenant_id=credential.tenant_id,
+                        subscription_id=subscription_id,
+                        message_id=item.id,
+                        event_key="accepted:smtp:" + digest,
+                        unit="accepted_message",
+                        quantity=1,
+                        price_id=price_id,
+                    )
+                )
                 db.add(
                     ProviderAudit(
                         id=str(uuid.uuid4()),

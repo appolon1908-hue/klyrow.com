@@ -1,9 +1,7 @@
 name: klyrow
 services:
   gateway:
-    build:
-      context: .
-      dockerfile: apps/gateway/Dockerfile
+    image: '${KLYROW_GATEWAY_IMAGE:?set the exact protected gateway image by digest}'
     env_file: '${KLYROW_ENV_FILE:-.env}'
     environment:
       KLYROW_EMAIL_EVENT_URL: https://middleware-email-events.internal.codestra.agency:18080/internal/provider-events/klyrow
@@ -11,15 +9,19 @@ services:
       KLYROW_SERVER_A_CLIENT_CERT_FILE: /run/codestra-mtls/server-a/client-fullchain.crt
       KLYROW_SERVER_A_CLIENT_KEY_FILE: /run/codestra-mtls/server-a/client.key
       KLYROW_ENV: production
+      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow_runtime@postgres:5432/klyrow
+      KLYROW_DATABASE_PASSWORD_FILE: /run/secrets/klyrow_database_runtime_password
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
       KLYROW_POSTAL_API_KEY_FILE: /run/secrets/klyrow_postal_api_key
       KLYROW_METRICS_TOKEN_FILE: /run/secrets/klyrow_metrics_token
+      KLYROW_MIDDLEWARE_API_KEY_FILE: /run/secrets/klyrow_middleware_api_key
+      KLYROW_WEBHOOK_SECRET_FILE: /run/secrets/klyrow_webhook_secret
       KLYROW_DKIM_KEY_DIR: /var/lib/klyrow/dkim
       KLYROW_CANARY_ALLOWED_DOMAIN: ${KLYROW_CANARY_ALLOWED_DOMAIN:-}
       KLYROW_CANARY_ALLOWED_SENDER: ${KLYROW_CANARY_ALLOWED_SENDER:-}
       KLYROW_CANARY_ALLOWED_RECIPIENT: ${KLYROW_CANARY_ALLOWED_RECIPIENT:-}
       KLYROW_CANARY_MAX_DELIVERIES: ${KLYROW_CANARY_MAX_DELIVERIES:-0}
-      KLYROW_REQUIRED_SCHEMA_VERSION: 2026082202_production_canary_claim_ledger.sql
+      KLYROW_REQUIRED_SCHEMA_VERSION: 2026090208_runtime_database_least_privilege.sql
       KLYROW_BULK_DELIVERY_ENABLED: "false"
       KLYROW_CAMPAIGN_DELIVERY_ENABLED: "false"
       KLYROW_CAMPAIGN_EXECUTION_MODE: "${KLYROW_CAMPAIGN_EXECUTION_MODE:-CAMPAIGN_EXECUTION_DISABLED}"
@@ -30,13 +32,16 @@ services:
       KLYROW_CAMPAIGN_CANARY_RECIPIENTS: "${KLYROW_CAMPAIGN_CANARY_RECIPIENTS:-}"
       KLYROW_CAMPAIGN_CANARY_SENDER: "${KLYROW_CAMPAIGN_CANARY_SENDER:-}"
       KLYROW_EMBEDDED_WORKERS: "false"
+      KLYROW_SAFE_MODE: "true"
+      KLYROW_PRODUCTION_GATE_APPROVED: "false"
+      KLYROW_REQUIRE_LEAST_PRIVILEGE_DB: "true"
       LIVE_SMS_DELIVERY: "false"
       LIVE_EMAIL_DELIVERY: "false"
       EXTERNAL_SMS_DELIVERY: "false"
       EXTERNAL_EMAIL_DELIVERY: "false"
       PRODUCTION_PROVIDER_ROUTING: "false"
       MARKETING_DELIVERY: "false"
-    secrets: [klyrow_session_secret, klyrow_postal_api_key, klyrow_metrics_token]
+    secrets: [klyrow_session_secret, klyrow_postal_api_key, klyrow_metrics_token, klyrow_middleware_api_key, klyrow_webhook_secret, klyrow_database_runtime_password]
     volumes:
       - ./secrets/postal/webhook-signing-public.pem:/run/klyrow/postal-webhook-signing-public.pem:ro
       - /etc/codestra/mtls/server-a-event-client:/run/codestra-mtls/server-a:ro
@@ -59,16 +64,17 @@ services:
       timeout: 5s
       retries: 5
   worker:
-    build:
-      context: .
-      dockerfile: apps/gateway/Dockerfile
+    image: '${KLYROW_GATEWAY_IMAGE:?set the exact protected gateway image by digest}'
     env_file: '${KLYROW_ENV_FILE:-.env}'
     environment:
       KLYROW_ENV: production
       KLYROW_WORKER_ROLE: mail
-      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
+      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow_runtime@postgres:5432/klyrow
+      KLYROW_DATABASE_PASSWORD_FILE: /run/secrets/klyrow_database_runtime_password
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
       KLYROW_POSTAL_API_KEY_FILE: /run/secrets/klyrow_postal_api_key
+      KLYROW_MIDDLEWARE_API_KEY_FILE: /run/secrets/klyrow_middleware_api_key
+      KLYROW_WEBHOOK_SECRET_FILE: /run/secrets/klyrow_webhook_secret
       KLYROW_POSTAL_API_HOST_HEADER: ${KLYROW_POSTAL_API_HOST_HEADER:-app.klyrow.com}
       KLYROW_EMAIL_EVENT_URL: https://middleware-email-events.internal.codestra.agency:18080/internal/provider-events/klyrow
       KLYROW_SERVER_A_CA_FILE: /run/codestra-mtls/server-a/root-ca.crt
@@ -81,12 +87,13 @@ services:
       KLYROW_CAMPAIGN_CANARY_CAMPAIGN_ID: "${KLYROW_CAMPAIGN_CANARY_CAMPAIGN_ID:-}"
       KLYROW_CAMPAIGN_CANARY_RECIPIENTS: "${KLYROW_CAMPAIGN_CANARY_RECIPIENTS:-}"
       KLYROW_CAMPAIGN_CANARY_SENDER: "${KLYROW_CAMPAIGN_CANARY_SENDER:-}"
-      KLYROW_SAFE_MODE: "${KLYROW_SAFE_MODE:-true}"
+      KLYROW_SAFE_MODE: "true"
+      KLYROW_PRODUCTION_GATE_APPROVED: "false"
       LIVE_EMAIL_DELIVERY: "false"
       EXTERNAL_EMAIL_DELIVERY: "false"
       PRODUCTION_PROVIDER_ROUTING: "false"
     command: ["python", "-m", "app.service_worker"]
-    secrets: [klyrow_session_secret, klyrow_postal_api_key]
+    secrets: [klyrow_session_secret, klyrow_postal_api_key, klyrow_middleware_api_key, klyrow_webhook_secret, klyrow_database_runtime_password]
     volumes:
       - /etc/codestra/mtls/server-a-event-client:/run/codestra-mtls/server-a:ro
     depends_on:
@@ -104,18 +111,22 @@ services:
       timeout: 5s
       retries: 5
   scheduler:
-    build:
-      context: .
-      dockerfile: apps/gateway/Dockerfile
+    image: '${KLYROW_GATEWAY_IMAGE:?set the exact protected gateway image by digest}'
     environment:
+      KLYROW_ENV: production
       KLYROW_WORKER_ROLE: scheduler
-      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
+      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow_runtime@postgres:5432/klyrow
+      KLYROW_DATABASE_PASSWORD_FILE: /run/secrets/klyrow_database_runtime_password
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
+      KLYROW_MAUTIC_API_URL: http://mautic
+      KLYROW_MAUTIC_API_CLIENT_ID_FILE: /run/secrets/klyrow_mautic_api_client_id
+      KLYROW_MAUTIC_API_CLIENT_SECRET_FILE: /run/secrets/klyrow_mautic_api_client_secret
     command: ["python", "-m", "app.service_worker"]
-    secrets: [klyrow_session_secret]
+    secrets: [klyrow_session_secret, klyrow_mautic_api_client_id, klyrow_mautic_api_client_secret, klyrow_database_runtime_password]
     depends_on:
       postgres: {condition: service_healthy}
       gateway-migrate: {condition: service_completed_successfully}
+      mautic: {condition: service_healthy}
     networks: [backend]
     restart: unless-stopped
     read_only: true
@@ -128,19 +139,18 @@ services:
       timeout: 5s
       retries: 5
   billing-api:
-    build:
-      context: .
-      dockerfile: apps/gateway/Dockerfile
+    image: '${KLYROW_GATEWAY_IMAGE:?set the exact protected gateway image by digest}'
     env_file: '${KLYROW_ENV_FILE:-.env}'
     environment:
       KLYROW_ENV: production
-      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
+      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow_runtime@postgres:5432/klyrow
+      KLYROW_DATABASE_PASSWORD_FILE: /run/secrets/klyrow_database_runtime_password
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
       KLYROW_METRICS_TOKEN_FILE: /run/secrets/klyrow_metrics_token
       KLYROW_SAFE_MODE: "true"
       KLYROW_EMBEDDED_WORKERS: "false"
     command: ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-    secrets: [klyrow_session_secret, klyrow_metrics_token]
+    secrets: [klyrow_session_secret, klyrow_metrics_token, klyrow_database_runtime_password]
     depends_on:
       postgres: {condition: service_healthy}
       gateway-migrate: {condition: service_completed_successfully}
@@ -156,15 +166,14 @@ services:
       timeout: 5s
       retries: 5
   billing-worker:
-    build:
-      context: .
-      dockerfile: apps/gateway/Dockerfile
+    image: '${KLYROW_GATEWAY_IMAGE:?set the exact protected gateway image by digest}'
     environment:
       KLYROW_WORKER_ROLE: billing
-      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
+      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow_runtime@postgres:5432/klyrow
+      KLYROW_DATABASE_PASSWORD_FILE: /run/secrets/klyrow_database_runtime_password
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
     command: ["python", "-m", "app.service_worker"]
-    secrets: [klyrow_session_secret]
+    secrets: [klyrow_session_secret, klyrow_database_runtime_password]
     depends_on:
       postgres: {condition: service_healthy}
       gateway-migrate: {condition: service_completed_successfully}
@@ -180,11 +189,10 @@ services:
       timeout: 5s
       retries: 5
   smtp-relay:
-    build:
-      context: .
-      dockerfile: apps/gateway/Dockerfile
+    image: '${KLYROW_GATEWAY_IMAGE:?set the exact protected gateway image by digest}'
     environment:
-      KLYROW_DATABASE_URL: ${KLYROW_DATABASE_URL:?required}
+      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow_runtime@postgres:5432/klyrow
+      KLYROW_DATABASE_PASSWORD_FILE: /run/secrets/klyrow_database_runtime_password
       KLYROW_SMTP_PORT: "8025"
       KLYROW_SMTP_HELO: mail.klyrow.com
       KLYROW_SANDBOX_DOMAIN: klyrow-sink.test
@@ -196,6 +204,7 @@ services:
     volumes:
       - ./secrets/postal/smtp.cert:/run/klyrow/smtp.cert:ro
       - ./secrets/postal/smtp.key:/run/klyrow/smtp.key:ro
+    secrets: [klyrow_database_runtime_password]
     depends_on:
       postgres: {condition: service_healthy}
       gateway-migrate: {condition: service_completed_successfully}
@@ -212,14 +221,14 @@ services:
       timeout: 5s
       retries: 5
   postgres:
-    image: postgres:17.6-bookworm
+    image: '${KLYROW_POSTGRES_IMAGE:?set the approved Postgres image by digest}'
     environment:
       POSTGRES_DB: klyrow
       POSTGRES_USER: klyrow
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_PASSWORD_FILE: /run/secrets/klyrow_database_owner_password
+    secrets: [klyrow_database_owner_password]
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/migrations:ro
     networks: [backend]
     restart: unless-stopped
     healthcheck:
@@ -228,11 +237,12 @@ services:
       timeout: 5s
       retries: 10
   gateway-migrate:
-    build:
-      context: .
-      dockerfile: docker/migrate.Dockerfile
+    image: '${KLYROW_MIGRATE_IMAGE:?set the exact protected migration image by digest}'
     environment:
-      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
+      KLYROW_DATABASE_URL: postgresql+psycopg://klyrow@postgres:5432/klyrow
+      KLYROW_DATABASE_OWNER_PASSWORD_FILE: /run/secrets/klyrow_database_owner_password
+      KLYROW_DATABASE_RUNTIME_PASSWORD_FILE: /run/secrets/klyrow_database_runtime_password
+    secrets: [klyrow_database_owner_password, klyrow_database_runtime_password]
     networks: [backend]
     depends_on:
       postgres: {condition: service_healthy}
@@ -240,7 +250,7 @@ services:
     security_opt: [no-new-privileges:true]
     cap_drop: [ALL]
   mautic-db:
-    image: mariadb:11.4.8
+    image: '${KLYROW_MARIADB_IMAGE:?set the approved MariaDB image by digest}'
     environment:
       MARIADB_DATABASE: mautic
       MARIADB_USER: mautic
@@ -256,7 +266,7 @@ services:
       timeout: 5s
       retries: 15
   mautic:
-    image: mautic/mautic:7.1.3-20260707-apache
+    image: '${KLYROW_MAUTIC_IMAGE:?set the approved Mautic image by digest}'
     environment: &mautic_env
       MAUTIC_DB_HOST: mautic-db
       MAUTIC_DB_PORT: 3306
@@ -280,7 +290,7 @@ services:
       retries: 15
       start_period: 120s
   mautic-cron:
-    image: mautic/mautic:7.1.3-20260707-apache
+    image: '${KLYROW_MAUTIC_IMAGE:?set the approved Mautic image by digest}'
     environment:
       <<: *mautic_env
       DOCKER_MAUTIC_ROLE: mautic_cron
@@ -289,8 +299,13 @@ services:
     volumes: [mautic_data:/var/www/html]
     networks: [backend]
     restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "php /var/www/html/bin/console doctrine:query:sql 'SELECT 1' --no-interaction >/dev/null"]
+      interval: 60s
+      timeout: 20s
+      retries: 5
   mautic-worker:
-    image: mautic/mautic:7.1.3-20260707-apache
+    image: '${KLYROW_MAUTIC_IMAGE:?set the approved Mautic image by digest}'
     environment:
       <<: *mautic_env
       DOCKER_MAUTIC_ROLE: mautic_worker
@@ -300,8 +315,13 @@ services:
     volumes: [mautic_data:/var/www/html]
     networks: [backend]
     restart: unless-stopped
+    healthcheck:
+      test: [CMD-SHELL, "php /var/www/html/bin/console doctrine:query:sql 'SELECT 1' --no-interaction >/dev/null"]
+      interval: 60s
+      timeout: 20s
+      retries: 5
   postal-db:
-    image: mariadb:11.4.8
+    image: '${KLYROW_MARIADB_IMAGE:?set the approved MariaDB image by digest}'
     environment:
       MARIADB_DATABASE: postal
       MARIADB_USER: postal
@@ -316,7 +336,7 @@ services:
       timeout: 5s
       retries: 15
   rabbitmq:
-    image: rabbitmq:4.1.3-alpine
+    image: '${KLYROW_RABBITMQ_IMAGE:?set the approved RabbitMQ image by digest}'
     environment:
       RABBITMQ_DEFAULT_USER: postal
       RABBITMQ_DEFAULT_PASS: ${POSTAL_RABBITMQ_PASSWORD:?required}
@@ -329,7 +349,7 @@ services:
       timeout: 5s
       retries: 15
   postal-web:
-    image: ghcr.io/postalserver/postal:3.3.7
+    image: '${KLYROW_POSTAL_IMAGE:?set the approved Postal image by digest}'
     command: postal web-server
     volumes: [./secrets/postal:/config:ro, postal_assets:/opt/postal/public]
     depends_on:
@@ -345,7 +365,7 @@ services:
       retries: 15
       start_period: 60s
   postal-worker:
-    image: ghcr.io/postalserver/postal:3.3.7
+    image: '${KLYROW_POSTAL_IMAGE:?set the approved Postal image by digest}'
     command: postal worker
     volumes: [./secrets/postal:/config:ro]
     depends_on:
@@ -354,12 +374,12 @@ services:
     networks: [frontend, backend]
     restart: unless-stopped
     healthcheck:
-      test: [CMD-SHELL, "ruby -e 'Process.kill(0, 1)'" ]
+      test: [CMD-SHELL, "ruby -rsocket -e \"[['rabbitmq',5672],['postal-db',3306]].each{|h,p| s=TCPSocket.new(h,p);s.close}\"" ]
       interval: 30s
       timeout: 5s
       retries: 5
   postal-smtp:
-    image: ghcr.io/postalserver/postal:3.3.7
+    image: '${KLYROW_POSTAL_IMAGE:?set the approved Postal image by digest}'
     command: postal smtp-server
     volumes: [./secrets/postal:/config:ro]
     depends_on:
@@ -369,19 +389,24 @@ services:
     networks: [frontend, backend]
     restart: unless-stopped
     healthcheck:
-      test: [CMD-SHELL, "ruby -rnet/http -e 'exit(Net::HTTP.get_response(URI(\"http://127.0.0.1:9091/\")).code.to_i < 500 ? 0 : 1)'" ]
+      test: [CMD-SHELL, "ruby -rsocket -rnet/http -e \"[['rabbitmq',5672],['postal-db',3306]].each{|h,p| s=TCPSocket.new(h,p);s.close};raise unless Net::HTTP.get_response(URI('http://127.0.0.1:9091/')).code.to_i<500\"" ]
       interval: 30s
       timeout: 5s
       retries: 5
   prometheus:
-    image: prom/prometheus:v3.5.0
+    image: '${KLYROW_PROMETHEUS_IMAGE:?set the approved Prometheus image by digest}'
     command: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.retention.time=30d]
     volumes: [./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro, ./config/alerts.yml:/etc/prometheus/alerts.yml:ro, prometheus_data:/prometheus]
     secrets: [klyrow_metrics_token]
     networks: [backend]
     restart: unless-stopped
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:9090/-/ready]
+      interval: 30s
+      timeout: 5s
+      retries: 5
   grafana:
-    image: grafana/grafana:12.1.1
+    image: '${KLYROW_GRAFANA_IMAGE:?set the approved Grafana image by digest}'
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?required}
       GF_SERVER_ROOT_URL: https://app.klyrow.com/ops/
@@ -391,8 +416,13 @@ services:
     networks: [frontend, backend]
     restart: unless-stopped
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:3000/api/health]
+      interval: 30s
+      timeout: 5s
+      retries: 5
   node-exporter:
-    image: prom/node-exporter:v1.9.1
+    image: '${KLYROW_NODE_EXPORTER_IMAGE:?set the approved node-exporter image by digest}'
     command: [--path.rootfs=/host]
     volumes:
       - /:/host:ro,rslave
@@ -401,6 +431,11 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:9100/metrics]
+      interval: 30s
+      timeout: 5s
+      retries: 5
 networks:
   frontend: {}
   backend: {internal: true}
@@ -415,9 +450,21 @@ volumes:
   grafana_data: {}
   dkim_keys: {}
 secrets:
+  klyrow_database_owner_password:
+    file: '${KLYROW_DATABASE_OWNER_PASSWORD_FILE:?set the root-owned database owner password path}'
+  klyrow_database_runtime_password:
+    file: '${KLYROW_DATABASE_RUNTIME_PASSWORD_FILE:?set the root-owned database runtime password path}'
   klyrow_session_secret:
     file: '${KLYROW_SESSION_SECRET_FILE:?set the root-owned session secret path}'
   klyrow_postal_api_key:
     file: '${KLYROW_POSTAL_API_KEY_FILE:?set the root-owned Postal API key path}'
   klyrow_metrics_token:
     file: '${KLYROW_METRICS_TOKEN_FILE:?set the root-owned metrics token path}'
+  klyrow_middleware_api_key:
+    file: '${KLYROW_MIDDLEWARE_API_KEY_FILE:?set the root-owned Middleware API key path}'
+  klyrow_webhook_secret:
+    file: '${KLYROW_WEBHOOK_SECRET_FILE:?set the root-owned webhook secret path}'
+  klyrow_mautic_api_client_id:
+    file: '${KLYROW_MAUTIC_API_CLIENT_ID_FILE:?set the root-owned Mautic OAuth client ID path}'
+  klyrow_mautic_api_client_secret:
+    file: '${KLYROW_MAUTIC_API_CLIENT_SECRET_FILE:?set the root-owned Mautic OAuth client secret path}'

@@ -142,6 +142,11 @@ def list_mailboxes(ctx=Depends(auth),s:Session=Depends(db)):
 
 def authorize_agent_sender(s:Session,ctx:dict,sender:str,campaign_id:Optional[str],reply_to:Optional[str]=None):
     if not campaign_id:
+        # Browser webmail has already enforced exact tenant, mailbox access,
+        # enabled-sender and verified-domain policy before it reaches the
+        # shared sending engine. Preserve campaign-required mode for every
+        # other caller while allowing that explicitly marked server path.
+        if ctx.get("browser") is True and ctx.get("_klyrow_mail_channel")=="webmail":return
         if ctx.get("role")=="codestra-email-agent" or os.getenv("KLYROW_CAMPAIGN_REQUIRED","false").lower()=="true":raise HTTPException(403,"campaign_required")
         return
     normalized=sender.lower()
