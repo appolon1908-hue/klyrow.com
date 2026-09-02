@@ -114,9 +114,10 @@ services:
       KLYROW_DATABASE_URL: postgresql+psycopg://klyrow:${POSTGRES_PASSWORD:?required}@postgres:5432/klyrow
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
       KLYROW_MAUTIC_API_URL: http://mautic
-      KLYROW_MAUTIC_API_TOKEN_FILE: /run/secrets/klyrow_mautic_api_token
+      KLYROW_MAUTIC_API_CLIENT_ID_FILE: /run/secrets/klyrow_mautic_api_client_id
+      KLYROW_MAUTIC_API_CLIENT_SECRET_FILE: /run/secrets/klyrow_mautic_api_client_secret
     command: ["python", "-m", "app.service_worker"]
-    secrets: [klyrow_session_secret, klyrow_mautic_api_token]
+    secrets: [klyrow_session_secret, klyrow_mautic_api_client_id, klyrow_mautic_api_client_secret]
     depends_on:
       postgres: {condition: service_healthy}
       gateway-migrate: {condition: service_completed_successfully}
@@ -421,5 +422,7 @@ secrets:
     file: '${KLYROW_MIDDLEWARE_API_KEY_FILE:?set the root-owned Middleware API key path}'
   klyrow_webhook_secret:
     file: '${KLYROW_WEBHOOK_SECRET_FILE:?set the root-owned webhook secret path}'
-  klyrow_mautic_api_token:
-    file: '${KLYROW_MAUTIC_API_TOKEN_FILE:?set the root-owned Mautic API token path}'
+  klyrow_mautic_api_client_id:
+    file: '${KLYROW_MAUTIC_API_CLIENT_ID_FILE:?set the root-owned Mautic OAuth client ID path}'
+  klyrow_mautic_api_client_secret:
+    file: '${KLYROW_MAUTIC_API_CLIENT_SECRET_FILE:?set the root-owned Mautic OAuth client secret path}'
