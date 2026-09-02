@@ -142,6 +142,18 @@ def test_protected_publisher_scans_and_verifies_exact_digests_before_promotion()
     assert "sha256sum -c PUBLISH_SHA256SUMS" in workflow
 
 
+def test_attestation_verification_accepts_cosign_json_and_jsonl_output():
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    publish = workflow[workflow.index("  publish:") :]
+
+    # Cosign versions may emit one JSON array or multiple JSONL envelope
+    # objects. Slurp followed by a one-level flatten normalizes both forms
+    # before any payload is decoded.
+    assert publish.count("jq -se") == 4
+    assert publish.count("any(flatten(1)[];") == 4
+    assert "any(.[];" not in publish
+
+
 def test_pull_request_images_and_evidence_bind_to_exact_head_sha():
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "KLYROW_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}" in workflow

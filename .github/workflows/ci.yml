@@ -638,8 +638,8 @@ jobs:
             fi
             if ! cosign verify-attestation --type slsaprovenance1 \
               --certificate-identity "$SIGNING_IDENTITY" --certificate-oidc-issuer "$OIDC_ISSUER" \
-              "$exact_image" 2>/dev/null | jq -e --arg source "$KLYROW_SOURCE_SHA" --arg digest "$digest" '
-                any(.[];
+              "$exact_image" 2>/dev/null | jq -se --arg source "$KLYROW_SOURCE_SHA" --arg digest "$digest" '
+                any(flatten(1)[];
                   ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.sourceCommit == $source) and
                   ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.registryDigest == $digest)
                 )' >/dev/null; then
@@ -649,7 +649,7 @@ jobs:
             if ! cosign verify-attestation --type spdxjson \
               --certificate-identity "$SIGNING_IDENTITY" --certificate-oidc-issuer "$OIDC_ISSUER" \
               "$exact_image" 2>/dev/null | \
-              jq -e 'any(.[]; ((.payload | @base64d | fromjson).predicate.spdxVersion == "SPDX-2.3"))' >/dev/null; then
+              jq -se 'any(flatten(1)[]; ((.payload | @base64d | fromjson).predicate.spdxVersion == "SPDX-2.3"))' >/dev/null; then
               cosign attest --yes --type spdxjson \
                 --predicate "publish-sbom-${image}.spdx.json" "$exact_image"
             fi
@@ -682,12 +682,12 @@ jobs:
               --certificate-identity "$SIGNING_IDENTITY" --certificate-oidc-issuer "$OIDC_ISSUER" \
               "$exact_image" > "publish-sbom-verification-${image}.json"
             jq -e 'length > 0' "publish-signature-verification-${image}.json"
-            jq -e --arg source "$KLYROW_SOURCE_SHA" --arg digest "$digest" '
-              any(.[];
+            jq -se --arg source "$KLYROW_SOURCE_SHA" --arg digest "$digest" '
+              any(flatten(1)[];
                 ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.sourceCommit == $source) and
                 ((.payload | @base64d | fromjson).predicate.buildDefinition.externalParameters.registryDigest == $digest)
               )' "publish-provenance-verification-${image}.json"
-            jq -e 'any(.[]; ((.payload | @base64d | fromjson).predicate.spdxVersion == "SPDX-2.3"))' \
+            jq -se 'any(flatten(1)[]; ((.payload | @base64d | fromjson).predicate.spdxVersion == "SPDX-2.3"))' \
               "publish-sbom-verification-${image}.json"
           done
 
