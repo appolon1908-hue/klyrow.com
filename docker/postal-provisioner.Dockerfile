@@ -8,6 +8,7 @@ LABEL org.opencontainers.image.source=$SOURCE_REPOSITORY \
       org.opencontainers.image.version=$SOURCE_SHA
 USER root
 COPY docker/postal-security/debian.sources.list /etc/apt/sources.list
+# trivy:ignore:DS-0017 -- update and dist-upgrade are atomic in this same layer.
 RUN rm -f /etc/apt/sources.list.d/* \
     && DEBIAN_FRONTEND=noninteractive apt-get \
         -o Acquire::Check-Valid-Until=false update \
