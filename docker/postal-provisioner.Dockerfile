@@ -1,9 +1,4 @@
 FROM ghcr.io/postalserver/postal:3.3.7@sha256:e54b4a7eb106ee15eda5664311c4b9415546d4196f5c4336d23a78d6ce57b819
-ARG SOURCE_SHA
-ARG SOURCE_REPOSITORY=https://github.com/appolon1908-hue/klyrow.com
-LABEL org.opencontainers.image.source=$SOURCE_REPOSITORY \
-      org.opencontainers.image.revision=$SOURCE_SHA
-RUN test "$(printf '%s' "$SOURCE_SHA" | wc -c)" -eq 40
 USER root
 COPY docker/postal-security/debian.sources.list /etc/apt/sources.list
 RUN rm -f /etc/apt/sources.list.d/* \
@@ -47,6 +42,14 @@ RUN bundle config set deployment true \
     && bundle exec ruby -e 'expected={"rails"=>"7.2.3.2","jwt"=>"2.10.3","puma"=>"7.2.1","resolv"=>"0.7.2","zlib"=>"3.2.3"}; expected.each{|name,version| abort("unexpected #{name}") unless Gem.loaded_specs[name]&.version&.to_s==version}'
 RUN mkdir -p /opt/klyrow
 COPY apps/postal-provisioner/provisioner.rb /opt/klyrow/provisioner.rb
+RUN setcap -r /usr/local/bin/ruby \
+    && test -z "$(getcap /usr/local/bin/ruby)"
+ARG SOURCE_SHA
+ARG SOURCE_REPOSITORY=https://github.com/appolon1908-hue/klyrow.com
+LABEL org.opencontainers.image.source=$SOURCE_REPOSITORY \
+      org.opencontainers.image.revision=$SOURCE_SHA
+RUN test "$(printf '%s' "$SOURCE_SHA" | wc -c)" -eq 40
+USER postal
 WORKDIR /opt/postal/app
 EXPOSE 9090
 CMD ["sh", "-lc", "bundle exec rails runner /opt/klyrow/provisioner.rb"]

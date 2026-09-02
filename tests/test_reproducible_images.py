@@ -83,6 +83,9 @@ def test_postal_runtime_is_patched_from_immutable_os_and_gem_inputs():
     assert 'ARG SOURCE_SHA' in dockerfile
     assert 'org.opencontainers.image.revision=$SOURCE_SHA' in dockerfile
     assert 'wc -c)" -eq 40' in dockerfile
+    assert "\nUSER postal\nWORKDIR /opt/postal/app" in dockerfile
+    assert "setcap -r /usr/local/bin/ruby" in dockerfile
+    assert 'test -z "$(getcap /usr/local/bin/ruby)"' in dockerfile
 
 
 def test_ci_compares_two_timestamp_rewritten_oci_exports_before_publish():
