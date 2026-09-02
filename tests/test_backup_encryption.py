@@ -39,6 +39,7 @@ case "$*" in
   *"mariadb-dump"*) printf 'mautic-dump-fixture' ;;
   *"mautic tar"*) printf 'mautic-files-fixture' ;;
   *"export_definitions"*) printf '[]' ;;
+  *"import_definitions"*) cat >/dev/null ;;
   *"list_queues"*) printf '[]' ;;
   *"pg_restore"*|*"mariadb -uroot"*) cat >/dev/null ;;
   *) exit 9 ;;
@@ -87,10 +88,11 @@ esac
         CONFIRM_RESTORE="RESTORE_KLYROW",
     )
     restored = run(str(fixture / "scripts" / "restore"), str(archive), cwd=fixture, env=env)
-    assert "Klyrow databases restored" in restored.stdout
+    assert "Klyrow databases, Mautic files, and RabbitMQ definitions restored" in restored.stdout
     calls = docker_log.read_text()
     assert "pg_restore" in calls
     assert calls.count("mariadb -uroot") == 2
+    assert "import_definitions" in calls
 
 
 def test_backup_scripts_fail_closed_contract():

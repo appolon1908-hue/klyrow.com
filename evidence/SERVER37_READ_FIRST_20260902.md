@@ -107,3 +107,45 @@ Current non-claims:
 `SSH_CHANGED=NO`
 
 `SERVER37_EMAIL_PLATFORM=NOT_YET_PRODUCTION_READY`
+
+## Repository remediation candidate (not runtime evidence)
+
+PR #65's working candidate now closes the source-level findings without
+changing the running host:
+
+- the five-command Klyrow API stores the normalized request before returning
+  acceptance and the mail worker reclaims interrupted commands;
+- email submission, lifecycle callback, and provider-event outboxes use stable
+  idempotency/correlation/operation identifiers, claim serialization, bounded
+  retries, and `unknown_outcome` read-back rather than blind resubmission;
+- Postal Hash inbound delivery requires its RSA SHA-256 body signature, a
+  bounded provider timestamp, an exact enabled tenant route, replay/message
+  deduplication, attachment/message limits, and quarantine because Hash does
+  not provide trusted SPF/DKIM/DMARC results;
+- Postal route reconciliation preserves foreign routes and accepts only exact
+  reviewed addresses; mailbox storage enforces tenant ownership, role grants,
+  byte quotas, and retrievable attachment authority;
+- database owner/runtime credentials are file-backed, the migration runner
+  provisions fixed role `klyrow_runtime`, and production startup rejects any
+  unexpected or cluster-privileged application role;
+- encrypted backup now includes the three databases, Mautic persistent files,
+  drained RabbitMQ definitions/evidence, an atomic checksummed off-host copy,
+  and an isolated no-network restore harness;
+- every long-running production service has a functional or dependency-aware
+  healthcheck; production launchers require protected release evidence, exact
+  digest/OCI source identity, a reviewed configuration checksum, and a prior
+  rollback digest set.
+
+Local evidence at the candidate working tree:
+
+- targeted contract/security tests: `93/93 PASS`, followed by focused
+  database/release regressions `78/78 PASS`;
+- PostgreSQL 17.6 ordered migration replay: `33/33 PASS` on two runs;
+- application runtime role: `klyrow_runtime`, cluster privileges: `0`;
+- rendered 23-service Compose: digest validation and healthcheck coverage
+  `PASS`.
+
+These results do not change the production-ready non-claim. Exact-head CI,
+protected merge, published digests/attestations, approved backup recipient and
+off-host mount, isolated restore of a fresh production backup, DNS/domain
+read-back, and safe staging remain required.

@@ -117,6 +117,17 @@ def test_deploy_requires_protected_source_config_and_rollback_authority():
     assert "Runtime configuration checksum mismatch" in source
     assert "rollback authority must reference a prior source SHA" in validator
     assert "org.opencontainers.image.revision" in source
+    checksum = (ROOT / "scripts/config-checksum").read_text()
+    assert "config --format json" in checksum and "hashlib.sha256" in checksum
+
+
+def test_database_passwords_are_file_only_and_runtime_role_is_separate():
+    compose = (ROOT / "docker-compose.yml").read_text()
+    assert "POSTGRES_PASSWORD:" not in compose
+    assert "postgresql+psycopg://klyrow:${POSTGRES_PASSWORD" not in compose
+    assert "POSTGRES_PASSWORD_FILE: /run/secrets/klyrow_database_owner_password" in compose
+    assert compose.count("postgresql+psycopg://klyrow_runtime@postgres:5432/klyrow") >= 6
+    assert "KLYROW_DATABASE_RUNTIME_PASSWORD_FILE" in compose
 
 
 def test_outbox_recovers_abandoned_sending_leases():
@@ -201,13 +212,19 @@ def test_health_counts_outbox_and_reflects_durable_canary_capacity():
 
 def test_every_long_running_production_service_has_meaningful_health():
     compose = (ROOT / "docker-compose.yml").read_text()
+
+    def service_block(name):
+        match = re.search(rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)", compose)
+        assert match
+        return match.group(1)
+
     for service in ("mautic-cron", "mautic-worker"):
-        block = re.split(r"\n  [a-z0-9][a-z0-9_-]*:\n", compose.split(f"  {service}:\n", 1)[1], maxsplit=1)[0]
+        block = service_block(service)
         assert "doctrine:query:sql" in block and "healthcheck:" in block
-    postal_worker = compose.split("  postal-worker:", 1)[1].split("\n  postal-smtp:", 1)[0]
+    postal_worker = service_block("postal-worker")
     assert "rabbitmq" in postal_worker and "postal-db" in postal_worker
     for service in ("prometheus", "grafana", "node-exporter"):
-        block = re.split(r"\n  [a-z0-9][a-z0-9_-]*:\n", compose.split(f"  {service}:\n", 1)[1], maxsplit=1)[0]
+        block = service_block(service)
         assert "healthcheck:" in block
 
 
