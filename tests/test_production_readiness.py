@@ -25,7 +25,7 @@ def test_schema_migration_is_a_required_gateway_dependency():
     compose = (ROOT / "docker-compose.yml").read_text()
     runner = (ROOT / "scripts/migrate").read_text()
     assert "gateway-migrate: {condition: service_completed_successfully}" in compose
-    assert "2026090202_webmail_attachments.sql" in compose
+    assert "2026090203_integration_result_authority.sql" in compose
     assert "KLYROW_MIGRATE_IMAGE" in compose
     assert "docker/migrate.Dockerfile" not in compose
     assert "pg_advisory_xact_lock" in runner
@@ -154,6 +154,7 @@ def test_resolver_requires_write_permission_for_mutating_routes():
     source = (ROOT / "apps/gateway/app/main.py").read_text()
     assert 'request.method not in {"GET","HEAD","OPTIONS"}' in source
     assert 'permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send"' in source
+    assert 'request.url.path=="/v1/integrations/results":permission="klyrow.integration.result.write"' in source
 
 
 def test_health_counts_outbox_and_reflects_durable_canary_capacity():

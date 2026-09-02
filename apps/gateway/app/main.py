@@ -179,6 +179,7 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
         if resolver:
             if any(name.lower() in {"x-codestra-tenant-id","x-codestra-identity-id","x-codestra-tenant","x-codestra-subject"} for name in request.headers):raise HTTPException(403,"not_found")
             if request.url.path=="/v1/commands":permission="klyrow.middleware.command.write"
+            elif request.url.path=="/v1/integrations/results":permission="klyrow.integration.result.write"
             elif request.url.path.startswith("/v1/operations/"):permission="klyrow.middleware.operation.read"
             else:permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send" if request.method not in {"GET","HEAD","OPTIONS"} else "klyrow.read"
             headers={"Authorization":"Bearer "+raw,"X-Codestra-Required-Permission":permission}
@@ -195,7 +196,7 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
             except (TypeError,ValueError):raise HTTPException(503,"authorization_unavailable")
             if not resolved.get("authorized") or resolved.get("permission")!=permission:raise HTTPException(403,"not_found")
             if not resolved.get("identity_id") or not resolved.get("tenant_id"):raise HTTPException(503,"authorization_unavailable")
-            ctx={"sub":resolved["identity_id"],"tenant":resolved["tenant_id"],"role":resolved.get("role","tenant_user"),"service":True,"permissions":[permission]}
+            ctx={"sub":resolved["identity_id"],"tenant":resolved["tenant_id"],"role":resolved.get("role","tenant_user"),"identity_type":resolved.get("identity_type"),"service":True,"permissions":[permission]}
             tenant=s.get(Tenant,ctx["tenant"])
             if not tenant or not tenant.enabled:raise HTTPException(403,"tenant_suspended")
         else:

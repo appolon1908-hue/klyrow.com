@@ -89,3 +89,6 @@ def test_production_migration_is_required_by_the_model():
     attachments = Path("migrations/2026090202_webmail_attachments.sql").read_text()
     assert "CREATE TABLE IF NOT EXISTS webmail_attachments" in attachments
     assert "octet_length(content) = size" in attachments
+    result_authority = Path("migrations/2026090203_integration_result_authority.sql").read_text()
+    assert "uq_integration_result_source_key" in result_authority
+    assert "UNIQUE (tenant_id, source, result_key)" in result_authority

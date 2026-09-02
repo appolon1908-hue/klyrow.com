@@ -1,7 +1,7 @@
 services:
   gateway:
     environment:
-      KLYROW_REQUIRED_SCHEMA_VERSION: 2026090202_webmail_attachments.sql
+      KLYROW_REQUIRED_SCHEMA_VERSION: 2026090203_integration_result_authority.sql
       KLYROW_TENANT_POSTAL_PROVISIONING_ENABLED: "true"
       KLYROW_ALLOW_LEGACY_GLOBAL_POSTAL_KEY: "false"
 

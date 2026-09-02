@@ -1,4 +1,8 @@
+import os
+
 from fastapi.testclient import TestClient
+
+os.environ.setdefault("KLYROW_MIDDLEWARE_API_KEY","integration-result-test-token")
 
 from apps.gateway.app.main import Base,DB,Message,Tenant,User,app,engine,ph,rate_buckets
 from apps.gateway.app.messaging import DeliveryJob,WebhookAttempt,WebhookSubscription
@@ -13,13 +17,19 @@ def setup_module():
 def h(user):
     if user in tokens:return tokens[user]
     r=client.post("/v1/auth/login",json={"email":f"{user}@example.com","password":"long-enough-password"});assert r.status_code==200;tokens[user]={"Authorization":"Bearer "+r.json()["access_token"]};return tokens[user]
+def service_h(tenant):return {"Authorization":"Bearer "+os.environ["KLYROW_MIDDLEWARE_API_KEY"],"X-Klyrow-Tenant-Id":tenant}
 
 def test_support_odoo_and_n8n_use_durable_outbox_not_direct_database():
     support=client.post("/v1/support/tickets",headers=h("a"),json={"category":"deliverability","subject":"DNS review","description":"Please review DNS status"});assert support.status_code==201 and support.json()["odoo_sync"]=="QUEUED"
     event={"event_type":"MailDeliveryStatusV1","aggregate_id":"message-1","payload":{"status":"delivered"},"idempotency_key":"automation-event-0001"}
     first=client.post("/v1/automation/events",headers=h("a"),json=event);duplicate=client.post("/v1/automation/events",headers=h("a"),json=event);assert first.status_code==202 and first.json()["direct_database_write"] is False and duplicate.json()["duplicate"] is True
-    assert client.post("/v1/integrations/results",headers=h("b"),json={"outbox_id":first.json()["id"],"result_key":"result-event-0001","payload":{}}).status_code==404
-    result=client.post("/v1/integrations/results",headers=h("a"),json={"outbox_id":first.json()["id"],"result_key":"result-event-0001","payload":{"ok":True}});assert result.status_code==202
+    result_payload={"outbox_id":first.json()["id"],"source":"N8N","result_key":"result-event-0001","payload":{"ok":True}}
+    assert client.post("/v1/integrations/results",headers=h("a"),json=result_payload).status_code==403
+    assert client.post("/v1/integrations/results",headers=service_h("b"),json=result_payload).status_code==404
+    assert client.post("/v1/integrations/results",headers=service_h("a"),json={**result_payload,"source":"ODOO"}).status_code==403
+    result=client.post("/v1/integrations/results",headers=service_h("a"),json=result_payload);assert result.status_code==202
+    replay=client.post("/v1/integrations/results",headers=service_h("a"),json=result_payload);assert replay.status_code==202 and replay.json()["duplicate"] is True
+    assert client.post("/v1/integrations/results",headers=service_h("a"),json={**result_payload,"payload":{"ok":False}}).status_code==409
     billing=client.post("/v1/billing/odoo-sync",headers=h("a"),json={**event,"idempotency_key":"billing-sync-0001"});assert billing.json()["direct_odoo_database_write"] is False
 
 def test_export_closure_and_immediate_kill_switch_preserve_data():
