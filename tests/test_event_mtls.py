@@ -1,5 +1,6 @@
 import asyncio
 import importlib
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 def test_event_delivery_denies_plaintext(monkeypatch):
@@ -63,6 +64,10 @@ def test_email_event_uses_dedicated_callback_not_legacy_plaintext(monkeypatch,tm
         assert asyncio.run(main.emit_middleware("klyrow.email.delivered",{"message_id":"test-message"})) is True
         assert client.post.await_count == 1
         assert client.post.await_args.args[0] == "https://email-events.internal/callback"
+        envelope=json.loads(client.post.await_args.kwargs["content"])
+        assert envelope["schema_version"]=="1.0"
+        assert envelope["operation_id"]=="test-message"
+        assert len(envelope["payload_hash"])==64
 
 
 def test_provider_message_event_uses_dedicated_callback(monkeypatch,tmp_path):

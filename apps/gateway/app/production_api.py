@@ -17,6 +17,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import Boolean, DateTime, String, Text, UniqueConstraint, func, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .billing import BillingPlan, BillingPrice, BillingSubscription, Wallet
@@ -263,6 +264,12 @@ def _authorize_operation_mutation(ctx: dict[str, Any], item: Any) -> None:
         _require_mautic_permission(ctx, item.event_type)
 
 
+def _authorize_operation_read(ctx: dict[str, Any], item: Any) -> None:
+    """Apply the command-specific permission to Mautic result visibility too."""
+    if isinstance(item, IntegrationOutbox) and item.target == "MAUTIC":
+        _require_mautic_permission(ctx, item.event_type)
+
+
 @router.get("/health/live")
 def health_live() -> dict[str, str]:
     return {"status": "live"}
@@ -412,6 +419,7 @@ def domain_detail(domain_id: str, ctx: dict = Depends(auth), s: Session = Depend
 def domain_patch(
     domain_id: str, body: DomainPatch, ctx: dict = Depends(auth), s: Session = Depends(db)
 ) -> Any:
+    manage(ctx, s)
     item = _tenant_item(s, Domain, domain_id, ctx["tenant"])
     item.domain = body.domain.lower().rstrip(".")
     item.verified = False
@@ -424,6 +432,7 @@ def domain_patch(
 def domain_delete(
     domain_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
 ) -> Response:
+    manage(ctx, s)
     item = _tenant_item(s, Domain, domain_id, ctx["tenant"])
     if item.verified:
         raise HTTPException(409, "verified_domain_must_be_disabled_before_delete")
@@ -740,7 +749,13 @@ def operations(ctx: dict = Depends(auth), s: Session = Depends(db), limit: int =
     limit = max(1, min(limit, 500))
     command_rows = s.scalars(select(MiddlewareCommandOperation).where(MiddlewareCommandOperation.tenant_id == ctx["tenant"]).order_by(MiddlewareCommandOperation.created_at.desc()).limit(limit)).all()
     integration_rows = s.scalars(select(IntegrationOutbox).where(IntegrationOutbox.tenant_id == ctx["tenant"]).order_by(IntegrationOutbox.created_at.desc()).limit(limit)).all()
-    items = [_operation_json(item, s) for item in [*command_rows, *integration_rows]]
+    visible_rows = [
+        item for item in [*command_rows, *integration_rows]
+        if not isinstance(item, IntegrationOutbox)
+        or item.target != "MAUTIC"
+        or _has_permission(ctx, _mautic_permission(item.event_type))
+    ]
+    items = [_operation_json(item, s) for item in visible_rows]
     items.sort(key=lambda value: value["resource_version"], reverse=True)
     return {"items": items[:limit]}
 
@@ -748,6 +763,7 @@ def operations(ctx: dict = Depends(auth), s: Session = Depends(db), limit: int =
 @router.get("/v1/operations/{operation_id}/events")
 def operation_events(operation_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
     item = _find_operation(s, operation_id, ctx["tenant"])
+    _authorize_operation_read(ctx, item)
     events: list[dict[str, Any]] = [{"status": _operation_json(item, s)["status"], "at": item.updated_at}]
     if isinstance(item, IntegrationOutbox):
         for result in s.scalars(select(IntegrationResult).where(IntegrationResult.outbox_id == item.id, IntegrationResult.tenant_id == ctx["tenant"]).order_by(IntegrationResult.created_at)).all():
@@ -758,6 +774,7 @@ def operation_events(operation_id: str, ctx: dict = Depends(auth), s: Session = 
 @router.get("/v1/operations/{operation_id}/attempts")
 def operation_attempts(operation_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
     item = _find_operation(s, operation_id, ctx["tenant"])
+    _authorize_operation_read(ctx, item)
     attempts = item.attempts if isinstance(item, IntegrationOutbox) else 0
     return {"operation_id": operation_id, "attempts": attempts}
 
@@ -842,14 +859,32 @@ def mautic_command(
     item = IntegrationOutbox(id=body.operation_id or str(uuid.uuid4()), tenant_id=ctx["tenant"], target="MAUTIC", event_type=body.command, aggregate_id=body.aggregate_id, payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True), idempotency_key=idempotency_key)
     s.add(item)
     audit(s, ctx, "mautic.command.queued")
-    s.commit()
+    try:
+        s.commit()
+    except IntegrityError:
+        s.rollback()
+        prior = s.scalar(select(IntegrationOutbox).where(
+            IntegrationOutbox.tenant_id == ctx["tenant"],
+            IntegrationOutbox.target == "MAUTIC",
+            IntegrationOutbox.idempotency_key == idempotency_key,
+        ))
+        if prior is None:
+            raise
+        try:
+            prior_digest = json.loads(prior.payload_json).get("semantic_sha256")
+        except (TypeError, ValueError):
+            prior_digest = None
+        if prior_digest != digest:
+            raise HTTPException(409, "idempotency_key_payload_mismatch")
+        return _operation_json(prior, s)
     return _operation_json(item, s)
 
 
 @router.get("/v1/integrations/mautic/operations")
 def mautic_operations(ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
     rows = s.scalars(select(IntegrationOutbox).where(IntegrationOutbox.tenant_id == ctx["tenant"], IntegrationOutbox.target == "MAUTIC").order_by(IntegrationOutbox.created_at.desc()).limit(200)).all()
-    return {"items": [_operation_json(item, s) for item in rows]}
+    visible = [item for item in rows if _has_permission(ctx, _mautic_permission(item.event_type))]
+    return {"items": [_operation_json(item, s) for item in visible]}
 
 
 @router.get("/v1/integrations/mautic/operations/{operation_id}")
@@ -857,6 +892,7 @@ def mautic_operation(operation_id: str, ctx: dict = Depends(auth), s: Session = 
     item = _tenant_item(s, IntegrationOutbox, operation_id, ctx["tenant"])
     if item.target != "MAUTIC":
         raise HTTPException(404, "not_found")
+    _authorize_operation_read(ctx, item)
     return _operation_json(item, s)
 
 

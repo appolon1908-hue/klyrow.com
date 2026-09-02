@@ -25,7 +25,7 @@ def test_schema_migration_is_a_required_gateway_dependency():
     compose = (ROOT / "docker-compose.yml").read_text()
     runner = (ROOT / "scripts/migrate").read_text()
     assert "gateway-migrate: {condition: service_completed_successfully}" in compose
-    assert "2026090203_integration_result_authority.sql" in compose
+    assert "2026090207_middleware_command_request_authority.sql" in compose
     assert "KLYROW_MIGRATE_IMAGE" in compose
     assert "docker/migrate.Dockerfile" not in compose
     assert "pg_advisory_xact_lock" in runner

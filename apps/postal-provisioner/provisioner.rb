@@ -68,7 +68,11 @@ end
 def reconcile_inbound(payload)
   tenant_id = String(payload.fetch("tenant_id"))
   raise ArgumentError, "invalid tenant_id" unless tenant_id.match?(/\A[a-zA-Z0-9-]{1,80}\z/)
-  domains = Array(payload.fetch("domains")).map { |value| String(value).downcase }.uniq.sort
+  addresses = Array(payload.fetch("addresses")).map { |value| String(value).downcase }.uniq.sort
+  raise ArgumentError, "invalid address count" if addresses.empty? || addresses.length > 300
+  raise ArgumentError, "invalid address" unless addresses.all? { |value| value.match?(/\A[a-z0-9][a-z0-9._+-]{0,63}@[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\z/) }
+  raise ArgumentError, "inbound local part not allowed" unless addresses.all? { |value| INBOUND_LOCAL_PARTS.include?(value.split("@", 2).first) }
+  domains = addresses.map { |value| value.split("@", 2).last }.uniq.sort
   raise ArgumentError, "invalid domain count" if domains.empty? || domains.length > 100
   raise ArgumentError, "invalid domain" unless domains.all? { |value| value.match?(/\A[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?\z/) }
   reconciled = []
@@ -80,23 +84,37 @@ def reconcile_inbound(payload)
       server = domain.owner
       raise "Postal domain owner is not a server" unless server.is_a?(Server)
       endpoint = server.http_endpoints.find_or_initialize_by(name: "Klyrow signed inbound adapter")
+      if endpoint.persisted?
+        raise "foreign Klyrow inbound endpoint URL" unless endpoint.url == INBOUND_ENDPOINT_URL
+        raise "foreign Klyrow inbound endpoint encoding" unless endpoint.encoding == "BodyAsJSON"
+        raise "foreign Klyrow inbound endpoint format" unless ["RawMessage", "Hash"].include?(endpoint.format)
+      end
+      requested_local_parts = addresses.select { |value| value.end_with?("@#{name}") }.map { |value| value.split("@", 2).first }
+      requested_local_parts.each do |local_part|
+        route = domain.routes.find_by(name: local_part)
+        next if route.nil?
+        unless endpoint.persisted? && route.server == server && route.endpoint == endpoint && route.mode.to_s == "Endpoint"
+          raise "foreign Postal route conflict"
+        end
+      end
       endpoint.assign_attributes(
-        url: INBOUND_ENDPOINT_URL, encoding: "BodyAsJSON", format: "RawMessage",
+        url: INBOUND_ENDPOINT_URL, encoding: "BodyAsJSON", format: "Hash",
         strip_replies: false, include_attachments: true, timeout: 15,
       )
       endpoint.save!
-      INBOUND_LOCAL_PARTS.each do |local_part|
-        route = domain.routes.find_or_initialize_by(name: local_part)
-        route.server = server
-        route.endpoint = endpoint
-        route.mode = "Endpoint"
-        route.spam_mode = "Mark"
-        route.save!
+      requested_local_parts.each do |local_part|
+        route = domain.routes.find_by(name: local_part)
+        if route.nil?
+          domain.routes.create!(
+            name: local_part, server: server, endpoint: endpoint,
+            mode: "Endpoint", spam_mode: "Mark",
+          )
+        end
       end
-      reconciled << {"domain" => name, "server_id" => server.id.to_s, "routes" => INBOUND_LOCAL_PARTS}
+      reconciled << {"domain" => name, "server_id" => server.id.to_s, "routes" => requested_local_parts.sort}
     end
   end
-  {"tenant_id" => tenant_id, "endpoint" => "Klyrow signed inbound adapter", "domains" => reconciled}
+  {"tenant_id" => tenant_id, "endpoint" => "Klyrow signed inbound adapter", "addresses" => addresses, "domains" => reconciled}
 end
 
 

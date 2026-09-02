@@ -107,7 +107,8 @@ def _mailbox(s: Session, ctx: dict, mailbox_id: str, permission: str = "mail.rea
         WebmailMailbox.tenant_id == ctx["tenant"],
         WebmailMailbox.status == "ACTIVE",
     ))
-    if not item or not _workspace_permission(ctx, permission):
+    workspace_permission = "mail.read" if permission == "mail.manage" else permission
+    if not item or not _workspace_permission(ctx, workspace_permission):
         raise HTTPException(404, "mailbox_not_found")
     if ctx.get("role") in MANAGER_ROLES:
         return item
@@ -116,7 +117,9 @@ def _mailbox(s: Session, ctx: dict, mailbox_id: str, permission: str = "mail.rea
         WebmailAccess.mailbox_id == item.id,
         WebmailAccess.user_id == ctx["sub"],
     ))
-    if not grant or (permission == "mail.send" and grant.role not in {"OWNER", "SENDER"}):
+    if not grant or (permission == "mail.send" and grant.role not in {"OWNER", "SENDER"}) or (
+        permission == "mail.manage" and grant.role != "OWNER"
+    ):
         raise HTTPException(404, "mailbox_not_found")
     return item
 
@@ -260,7 +263,7 @@ def sync_verified_mailboxes(s: Session, tenant_id: Optional[str] = None) -> dict
     }
 
 
-async def _reconcile_postal_inbound(tenant_id: str, domains: list[str]) -> dict:
+async def _reconcile_postal_inbound(tenant_id: str, addresses: list[str]) -> dict:
     from .postal_provisioning import _bridge_token
 
     base = os.getenv("KLYROW_POSTAL_PROVISIONER_URL", "http://postal-provisioner:9090").rstrip("/")
@@ -269,14 +272,14 @@ async def _reconcile_postal_inbound(tenant_id: str, domains: list[str]) -> dict:
         async with httpx.AsyncClient(timeout=30, trust_env=False, follow_redirects=False) as client:
             response = await client.post(
                 base + "/v1/reconcile-inbound", headers=headers,
-                json={"tenant_id": tenant_id, "domains": domains},
+                json={"tenant_id": tenant_id, "addresses": addresses},
             )
             response.raise_for_status()
             result = response.json()
     except (httpx.HTTPError, ValueError, RuntimeError, OSError) as exc:
         raise HTTPException(503, "postal_inbound_reconciliation_failed") from exc
-    returned = sorted(str(item.get("domain") or "") for item in result.get("domains", []))
-    if returned != sorted(domains):
+    returned = sorted(str(item).lower() for item in result.get("addresses", []))
+    if returned != sorted(addresses):
         raise HTTPException(502, "postal_inbound_reconciliation_incomplete")
     return result
 
@@ -303,7 +306,7 @@ def capture_provider_inbound(s: Session, route: InboundRouteConfig, provider_ite
         WebmailMailbox.tenant_id == provider_item.tenant_id,
         WebmailMailbox.address == provider_item.recipient.lower(),
         WebmailMailbox.status == "ACTIVE",
-    ))
+    ).with_for_update())
     if not mailbox:
         return None
     references = re.findall(r"<[^>]+>", parsed.get("references") or "")
@@ -312,6 +315,10 @@ def capture_provider_inbound(s: Session, route: InboundRouteConfig, provider_ite
     attachment_contents = parsed.get("attachment_contents") or []
     if len(attachment_metadata) != len(attachment_contents):
         raise HTTPException(500, "inbound_attachment_content_mismatch")
+    stored_bytes = sum(len(str(parsed.get(field) or "").encode("utf-8")) for field in ("subject", "text", "html"))
+    stored_bytes += sum(len(content) for content in attachment_contents if isinstance(content, bytes))
+    if mailbox.storage_used_bytes + stored_bytes > mailbox.storage_quota_bytes:
+        raise HTTPException(507, "mailbox_storage_quota_exceeded")
     stored_attachments = []
     public_attachments = []
     for metadata, content in zip(attachment_metadata, attachment_contents, strict=True):
@@ -357,6 +364,7 @@ def capture_provider_inbound(s: Session, route: InboundRouteConfig, provider_ite
         received_at=now(),
     )
     mailbox.receiving_enabled = True
+    mailbox.storage_used_bytes += stored_bytes
     mailbox.updated_at = now()
     s.add(item)
     s.add_all(stored_attachments)
@@ -440,16 +448,37 @@ async def activate_inbound_mailboxes(
     from .provider import ProviderDomain
 
     _manager(ctx)
-    domains = list(s.scalars(select(Domain.domain).join(
+    candidate_domains = list(s.scalars(select(Domain.domain).join(
         ProviderDomain,
         (ProviderDomain.tenant_id == Domain.tenant_id) & (ProviderDomain.domain == Domain.domain),
     ).where(
         Domain.tenant_id == ctx["tenant"], Domain.verified == True,
         ProviderDomain.status == "SENDING_ENABLED", ProviderDomain.sending_enabled == True,
     ).order_by(Domain.domain)).all())
-    if not domains:
+    if not candidate_domains:
         raise HTTPException(409, "no_verified_sending_domains")
-    await _reconcile_postal_inbound(ctx["tenant"], domains)
+    candidate_domain_set = set(candidate_domains)
+    addresses = []
+    for address in s.scalars(select(AllowedSender.address).where(
+        AllowedSender.tenant_id == ctx["tenant"], AllowedSender.enabled == True,
+    ).order_by(AllowedSender.address)).all():
+        normalized = address.lower()
+        local_part, separator, domain = normalized.partition("@")
+        if not separator or domain not in candidate_domain_set or local_part not in INBOUND_LOCAL_PARTS:
+            continue
+        route = s.scalar(select(InboundRouteConfig).where(
+            InboundRouteConfig.tenant_id == ctx["tenant"], InboundRouteConfig.address == normalized,
+        ))
+        if route and route.destination_ref and (
+            route.destination_kind != "webmail" or route.destination_ref != "klyrow:webmail"
+        ):
+            continue
+        addresses.append(normalized)
+    addresses = sorted(set(addresses))
+    if not addresses:
+        raise HTTPException(409, "no_authorized_inbound_addresses")
+    await _reconcile_postal_inbound(ctx["tenant"], addresses)
+    domains = sorted({address.rsplit("@", 1)[-1] for address in addresses})
     outbound = await _reconcile_postal_outbound(s, ctx["tenant"], domains)
 
     domain_set = set(domains)
@@ -458,9 +487,6 @@ async def activate_inbound_mailboxes(
     )).all()
     for item in provider_domains:
         item.inbound_enabled = True
-    addresses = s.scalars(select(AllowedSender.address).where(
-        AllowedSender.tenant_id == ctx["tenant"], AllowedSender.enabled == True,
-    )).all()
     activated_routes = 0
     for address in addresses:
         normalized = address.lower()
@@ -659,7 +685,7 @@ async def send_message(
 
 @router.patch("/{mailbox_id}/messages/{message_id}")
 def update_message(mailbox_id: str, message_id: str, payload: MessageUpdate, ctx: dict = Depends(browser_context), _session: BrowserSession = Depends(csrf_guard), s: Session = Depends(db)):
-    mailbox = _mailbox(s, ctx, mailbox_id)
+    mailbox = _mailbox(s, ctx, mailbox_id, "mail.manage" if payload.folder is not None else "mail.read")
     item = _message(s, mailbox, message_id)
     if payload.folder is not None:
         item.folder = payload.folder
@@ -674,12 +700,29 @@ def update_message(mailbox_id: str, message_id: str, payload: MessageUpdate, ctx
 
 @router.delete("/{mailbox_id}/messages/{message_id}", status_code=204)
 def delete_message(mailbox_id: str, message_id: str, permanent: bool = False, ctx: dict = Depends(browser_context), _session: BrowserSession = Depends(csrf_guard), s: Session = Depends(db)):
-    mailbox = _mailbox(s, ctx, mailbox_id)
+    mailbox = _mailbox(s, ctx, mailbox_id, "mail.manage")
     item = _message(s, mailbox, message_id)
     if permanent:
         if item.folder != "TRASH":
             raise HTTPException(409, "move_message_to_trash_first")
+        attachments = s.scalars(select(WebmailAttachment).where(
+            WebmailAttachment.tenant_id == ctx["tenant"],
+            WebmailAttachment.mailbox_id == mailbox.id,
+            WebmailAttachment.message_id == item.id,
+        )).all()
+        reclaimed = 0
+        if item.direction == "INBOUND":
+            reclaimed = sum(len(str(value or "").encode("utf-8")) for value in (item.subject, item.text_body, item.html_body))
+            reclaimed += sum(attachment.size for attachment in attachments)
+        for attachment in attachments:
+            s.delete(attachment)
+        item.subject = "(deleted)"
+        item.text_body = None
+        item.html_body = None
+        item.attachments_json = "[]"
         item.deleted_at = now()
+        mailbox.storage_used_bytes = max(0, mailbox.storage_used_bytes - reclaimed)
+        mailbox.updated_at = now()
     else:
         item.folder = "TRASH"
         item.updated_at = now()

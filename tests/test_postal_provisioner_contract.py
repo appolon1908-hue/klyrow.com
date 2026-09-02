@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import yaml
 
@@ -41,11 +42,25 @@ def test_mutations_require_constant_time_bearer_authentication():
 
 def test_reconciliation_is_bounded_and_uses_postal_models():
     assert 'domains.length > 100' in SOURCE
+    assert 'addresses.length > 300' in SOURCE
     assert 'length > 16_384' in SOURCE
     assert 'Domain.find_by!(name: name)' in SOURCE
     assert 'find_or_initialize_by(name: "Klyrow signed inbound adapter")' in SOURCE
     assert 'find_or_create_by!(' in SOURCE
     assert "UPDATE " not in SOURCE.upper() and "INSERT INTO" not in SOURCE.upper()
+
+
+def test_inbound_reconciliation_is_exact_address_bound_and_preserves_foreign_routes():
+    inbound = SOURCE.split("def reconcile_inbound(payload)", 1)[1].split(
+        "def reconcile_outbound(payload)", 1
+    )[0]
+    assert 'payload.fetch("addresses")' in inbound
+    assert 'format: "Hash"' in inbound
+    assert 'raise "foreign Postal route conflict"' in inbound
+    assert "INBOUND_LOCAL_PARTS.each" not in inbound
+    assert re.search(r"route\.server\s*=(?!=)", inbound) is None
+    assert re.search(r"route\.endpoint\s*=(?!=)", inbound) is None
+    assert 'domain.routes.create!(' in inbound
 
 
 def test_inbound_destination_is_pinned_to_the_gateway_contract():

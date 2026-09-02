@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .main import Base
@@ -30,6 +30,7 @@ class WebmailMailbox(Base):
     sending_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     receiving_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     storage_quota_bytes: Mapped[int] = mapped_column(Integer, default=1_073_741_824)
+    storage_used_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
@@ -85,9 +86,6 @@ class WebmailMessage(Base):
 
 class WebmailAttachment(Base):
     __tablename__ = "webmail_attachments"
-    __table_args__ = (
-        UniqueConstraint("message_id", "sha256", "filename", name="uq_webmail_attachment_message_digest_name"),
-    )
     id: Mapped[str] = mapped_column(String, primary_key=True)
     tenant_id: Mapped[str] = mapped_column(String, index=True)
     mailbox_id: Mapped[str] = mapped_column(ForeignKey("webmail_mailboxes.id"), index=True)
