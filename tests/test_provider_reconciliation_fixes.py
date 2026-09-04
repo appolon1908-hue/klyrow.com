@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,13 +10,25 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from apps.gateway.app import provider
+os.environ.setdefault("KLYROW_DATABASE_URL", "sqlite:///./test-provider-reconciliation.db")
+os.environ.setdefault(
+    "KLYROW_SESSION_SECRET",
+    "test-secret-provider-reconciliation-minimum-32-characters",
+)
+os.environ.setdefault("KLYROW_SAFE_MODE", "true")
+os.environ.setdefault("KLYROW_ENV", "test")
+os.environ.setdefault("KLYROW_SANDBOX_DOMAIN", "klyrow-sink.test")
+
+# Import the composition root before ``provider``. The production composition
+# follows this order, and importing the provider first would enter its expected
+# back-reference to ``main`` before the provider module has finished loading.
 from apps.gateway.app.main import (
     Base,
     InboundRouteConfig,
     SMTP_EVENT_MAP,
     Tenant,
 )
+from apps.gateway.app import provider
 from apps.gateway.app.provider import (
     ProviderEvent,
     ProviderInbound,
