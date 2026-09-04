@@ -9,6 +9,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import auth_bff
 from .auth_bff import BrowserSession, SESSION_COOKIE, browser_context
@@ -41,7 +44,9 @@ def _stored_claims(item: BrowserSession) -> dict:
             },
         )
     except Exception as exc:
-        raise PlatformOwnerError(403, "platform_owner_reauthentication_required") from exc
+        raise PlatformOwnerError(
+            403, "platform_owner_reauthentication_required"
+        ) from exc
     if not isinstance(claims, dict):
         raise PlatformOwnerError(403, "platform_owner_claims_invalid")
     return claims
@@ -90,32 +95,48 @@ def _validate_session(s: Session, item: BrowserSession) -> None:
     )
 
 
+def _validate_raw_session(raw: str) -> None:
+    """Perform synchronous owner lookup and validation in one worker thread."""
+
+    with DB() as s:
+        item = s.scalar(
+            select(BrowserSession).where(BrowserSession.token_hash == sha(raw))
+        )
+        if item and item.revoked_at is None:
+            _validate_session(s, item)
+
+
 def install_platform_owner_guard(app) -> None:
-    """Install once before the ASGI middleware stack is built."""
+    """Install inside existing instrumentation before the ASGI stack is built."""
 
     if getattr(app.state, "klyrow_platform_owner_guard_installed", False):
         return
+    if app.middleware_stack is not None:
+        raise RuntimeError(
+            "platform owner guard must be installed before the ASGI stack is built"
+        )
 
-    @app.middleware("http")
     async def platform_owner_guard(request: Request, call_next):
         if request.url.path.startswith(PLATFORM_OWNER_PATH_PREFIXES):
             raw = request.cookies.get(SESSION_COOKIE, "")
             if raw:
-                with DB() as s:
-                    item = s.scalar(
-                        select(BrowserSession).where(BrowserSession.token_hash == sha(raw))
+                try:
+                    await run_in_threadpool(_validate_raw_session, raw)
+                except PlatformOwnerError as exc:
+                    return JSONResponse(
+                        {"detail": exc.detail},
+                        status_code=exc.status_code,
+                        headers={"Cache-Control": "no-store"},
                     )
-                    if item and item.revoked_at is None:
-                        try:
-                            _validate_session(s, item)
-                        except PlatformOwnerError as exc:
-                            return JSONResponse(
-                                {"detail": exc.detail},
-                                status_code=exc.status_code,
-                                headers={"Cache-Control": "no-store"},
-                            )
         return await call_next(request)
 
+    # Starlette inserts decorator/add_middleware registrations at the front,
+    # making the latest registration outermost. Appending this middleware keeps
+    # the existing request-ID, security-header, metric, and latency middleware
+    # outside the owner guard, so even early denials receive full instrumentation.
+    app.user_middleware.append(
+        Middleware(BaseHTTPMiddleware, dispatch=platform_owner_guard)
+    )
     app.state.klyrow_platform_owner_guard_installed = True
 
 
