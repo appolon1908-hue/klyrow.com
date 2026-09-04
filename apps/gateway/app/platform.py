@@ -79,8 +79,15 @@ else:
     auth_bff._identity_context = resolve_identity_context_with_provisioning
 
 # Install after route registration but before the ASGI middleware stack is
-# built. Platform-owner admin APIs then fail closed before their handlers run.
+# built. A platform-admin browser session then satisfies the exact-owner gate
+# before any /app/api/ handler runs.
 install_platform_owner_guard(app)
+
+# Install cross-cutting runtime parity repairs only after every source module
+# that captured the historical helpers has been imported.
+from .runtime_authority_fixes import install_runtime_authority_fixes
+
+install_runtime_authority_fixes()
 
 # The core app may have generated OpenAPI before browser composition.
 app.openapi_schema = None
@@ -116,6 +123,11 @@ def platform_admin_ui(path: str = ""):
 @app.get("/app/{path:path}", include_in_schema=False)
 def product_app_ui(path: str = ""):
     return _ui_index()
+
+
+from .openapi_authority import install_openapi_authority
+
+install_openapi_authority(app)
 
 
 __all__ = ["app"]

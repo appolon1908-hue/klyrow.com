@@ -130,10 +130,14 @@ def test_standard_launchers_mount_security_payload_secret():
         "scripts/start",
         "scripts/update",
         "scripts/deploy",
-        "config/systemd/klyrow-stack.service",
     ):
         content = (root / relative).read_text(encoding="utf-8")
         assert override in content, f"{relative} must include SECURITY mail compose override"
+
+    unit = (root / "config/systemd/klyrow-stack.service").read_text(encoding="utf-8")
+    assert "ExecStart=/root/klyrow.com/scripts/start" in unit
+    assert "ExecStop=/root/klyrow.com/scripts/stop" in unit
+    assert "docker compose" not in unit
 
 
 def test_security_retention_covers_sandbox_and_lease_terminal_paths():

@@ -312,14 +312,21 @@ def test_processing_mautic_operation_cannot_report_successful_cancellation():
     )
 
     class ProcessingSession:
+        def __init__(self):
+            self.scalar_calls = 0
+
         def scalar(self, _statement):
-            return item
+            self.scalar_calls += 1
+            if self.scalar_calls == 1:
+                return item
+            return None
 
     with pytest.raises(HTTPException, match="operation_processing_not_cancellable") as denied:
         operation_cancel(
             item.id,
             {"sub": "marketer", "tenant": "tenant-a", "role": "MARKETING"},
             ProcessingSession(),
+            "cancel-processing-operation",
         )
     assert denied.value.status_code == 409
 

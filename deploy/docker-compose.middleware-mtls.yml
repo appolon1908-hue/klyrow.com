@@ -1,0 +1,14 @@
+services:
+  gateway:
+    environment:
+      KLYROW_MIDDLEWARE_URL: https://middleware-email-events.internal.codestra.agency:18080
+      KLYROW_EMAIL_EVENT_URL: https://middleware-email-events.internal.codestra.agency:18080/internal/provider-events/klyrow
+    extra_hosts:
+      - "middleware-email-events.internal.codestra.agency:10.40.0.1"
+
+  worker:
+    environment:
+      KLYROW_MIDDLEWARE_URL: https://middleware-email-events.internal.codestra.agency:18080
+      KLYROW_EMAIL_EVENT_URL: https://middleware-email-events.internal.codestra.agency:18080/internal/provider-events/klyrow
+    extra_hosts:
+      - "middleware-email-events.internal.codestra.agency:10.40.0.1"

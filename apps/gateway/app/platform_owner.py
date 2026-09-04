@@ -119,7 +119,7 @@ def install_platform_owner_guard(app) -> None:
     app.state.klyrow_platform_owner_guard_installed = True
 
 
-@router.get("/auth/step-up")
+@router.get("/auth/step-up", include_in_schema=False)
 def platform_owner_step_up(
     return_to: str = "/admin",
     _ctx: dict = Depends(browser_context),
@@ -128,7 +128,8 @@ def platform_owner_step_up(
 
     Issue #83 owns the secure host-only flow-cookie prerequisite. Starting a
     fresh authorization transaction before that prerequisite lands would leave
-    the step-up state vulnerable to login-CSRF/session-swap attacks.
+    the step-up state vulnerable to login-CSRF/session-swap attacks. The route
+    remains outside generated clients until that prerequisite is protected.
     """
 
     del return_to, _ctx
