@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 source "$(dirname "$0")/lib.sh"; require_env
 
-COMPOSE=(docker compose -f docker-compose.yml -f deploy/docker-compose.security-mail.yml -f docker-compose.postal-provisioning.yml -f docker-compose.web.yml)
+COMPOSE=(docker compose -f docker-compose.yml -f deploy/docker-compose.middleware-mtls.yml -f deploy/docker-compose.security-mail.yml -f docker-compose.postal-provisioning.yml -f docker-compose.web.yml)
 "${COMPOSE[@]}" config --quiet
 scripts/validate-production-images "${COMPOSE[@]}" >/dev/null
 "${COMPOSE[@]}" config --format json |

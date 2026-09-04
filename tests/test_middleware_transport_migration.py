@@ -48,11 +48,15 @@ def test_first_upgrade_runs_the_new_migration_after_pull():
     assert first < pull < second < compose
 
 
-def test_deploy_and_update_always_apply_the_mtls_overlay():
-    for script_name in ("deploy", "update"):
+def test_every_standard_compose_path_applies_the_mtls_overlay():
+    for script_name in ("deploy", "update", "start", "stop", "config-checksum"):
         source = (ROOT / f"scripts/{script_name}").read_text(encoding="utf-8")
         assert f"-f {OVERLAY}" in source
         assert source.index("-f docker-compose.yml") < source.index(f"-f {OVERLAY}")
+
+    for script_name in ("deploy", "update", "start"):
+        source = (ROOT / f"scripts/{script_name}").read_text(encoding="utf-8")
+        assert "scripts/migrate-runtime-secrets" in source
 
     overlay = (ROOT / OVERLAY).read_text(encoding="utf-8")
     assert overlay.count(f"KLYROW_MIDDLEWARE_URL: {CANONICAL}") == 2
@@ -62,6 +66,22 @@ def test_deploy_and_update_always_apply_the_mtls_overlay():
     assert overlay.count(
         '"middleware-email-events.internal.codestra.agency:10.40.0.1"'
     ) == 2
+
+
+def test_systemd_delegates_to_the_governed_launchers():
+    service = (ROOT / "config/systemd/klyrow-stack.service").read_text(
+        encoding="utf-8"
+    )
+    assert "ExecStart=/root/klyrow.com/scripts/start" in service
+    assert "ExecStop=/root/klyrow.com/scripts/stop" in service
+    assert "docker compose" not in service
+
+
+def test_encrypted_backup_includes_active_compose_authority():
+    backup = (ROOT / "scripts/backup").read_text(encoding="utf-8")
+    assert "paths=(config deploy docker docs scripts" in backup
+    assert "docker-compose.postal-provisioning.yml" in backup
+    assert "docker-compose.web.yml" in backup
 
 
 def test_documented_outbound_transport_is_mtls_only():

@@ -16,12 +16,16 @@ def test_encrypted_backup_restore_round_trip(tmp_path):
         raise AssertionError("gpg is required for backup certification")
 
     fixture = tmp_path / "fixture"
-    for directory in ("scripts", "config", "docker", "docs", "secrets", "bin", "backups", "offhost"):
+    for directory in ("scripts", "config", "deploy", "docker", "docs", "secrets", "bin", "backups", "offhost"):
         (fixture / directory).mkdir(parents=True, exist_ok=True)
     for name in ("backup", "archive-offhost", "restore", "lib.sh"):
         shutil.copy2(ROOT / "scripts" / name, fixture / "scripts" / name)
     (fixture / ".env").write_text("KLYROW_ENV=test\n")
     (fixture / "docker-compose.yml").write_text("services: {}\n")
+    (fixture / "docker-compose.postal-provisioning.yml").write_text("services: {}\n")
+    (fixture / "docker-compose.web.yml").write_text("services: {}\n")
+    (fixture / "deploy" / "docker-compose.middleware-mtls.yml").write_text("services: {}\n")
+    (fixture / "deploy" / "docker-compose.security-mail.yml").write_text("services: {}\n")
     (fixture / "config" / "fixture").write_text("configuration\n")
     (fixture / "docker" / "fixture").write_text("container\n")
     (fixture / "docs" / "fixture").write_text("documentation\n")
@@ -106,6 +110,9 @@ def test_backup_scripts_fail_closed_contract():
     assert "tar.gz.gpg" in backup
     assert "--encrypt" in backup
     assert "stat -f -c %T" in backup and "tmpfs" in backup
+    assert "paths=(config deploy docker docs scripts" in backup
+    assert "docker-compose.postal-provisioning.yml" in backup
+    assert "docker-compose.web.yml" in backup
     assert "CONFIRM_RESTORE=RESTORE_KLYROW" in restore
     assert "--decrypt" in restore
     assert "find \"$root\" -xdev -mindepth 1 -depth -delete" in restore
