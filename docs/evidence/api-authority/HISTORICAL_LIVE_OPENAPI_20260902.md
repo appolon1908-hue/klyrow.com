@@ -9,17 +9,18 @@ This record preserves the non-executable evidence from the historical live-gatew
 - Historical exact-head Actions run: `33588339797` — PASS
 - Observed runtime: `klyrow-gateway-1`
 - Files compared with the observed container: 25
-- Documented OpenAPI HTTP operations: 258
-- Runtime discovery route: 1 additional operation, for 259 runtime operations total
-- Sorted `METHOD PATH` authority SHA-256: `7d005a48538f0fcc15370a395cb0f33f1928b368dc07d631f0384b58a241b2e6`
+- OpenAPI-documented HTTP operations: 258
+- Sorted documented `METHOD PATH` SHA-256: `7d005a48538f0fcc15370a395cb0f33f1928b368dc07d631f0384b58a241b2e6`
 
 The original evidence stated that all 25 captured files matched the observed container byte-for-byte before the snapshot was committed. The historical branch and commit remain available in Git history for forensic comparison.
+
+The fingerprint above covers the operations emitted by the historical OpenAPI document only. The observed application also exposed routes omitted from that schema, including its runtime discovery endpoint and at least one hidden compatibility endpoint (`POST /v1/email/send`, registered with `include_in_schema=False`). The historical evidence did not inventory the complete `APIRoute` table, so it does **not** establish an authoritative total runtime-operation count and must not be used to prove hidden-route compatibility.
 
 ## Authority boundary
 
 The canonical application remains `apps.gateway.app.platform:app`, sourced from `apps/gateway`. Current operation-level audience, authentication, CSRF, webhook-signature, and idempotency authority must be changed only through the canonical source and its focused remediation PRs.
 
-The historical snapshot classified routes as `PUBLIC`, `BROWSER_BFF`, `INTERNAL`, `ADMIN`, `WEBHOOK`, `TRACKING`, or `LEGACY`. Those values are historical observations, not permission to restore the old snapshot over protected source.
+The historical snapshot classified documented routes as `PUBLIC`, `BROWSER_BFF`, `INTERNAL`, `ADMIN`, `WEBHOOK`, `TRACKING`, or `LEGACY`. Those values are historical observations. They do not prove the enforced dependency of every route, they do not cover hidden routes, and they are not permission to restore the old snapshot over protected source.
 
 ## Non-duplication rule
 
@@ -29,7 +30,7 @@ No executable source, workflow, image, Compose file, migration, or runtime depen
 
 ## Change control
 
-Any current operation added, removed, renamed, reclassified, or assigned a different authentication model requires review against the current canonical OpenAPI authority. A historical fingerprint mismatch is evidence of evolution and must not be “fixed” by restoring stale runtime code.
+Any current operation added, removed, renamed, reclassified, or assigned a different authentication model requires review against the current canonical route table and OpenAPI authority. Candidate validation must inventory the deployable `apps.gateway.app.platform:app`, including hidden `APIRoute` entries, and derive authentication metadata from the dependencies actually enforced by that application. A historical fingerprint mismatch is evidence of evolution and must not be “fixed” by restoring stale runtime code.
 
 ## Safety
 
