@@ -198,10 +198,57 @@ def test_locked_browser_authority_uses_four_shared_refreshing_locks() -> None:
         statement._for_update_arg is not None
         for statement in session.statements
     )
+    assert all(statement._for_update_arg.read is True for statement in session.statements)
     assert all(
         statement.get_execution_options().get("populate_existing") is True
         for statement in session.statements
     )
+
+
+def test_workspace_switch_uses_exclusive_session_and_identity_locks() -> None:
+    item, user, member, identity, context = _authority_snapshot()
+    session = _LockingSession(item, user, member, identity)
+
+    platform_owner._locked_browser_authority(
+        session,
+        context,
+        exclusive_session=True,
+        exclusive_identity=True,
+    )
+
+    assert [
+        statement._for_update_arg.read for statement in session.statements
+    ] == [False, True, True, False]
+
+
+def test_workspace_switch_route_selects_exclusive_lock_modes(monkeypatch) -> None:
+    item, user, member, identity, context = _authority_snapshot(
+        role="tenant_admin"
+    )
+    observed = []
+
+    def locked(_session, _context, **lock_modes):
+        observed.append(lock_modes)
+        return item, user, member, identity
+
+    monkeypatch.setattr(platform_owner, "_locked_browser_authority", locked)
+    monkeypatch.setattr(
+        platform_owner,
+        "_validate_owner_objects",
+        lambda *_args, **_kwargs: False,
+    )
+    request = _request("/app/api/organizations/tenant-b/switch")
+
+    platform_owner.platform_owner_role_stability_guard(
+        request,
+        ctx=context,
+        s=object(),
+    )
+
+    assert observed == [
+        {"exclusive_session": True, "exclusive_identity": True}
+    ]
+    assert request.state.klyrow_platform_owner_authority_locked is True
 
 
 def test_normal_browser_role_is_locked_without_owner_configuration(
@@ -351,8 +398,11 @@ def test_same_transaction_lock_contract_is_explicit_in_source() -> None:
     source = Path("apps/gateway/app/platform_owner.py").read_text(
         encoding="utf-8"
     )
-    assert source.count(".with_for_update(read=True)") == 4
+    assert source.count(".with_for_update(") == 4
+    assert ".with_for_update(read=not exclusive_session)" in source
+    assert ".with_for_update(read=not exclusive_identity)" in source
     assert source.count(".execution_options(populate_existing=True)") >= 4
+    assert "WORKSPACE_SWITCH_ROUTE" in source
     assert "platform_owner_role_stability_guard" in source
     assert "_install_browser_route_dependencies" in source
     assert "route.dependant.dependencies.insert" in source
