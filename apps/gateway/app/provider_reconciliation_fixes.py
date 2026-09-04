@@ -8,6 +8,7 @@ hiding or resolving lossy records.
 
 from __future__ import annotations
 
+import binascii
 from typing import Any
 
 from sqlalchemy import case, func, or_, select
@@ -55,6 +56,166 @@ def middleware_inbound_eligible(route: Any, disposition: str) -> bool:
         disposition == "ACCEPT"
         and middleware_destination_kind(route) in EXPLICIT_ODOO_DESTINATIONS
     )
+
+
+def _scoped_inbound_route(session: Any, item: Any, event: Any) -> Any | None:
+    """Resolve an inbound route only inside the event's tenant boundary."""
+
+    if str(item.tenant_id) != str(event.tenant_id):
+        return None
+
+    route = session.scalar(
+        select(core.InboundRouteConfig).where(
+            core.InboundRouteConfig.id == item.route_id,
+            core.InboundRouteConfig.tenant_id == event.tenant_id,
+        )
+    )
+    if route is not None:
+        return route
+
+    from .messaging import InboundRoute
+
+    return session.scalar(
+        select(InboundRoute).where(
+            InboundRoute.id == item.route_id,
+            InboundRoute.tenant_id == event.tenant_id,
+        )
+    )
+
+
+def _attachment_content_complete(attachment: Any) -> bool:
+    """Accept valid base64 content, including the canonical empty payload."""
+
+    if (
+        not isinstance(attachment, dict)
+        or "data_b64" not in attachment
+        or not isinstance(attachment["data_b64"], str)
+    ):
+        return False
+    try:
+        decoded = provider.base64.b64decode(
+            attachment["data_b64"].encode("ascii"),
+            validate=True,
+        )
+    except (UnicodeEncodeError, ValueError, binascii.Error):
+        return False
+
+    expected_size = attachment.get("size")
+    if expected_size is not None:
+        try:
+            if int(expected_size) != len(decoded):
+                return False
+        except (TypeError, ValueError):
+            return False
+
+    expected_hash = attachment.get("sha256")
+    if expected_hash is not None and (
+        not isinstance(expected_hash, str)
+        or provider.hashlib.sha256(decoded).hexdigest() != expected_hash.lower()
+    ):
+        return False
+    return True
+
+
+def _upgrade_legacy_inbound_event(
+    session: Any,
+    event: Any,
+) -> tuple[str, dict[str, Any] | None]:
+    """Upgrade one inbound event without crossing its tenant boundary."""
+
+    item = session.scalar(
+        select(provider.ProviderInbound).where(
+            provider.ProviderInbound.id == event.message_id,
+            provider.ProviderInbound.tenant_id == event.tenant_id,
+        )
+    )
+    if item is None:
+        return "blocked", None
+
+    route = _scoped_inbound_route(session, item, event)
+    if route is None:
+        return "blocked", None
+    if not middleware_inbound_eligible(route, item.disposition):
+        return "skipped", None
+
+    try:
+        existing = provider.json.loads(event.payload_json)
+    except (TypeError, ValueError):
+        return "blocked", None
+    if not isinstance(existing, dict):
+        return "blocked", None
+
+    required = ("recipient", "sender", "subject", "destination_kind")
+    if all(existing.get(field) is not None for field in required):
+        raw_attachments = existing.get("attachments") or []
+        if not isinstance(raw_attachments, list) or any(
+            not _attachment_content_complete(attachment)
+            for attachment in raw_attachments
+        ):
+            return "blocked", None
+
+        # The relational rows selected through the event tenant are the
+        # authority for all identity and message metadata. Retain only the
+        # replayable attachment bytes and non-authority transport metadata from
+        # the historical payload.
+        existing.update(
+            {
+                "event_id": event.id,
+                "event": "inbound.received",
+                "tenant_id": item.tenant_id,
+                "inbound_id": item.id,
+                "provider_event_id": item.provider_event_id,
+                "route_id": item.route_id,
+                "destination_kind": middleware_destination_kind(route),
+                "destination_ref": route.destination_ref,
+                "disposition": item.disposition,
+                "recipient": item.recipient,
+                "sender": item.sender,
+                "subject": item.subject,
+                "message_id": item.message_id_header,
+                "text": item.text_body,
+                "html": item.html_body,
+                "attachments": raw_attachments,
+            }
+        )
+        return "requeue", existing
+
+    try:
+        attachments = provider.json.loads(item.attachments_json or "[]")
+    except (TypeError, ValueError):
+        return "blocked", None
+    if attachments:
+        # Historical rows intentionally retained only attachment hashes. Never
+        # fabricate content or acknowledge a lossy replay.
+        return "blocked", None
+
+    parsed = {
+        "message_id": item.message_id_header,
+        "in_reply_to": existing.get("in_reply_to"),
+        "references": existing.get("references"),
+        "date": existing.get("date"),
+        "cc": existing.get("cc"),
+        "text": item.text_body,
+        "html": item.html_body,
+        "attachments": [],
+        "attachment_contents": [],
+    }
+    occurred_at = str(
+        existing.get("occurred_at") or event.created_at.isoformat()
+    )
+    payload_hash = str(
+        existing.get("payload_hash")
+        or provider.hashlib.sha256(event.payload_json.encode()).hexdigest()
+    )
+    upgraded = provider.middleware_inbound_payload(
+        event_id=event.id,
+        item=item,
+        route=route,
+        parsed=parsed,
+        occurred_at=occurred_at,
+        payload_hash=payload_hash,
+    )
+    return "requeue", upgraded
 
 
 def _due_event_predicate(tenant_id: str, current: Any):
@@ -161,9 +322,9 @@ def reconcile_provider_outbox_dead_letters(
 
     The batch is shared fairly between event and usage queues whenever both
     contain due records. Blocked event rows stay ``DEAD_LETTER`` and keep the
-    critical marker, but are sorted behind unreviewed rows on later calls. This
-    guarantees progress without fabricating attachment content or acknowledging
-    unresolved data as delivered/skipped.
+    critical marker, but are sorted behind unreviewed rows on later calls. A
+    one-row apply first classifies an unreviewed event, then yields to usage
+    while only already-reviewed blocked events remain.
     """
 
     if not 1 <= limit <= 50:
@@ -182,10 +343,23 @@ def reconcile_provider_outbox_dead_letters(
         .select_from(provider.ProviderUsageEvent)
         .where(*_due_usage_predicate(tenant_id, current)),
     )
+    unreviewed_due_event_count = _count(
+        session,
+        select(func.count())
+        .select_from(provider.ProviderEvent)
+        .where(
+            *_due_event_predicate(tenant_id, current),
+            _unreviewed_event_predicate(),
+        ),
+    )
 
     if due_event_count and due_usage_count:
-        event_budget = max(1, limit // 2)
-        usage_budget = limit - event_budget
+        if limit == 1:
+            event_budget = 1 if unreviewed_due_event_count else 0
+            usage_budget = 1 - event_budget
+        else:
+            event_budget = max(1, limit // 2)
+            usage_budget = limit - event_budget
     elif due_event_count:
         event_budget, usage_budget = limit, 0
     else:
@@ -341,6 +515,7 @@ def install_provider_reconciliation_fixes() -> None:
         return
     provider.middleware_destination_kind = middleware_destination_kind
     provider.middleware_inbound_eligible = middleware_inbound_eligible
+    provider._upgrade_legacy_inbound_event = _upgrade_legacy_inbound_event
     provider.reconcile_provider_outbox_dead_letters = (
         reconcile_provider_outbox_dead_letters
     )
@@ -351,6 +526,7 @@ __all__ = [
     "BLOCKED_RECONCILIATION_MARKER",
     "EXPLICIT_ODOO_DESTINATIONS",
     "LEGACY_ODOO_WEBHOOK_DESTINATIONS",
+    "_upgrade_legacy_inbound_event",
     "install_provider_reconciliation_fixes",
     "middleware_destination_kind",
     "middleware_inbound_eligible",
