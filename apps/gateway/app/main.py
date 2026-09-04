@@ -169,6 +169,18 @@ class WebhookEndpoint(Base):
 def db():
     with DB() as s: yield s
 def sha(v): return hashlib.sha256(v.encode()).hexdigest()
+def scoped_idempotency_key(ctx:dict,raw_key:str,*,action:str,resource:str,api_version:str="v1")->str:
+    """Bind a client key to the complete durable command identity."""
+    caller=str(ctx.get("sub") or "unknown")
+    service=str(ctx.get("client_id") or ctx.get("service") or "")
+    identity="\0".join((ctx["tenant"],caller,service,action,api_version,resource,raw_key))
+    return "scope:"+api_version+":"+hashlib.sha256(identity.encode()).hexdigest()
+def semantic_request_hash(*,action:str,resource:str,payload:dict,api_version:str="v1")->str:
+    canonical=json.dumps(
+        {"action":action,"api_version":api_version,"resource":resource,"payload":payload},
+        separators=(",",":"),sort_keys=True,default=str,
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
 def token(user,s):
     from .saas import SessionRecord
     sid=str(uuid.uuid4());s.add(SessionRecord(id=sid,user_id=user.id,tenant_id=user.tenant_id));s.commit();return jwt.encode({"sub":user.id,"tenant":user.tenant_id,"role":user.role,"sid":sid,"exp":datetime.now(timezone.utc)+timedelta(hours=8)},SECRET,algorithm="HS256")
@@ -395,8 +407,8 @@ class MiddlewareCommandIn(BaseModel):
     command:str=Field(min_length=1,max_length=120);payload:dict=Field(default_factory=dict);target:Optional[str]=Field(default=None,max_length=120);tenant_id:Optional[str]=Field(default=None,max_length=120);correlation_id:Optional[str]=Field(default=None,max_length=200)
 
 async def emit_middleware(event_type:str,payload:dict)->bool:
-    base=os.getenv("KLYROW_MIDDLEWARE_URL","").rstrip("/"); key=runtime_secret("KLYROW_MIDDLEWARE_API_KEY"); secret=runtime_secret("KLYROW_WEBHOOK_SECRET")
-    if not base or not key or not secret:return False
+    base=os.getenv("KLYROW_MIDDLEWARE_URL","").rstrip("/"); email_target=os.getenv("KLYROW_EMAIL_EVENT_URL","").strip(); key=runtime_secret("KLYROW_MIDDLEWARE_API_KEY"); secret=runtime_secret("KLYROW_WEBHOOK_SECRET")
+    if not key or not secret:return False
     source_payload=dict(payload)
     source_payload_hash=str(source_payload.get("payload_hash") or hashlib.sha256(json.dumps(source_payload,separators=(",",":"),sort_keys=True,default=str).encode()).hexdigest())
     event_id=payload.get("event_id") or str(uuid.uuid4())
@@ -413,7 +425,6 @@ async def emit_middleware(event_type:str,payload:dict)->bool:
     body=json.dumps(payload,separators=(",",":"),sort_keys=True).encode(); ts=str(int(time.time())); canonical=ts.encode()+b"\n"+event_id.encode()+b"\nklyrow\n"+body
     tenant_id=str(payload.get("tenant_id") or payload.get("customer_id") or "");correlation_id=str(payload.get("correlation_id") or event_id)
     signature=hmac.new(secret.encode(),canonical,hashlib.sha256).hexdigest(); headers={"Authorization":"Bearer "+key,"Content-Type":"application/json","X-Source-System":"klyrow","X-Tenant-ID":tenant_id,"X-Correlation-ID":correlation_id,"Idempotency-Key":"klyrow:event:"+event_id,"X-Klyrow-Timestamp":ts,"X-Klyrow-Event-Id":event_id,"X-Klyrow-Signature":"sha256="+signature}
-    email_target=os.getenv("KLYROW_EMAIL_EVENT_URL","").strip()
     # Email lifecycle events have one canonical callback authority.  Do not
     # send them through the legacy generic route first: a failure there used
     # to abort delivery before the dedicated, mTLS-protected endpoint was
@@ -421,6 +432,7 @@ async def emit_middleware(event_type:str,payload:dict)->bool:
     if event_type.startswith(("klyrow.email.", "klyrow.message.")) and email_target:
         targets=[email_target]
     else:
+        if not base:return False
         path={"klyrow.email.bounced":"bounces","klyrow.email.complained":"complaints","klyrow.email.unsubscribed":"unsubscribes"}.get(event_type,"events")
         targets=[f"{base}/api/v1/klyrow/{path}"]
     try:
@@ -872,8 +884,15 @@ def queue_email_lifecycle_event(s:Session, *, kind:str, tenant_id:str, message_i
 
 async def _send(x:MailIn,ctx,s,idempotency_key):
     if not idempotency_key: raise HTTPException(400,"idempotency_key_required")
-    request_hash=sha(x.model_dump_json())
-    prior=s.scalar(select(Idempotency).where(Idempotency.key==idempotency_key,Idempotency.tenant_id==ctx["tenant"]))
+    resource="messages"
+    storage_key=scoped_idempotency_key(ctx,idempotency_key,action="message.send",resource=resource)
+    request_hash=semantic_request_hash(action="message.send",resource=resource,payload=x.model_dump(mode="json"))
+    prior=s.scalar(select(Idempotency).where(Idempotency.key==storage_key,Idempotency.tenant_id==ctx["tenant"]))
+    if prior is None:
+        legacy=s.scalar(select(Idempotency).where(Idempotency.key==idempotency_key,Idempotency.tenant_id==ctx["tenant"]))
+        if legacy:
+            if legacy.request_hash!=sha(x.model_dump_json()):raise HTTPException(409,"idempotency_key_payload_mismatch")
+            return json.loads(legacy.response_json)
     if prior:
         if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
         return json.loads(prior.response_json)
@@ -900,7 +919,7 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
     subscription_id,price_id=billing_identity(s,ctx["tenant"],sandbox=SAFE_MODE)
     mid=str(uuid.uuid4()); status="accepted" if SAFE_MODE else "queued"
     operation_id=str(x.callback_metadata.get("operation_id") or mid);correlation_id=str(x.callback_metadata.get("correlation_id") or mid)
-    result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=authorization["recipient"],sender=authorization["sender"],subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.accepted",payload=json.dumps({"stream":x.stream})));queue_email_lifecycle_event(s,kind="email.accepted",tenant_id=ctx["tenant"],message_id=mid,operation_id=operation_id,correlation_id=correlation_id,recipient=x.to.lower());s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],subscription_id=subscription_id,message_id=mid,event_key="accepted:api:"+idempotency_key,unit="accepted_message",quantity=1,price_id=price_id))
+    result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=authorization["recipient"],sender=authorization["sender"],subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.accepted",payload=json.dumps({"stream":x.stream})));queue_email_lifecycle_event(s,kind="email.accepted",tenant_id=ctx["tenant"],message_id=mid,operation_id=operation_id,correlation_id=correlation_id,recipient=x.to.lower());s.add(Idempotency(key=storage_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],subscription_id=subscription_id,message_id=mid,event_key="accepted:api:"+storage_key,unit="accepted_message",quantity=1,price_id=price_id))
     if not SAFE_MODE:
         from .preferences import one_click_unsubscribe_headers
         delivery_payload={"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text,"campaign_id":x.campaign_id,"stream":x.stream}
