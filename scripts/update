@@ -4,7 +4,11 @@ source "$(dirname "$0")/lib.sh"; require_env
 scripts/migrate-runtime-secrets
 git diff --quiet && git diff --cached --quiet || { echo "Refusing update with local changes" >&2; exit 1; }
 git pull --ff-only
-COMPOSE=(docker compose -f docker-compose.yml -f deploy/docker-compose.security-mail.yml -f docker-compose.postal-provisioning.yml -f docker-compose.web.yml)
+# The pull can install a newer migration. Re-run it before rendering Compose so
+# the first upgrade from a legacy checkout also receives current fail-closed
+# transport and secret reconciliation.
+scripts/migrate-runtime-secrets
+COMPOSE=(docker compose -f docker-compose.yml -f deploy/docker-compose.middleware-mtls.yml -f deploy/docker-compose.security-mail.yml -f docker-compose.postal-provisioning.yml -f docker-compose.web.yml)
 "${COMPOSE[@]}" config --quiet
 scripts/render-postal-config
 scripts/validate-production-images "${COMPOSE[@]}"
