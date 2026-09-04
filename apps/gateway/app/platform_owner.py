@@ -34,6 +34,7 @@ router = APIRouter(tags=["Platform owner security"])
 # must satisfy the exact-owner policy.
 PLATFORM_OWNER_PATH_PREFIXES = ("/app/api/",)
 PLATFORM_OWNER_ADMIN_PREFIX = "/app/api/admin"
+WORKSPACE_SWITCH_ROUTE = "/app/api/organizations/{tenant_id}/switch"
 
 
 def _stored_claims(item: BrowserSession) -> dict:
@@ -154,7 +155,11 @@ def _validate_raw_session(raw: str) -> None:
 
 
 def _locked_browser_authority(
-    s: Session, ctx: dict
+    s: Session,
+    ctx: dict,
+    *,
+    exclusive_session: bool = False,
+    exclusive_identity: bool = False,
 ) -> tuple[BrowserSession, User | None, TenantMember | None, OidcIdentity | None]:
     """Lock browser authority rows in the handler's request-scoped transaction."""
 
@@ -165,7 +170,7 @@ def _locked_browser_authority(
         select(BrowserSession)
         .execution_options(populate_existing=True)
         .where(BrowserSession.id == session_id)
-        .with_for_update(read=True)
+        .with_for_update(read=not exclusive_session)
     )
     if not item or item.revoked_at is not None:
         raise PlatformOwnerError(401, "session_revoked")
@@ -201,7 +206,7 @@ def _locked_browser_authority(
         select(OidcIdentity)
         .execution_options(populate_existing=True)
         .where(OidcIdentity.id == item.identity_id)
-        .with_for_update(read=True)
+        .with_for_update(read=not exclusive_identity)
     )
     return item, user, member, identity
 
@@ -216,6 +221,20 @@ def _is_browser_api_path(path: str) -> bool:
     return path.startswith(PLATFORM_OWNER_PATH_PREFIXES)
 
 
+def _is_workspace_switch_request(request: Request) -> bool:
+    route = request.scope.get("route")
+    route_path = str(getattr(route, "path", "") or "")
+    if route_path:
+        return route_path == WORKSPACE_SWITCH_ROUTE
+    prefix = "/app/api/organizations/"
+    suffix = "/switch"
+    path = request.url.path
+    if not path.startswith(prefix) or not path.endswith(suffix):
+        return False
+    tenant_id = path[len(prefix) : -len(suffix)]
+    return bool(tenant_id) and "/" not in tenant_id
+
+
 def platform_owner_role_stability_guard(
     request: Request,
     ctx: dict = Depends(browser_context),
@@ -224,7 +243,13 @@ def platform_owner_role_stability_guard(
     """Lock role authority and validate exact ownership when platform-wide."""
 
     try:
-        item, user, member, identity = _locked_browser_authority(s, ctx)
+        workspace_switch = _is_workspace_switch_request(request)
+        item, user, member, identity = _locked_browser_authority(
+            s,
+            ctx,
+            exclusive_session=workspace_switch,
+            exclusive_identity=workspace_switch,
+        )
         validated = _validate_owner_objects(
             item,
             user,
