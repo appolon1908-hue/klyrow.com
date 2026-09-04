@@ -8,7 +8,7 @@ from typing import Any, Iterable
 
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
-from fastapi.routing import APIRoute
+from fastapi.routing import APIRoute, RouteContext, iter_route_contexts
 
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head", "trace"}
@@ -181,7 +181,17 @@ def _walk_dependencies(dependant: Any) -> Iterable[Any]:
         yield from _walk_dependencies(dependency)
 
 
-def _dependency_names(route: APIRoute) -> set[str]:
+def _api_route_contexts(app: FastAPI) -> list[RouteContext]:
+    """Flatten included routers using FastAPI's effective route contexts."""
+
+    return [
+        route_context
+        for route_context in iter_route_contexts(app.routes)
+        if isinstance(route_context.original_route, APIRoute)
+    ]
+
+
+def _dependency_names(route: RouteContext) -> set[str]:
     names: set[str] = set()
     for dependency in _walk_dependencies(route.dependant):
         call = getattr(dependency, "call", None)
@@ -191,7 +201,7 @@ def _dependency_names(route: APIRoute) -> set[str]:
     return names
 
 
-def _dependency_headers(route: APIRoute) -> set[str]:
+def _dependency_headers(route: RouteContext) -> set[str]:
     aliases: set[str] = set()
 
     def collect(dependant: Any) -> None:
@@ -205,19 +215,20 @@ def _dependency_headers(route: APIRoute) -> set[str]:
 
 
 def runtime_routes(app: FastAPI) -> list[tuple[str, str, bool, str]]:
-    """Return the complete APIRoute operation table, including hidden routes."""
+    """Return every effective APIRoute operation, including hidden routes."""
 
     rows: list[tuple[str, str, bool, str]] = []
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
-            continue
+    for route in _api_route_contexts(app):
+        path = route.path
+        if path is None:
+            raise RuntimeError("effective APIRoute is missing its path")
         for method in sorted(route.methods or ()):
             normalized = method.lower()
             if normalized in HTTP_METHODS:
                 rows.append(
                     (
                         normalized,
-                        route.path,
+                        path,
                         bool(route.include_in_schema),
                         str(route.name),
                     )
@@ -236,30 +247,32 @@ def runtime_route_fingerprint(
 
 
 def runtime_idempotency_routes(app: FastAPI) -> set[tuple[str, str]]:
-    """Discover every APIRoute that actually accepts Idempotency-Key."""
+    """Discover every effective route that accepts Idempotency-Key."""
 
     operations: set[tuple[str, str]] = set()
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
-            continue
+    for route in _api_route_contexts(app):
         if "idempotency-key" not in _dependency_headers(route):
             continue
+        path = route.path
+        if path is None:
+            raise RuntimeError("idempotent APIRoute is missing its path")
         for method in route.methods or ():
             normalized = method.lower()
             if normalized in HTTP_METHODS:
-                operations.add((normalized, route.path))
+                operations.add((normalized, path))
     return operations
 
 
-def _route_index(app: FastAPI) -> dict[tuple[str, str], list[APIRoute]]:
-    index: dict[tuple[str, str], list[APIRoute]] = {}
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
-            continue
+def _route_index(app: FastAPI) -> dict[tuple[str, str], list[RouteContext]]:
+    index: dict[tuple[str, str], list[RouteContext]] = {}
+    for route in _api_route_contexts(app):
+        path = route.path
+        if path is None:
+            raise RuntimeError("effective APIRoute is missing its path")
         for method in route.methods or ():
             normalized = method.lower()
             if normalized in HTTP_METHODS:
-                index.setdefault((normalized, route.path), []).append(route)
+                index.setdefault((normalized, path), []).append(route)
     return index
 
 
@@ -270,7 +283,7 @@ def _security_scheme_names(
 
 
 def _validate_dependency_security(
-    routes: list[APIRoute],
+    routes: list[RouteContext],
     *,
     method: str,
     path: str,
@@ -279,7 +292,8 @@ def _validate_dependency_security(
     dependencies = set().union(*(_dependency_names(route) for route in routes))
     schemes = _security_scheme_names(security)
     enforced = sorted(
-        dependency for dependency in dependencies
+        dependency
+        for dependency in dependencies
         if dependency in RECOGNIZED_AUTH_DEPENDENCIES
     )
     for dependency in enforced:
@@ -432,7 +446,8 @@ def build_openapi(app: FastAPI) -> dict[str, Any]:
             operation_count += 1
 
     documented_idempotency = {
-        operation for operation in runtime_idempotency
+        operation
+        for operation in runtime_idempotency
         if operation in documented_operations
     }
     hidden_idempotency = sorted(runtime_idempotency - documented_operations)
