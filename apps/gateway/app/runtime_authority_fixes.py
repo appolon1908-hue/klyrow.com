@@ -1,12 +1,14 @@
 """Runtime parity fixes for the canonical Klyrow API authority.
 
 The production composition root installs these narrow fixes after all source
-routers are loaded. They preserve the existing route table while correcting two
+routers are loaded. They preserve the existing route table while correcting
 cross-cutting authority defects:
 
 * scoped storage digests never replace caller correlation identifiers;
 * a historical raw-key replay is accepted only when the row resolves to a real
-  message in the same tenant, never for campaign or other resource records.
+  message in the same tenant, never for campaign or other resource records;
+* deployed legacy Server A Odoo webhook routes remain delivery eligible;
+* blocked dead letters remain visible without starving later recoverable work.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from . import main as core
 from . import production_api
 from . import tenancy_onboarding
 from . import webmail
+from .provider_reconciliation_fixes import install_provider_reconciliation_fixes
 
 _ORIGINAL_OPERATION_JSON = production_api._operation_json
 _INSTALLED = False
@@ -363,6 +366,7 @@ def install_runtime_authority_fixes() -> None:
     tenancy_onboarding._send = send_with_scoped_legacy_compatibility
     webmail._send = send_with_scoped_legacy_compatibility
     production_api._operation_json = operation_json_with_correlation
+    install_provider_reconciliation_fixes()
     _INSTALLED = True
 
 
