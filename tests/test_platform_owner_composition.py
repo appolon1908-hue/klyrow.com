@@ -69,6 +69,11 @@ def _runtime_app(monkeypatch, validator):
         return {"status": "ok"}
 
     platform_owner.install_platform_owner_guard(app)
+    # These tests exercise the outer defense-in-depth middleware. Focused tests
+    # below invoke the request-scoped role-stability dependency directly.
+    app.dependency_overrides[
+        platform_owner.platform_owner_role_stability_guard
+    ] = lambda: None
     return app
 
 
@@ -142,31 +147,47 @@ def test_guard_covers_every_browser_api_for_platform_admin_sessions() -> None:
     assert "validate_platform_owner_claims" in source
 
 
-def test_every_admin_route_gets_same_session_owner_dependency(monkeypatch) -> None:
+def test_every_browser_route_gets_same_session_role_stability_dependency(
+    monkeypatch,
+) -> None:
     app = _runtime_app(monkeypatch, lambda _session, _item: None)
-    admin_routes = [
+    browser_routes = [
         route
         for route in app.router.routes
         if isinstance(route, APIRoute)
-        and route.path.startswith("/app/api/admin/")
+        and route.path.startswith("/app/api/")
     ]
-    assert [route.path for route in admin_routes] == ["/app/api/admin/test"]
-    for route in admin_routes:
+    assert sorted(route.path for route in browser_routes) == [
+        "/app/api/admin/test",
+        "/app/api/credits",
+    ]
+    for route in browser_routes:
         assert route.dependant.dependencies
         assert (
             route.dependant.dependencies[0].call
-            is platform_owner.platform_owner_admin_guard
+            is platform_owner.platform_owner_role_stability_guard
         )
-    assert app.state.klyrow_platform_owner_admin_routes == (
+
+    public_route = next(
+        route
+        for route in app.router.routes
+        if isinstance(route, APIRoute) and route.path == "/health/live"
+    )
+    assert all(
+        dependency.call is not platform_owner.platform_owner_role_stability_guard
+        for dependency in public_route.dependant.dependencies
+    )
+    assert app.state.klyrow_platform_owner_browser_routes == (
         "/app/api/admin/test",
+        "/app/api/credits",
     )
 
 
-def test_locked_admin_authority_uses_four_shared_refreshing_locks() -> None:
+def test_locked_browser_authority_uses_four_shared_refreshing_locks() -> None:
     item, user, member, identity, context = _authority_snapshot()
     session = _LockingSession(item, user, member, identity)
 
-    assert platform_owner._locked_admin_authority(session, context) == (
+    assert platform_owner._locked_browser_authority(session, context) == (
         item,
         user,
         member,
@@ -183,7 +204,77 @@ def test_locked_admin_authority_uses_four_shared_refreshing_locks() -> None:
     )
 
 
-def test_admin_guard_validates_locked_snapshot_and_marks_request(
+def test_normal_browser_role_is_locked_without_owner_configuration(
+    monkeypatch,
+) -> None:
+    item, user, member, identity, context = _authority_snapshot(
+        role="tenant_admin"
+    )
+    session = _LockingSession(item, user, member, identity)
+    observed = []
+
+    def validate(*values, require_platform_admin):
+        observed.append((values, require_platform_admin))
+        return False
+
+    monkeypatch.setattr(platform_owner, "_validate_owner_objects", validate)
+    request = _request("/app/api/credits")
+    platform_owner.platform_owner_role_stability_guard(
+        request,
+        ctx=context,
+        s=session,
+    )
+
+    assert observed == [
+        ((item, user, member, identity), False),
+    ]
+    assert request.state.klyrow_platform_owner_authority_locked is True
+    assert request.state.klyrow_platform_owner_validated is False
+    assert request.state.klyrow_platform_owner_session_id == item.id
+    assert context["role"] == member.role
+
+
+def test_guard_refreshes_stale_handler_role_from_locked_membership() -> None:
+    item, user, member, identity, context = _authority_snapshot(
+        role="tenant_admin"
+    )
+    item.role = "MEMBER"
+    member.role = "MEMBER"
+    context["role"] = "platform_admin"
+    session = _LockingSession(item, user, member, identity)
+    request = _request("/app/api/mailboxes/mailbox-1")
+
+    platform_owner.platform_owner_role_stability_guard(
+        request,
+        ctx=context,
+        s=session,
+    )
+
+    assert context["role"] == "MEMBER"
+    assert request.state.klyrow_platform_owner_authority_locked is True
+    assert request.state.klyrow_platform_owner_validated is False
+
+
+def test_normal_role_still_requires_current_base_authority() -> None:
+    item, user, _member, identity, _context = _authority_snapshot(
+        role="tenant_admin"
+    )
+    item.role = "MEMBER"
+
+    with pytest.raises(PlatformOwnerError) as denied:
+        platform_owner._validate_owner_objects(
+            item,
+            user,
+            None,
+            identity,
+            require_platform_admin=False,
+        )
+
+    assert denied.value.status_code == 403
+    assert denied.value.detail == "platform_owner_membership_mismatch"
+
+
+def test_admin_route_validates_locked_snapshot_and_marks_request(
     monkeypatch,
 ) -> None:
     item, user, member, identity, context = _authority_snapshot()
@@ -192,10 +283,11 @@ def test_admin_guard_validates_locked_snapshot_and_marks_request(
 
     def validate(*values, require_platform_admin):
         observed.append((values, require_platform_admin))
+        return True
 
     monkeypatch.setattr(platform_owner, "_validate_owner_objects", validate)
     request = _request()
-    platform_owner.platform_owner_admin_guard(
+    platform_owner.platform_owner_role_stability_guard(
         request,
         ctx=context,
         s=session,
@@ -204,8 +296,37 @@ def test_admin_guard_validates_locked_snapshot_and_marks_request(
     assert observed == [
         ((item, user, member, identity), True),
     ]
+    assert request.state.klyrow_platform_owner_authority_locked is True
     assert request.state.klyrow_platform_owner_validated is True
     assert request.state.klyrow_platform_owner_session_id == item.id
+    assert context["role"] == member.role
+
+
+def test_non_admin_route_still_validates_a_current_platform_role(
+    monkeypatch,
+) -> None:
+    item, user, member, identity, context = _authority_snapshot()
+    session = _LockingSession(item, user, member, identity)
+    observed = []
+
+    def validate(*values, require_platform_admin):
+        observed.append((values, require_platform_admin))
+        return True
+
+    monkeypatch.setattr(platform_owner, "_validate_owner_objects", validate)
+    request = _request("/app/api/mailboxes/mailbox-1")
+    platform_owner.platform_owner_role_stability_guard(
+        request,
+        ctx=context,
+        s=session,
+    )
+
+    assert observed == [
+        ((item, user, member, identity), False),
+    ]
+    assert request.state.klyrow_platform_owner_authority_locked is True
+    assert request.state.klyrow_platform_owner_validated is True
+    assert context["role"] == member.role
 
 
 def test_admin_guard_denies_non_platform_role_before_handler() -> None:
@@ -215,7 +336,7 @@ def test_admin_guard_denies_non_platform_role_before_handler() -> None:
     session = _LockingSession(item, user, member, identity)
 
     with pytest.raises(HTTPException) as denied:
-        platform_owner.platform_owner_admin_guard(
+        platform_owner.platform_owner_role_stability_guard(
             _request(),
             ctx=context,
             s=session,
@@ -232,9 +353,13 @@ def test_same_transaction_lock_contract_is_explicit_in_source() -> None:
     )
     assert source.count(".with_for_update(read=True)") == 4
     assert source.count(".execution_options(populate_existing=True)") >= 4
-    assert "platform_owner_admin_guard" in source
+    assert "platform_owner_role_stability_guard" in source
+    assert "_install_browser_route_dependencies" in source
     assert "route.dependant.dependencies.insert" in source
-    assert "request.state.klyrow_platform_owner_validated = True" in source
+    assert (
+        "request.state.klyrow_platform_owner_authority_locked = True"
+        in source
+    )
 
 
 def test_unbound_step_up_redirect_is_hidden_and_fails_closed() -> None:
