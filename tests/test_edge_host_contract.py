@@ -26,7 +26,11 @@ def _server_blocks(source: str) -> list[str]:
 
 
 def _https_block(source: str, hostname: str) -> str:
-    matches = [block for block in _server_blocks(source) if "listen 443 ssl;" in block and f"server_name {hostname};" in block]
+    matches = [
+        block
+        for block in _server_blocks(source)
+        if "listen 443 ssl;" in block and f"server_name {hostname};" in block
+    ]
     assert len(matches) == 1, (hostname, len(matches))
     return matches[0]
 
@@ -39,6 +43,32 @@ def test_frontend_container_serves_only_the_canonical_application_host():
     assert 'X-Robots-Tag "noindex, nofollow"' in source
     assert "server_name app.klyrow.com api.klyrow.com" not in source
     assert "server_name track.codestra.co" not in source
+
+
+def test_frontend_re_resolves_gateway_and_preserves_request_correlation():
+    source = (ROOT / "apps/web/nginx.conf").read_text(encoding="utf-8")
+    assert "resolver 127.0.0.11 valid=10s ipv6=off;" in source
+    assert "zone klyrow_gateway_dynamic 64k;" in source
+    assert "server gateway:8000 resolve;" in source
+    assert source.count("proxy_pass http://klyrow_gateway_dynamic;") == 4
+    assert "proxy_pass http://gateway:8000;" not in source
+    assert "map $http_x_request_id $klyrow_request_id" in source
+    assert source.count("proxy_set_header X-Request-ID $klyrow_request_id;") == 4
+
+
+def test_frontend_location_headers_do_not_drop_the_security_policy():
+    source = (ROOT / "apps/web/nginx.conf").read_text(encoding="utf-8")
+    # Nginx location-level add_header directives replace the server-level set.
+    # The immutable-asset and SPA locations therefore repeat every policy.
+    assert source.count("add_header Content-Security-Policy") == 3
+    assert source.count('add_header X-Content-Type-Options "nosniff" always;') == 3
+    assert source.count('add_header X-Frame-Options "DENY" always;') == 3
+    assert source.count('add_header Referrer-Policy "no-referrer" always;') == 3
+    assert source.count(
+        'add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;'
+    ) == 3
+    assert source.count('add_header X-Robots-Tag "noindex, nofollow" always;') == 4
+    assert source.count("add_header X-Request-ID $klyrow_request_id always;") == 2
 
 
 def test_provider_edge_keeps_app_api_and_tracking_on_distinct_upstreams():
