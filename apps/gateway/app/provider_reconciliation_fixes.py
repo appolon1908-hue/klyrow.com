@@ -1,0 +1,358 @@
+"""Fail-closed compatibility and progress fixes for provider reconciliation.
+
+This module is installed by the canonical production composition after all
+provider routes are loaded. It preserves the deployed legacy Server A Odoo
+route shape and makes bounded dead-letter reconciliation progress without
+hiding or resolving lossy records.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from sqlalchemy import case, func, or_, select
+
+from . import main as core
+from . import provider
+
+EXPLICIT_ODOO_DESTINATIONS = frozenset({"odoo_helpdesk", "odoo_accounting"})
+LEGACY_ODOO_WEBHOOK_DESTINATIONS = {
+    "server-a:odoo-support": "odoo_helpdesk",
+    "server-a:odoo-helpdesk": "odoo_helpdesk",
+    "server-a:odoo-accounting": "odoo_accounting",
+}
+BLOCKED_RECONCILIATION_MARKER = "operator_reconciliation_required"
+_INSTALLED = False
+
+
+def middleware_destination_kind(route: Any) -> str:
+    """Return the closed canonical Server A destination for a route.
+
+    Existing deployments persisted the Odoo destination as a generic webhook.
+    Only the exact allowlisted Server A references are upgraded; unrelated
+    webhook routes remain local/non-Odoo and can never cross this boundary.
+    """
+
+    raw_kind = str(getattr(route, "destination_kind", "") or "").strip()
+    kind = raw_kind.lower()
+    reference = str(getattr(route, "destination_ref", "") or "").strip().lower()
+
+    if kind == "support":
+        return "odoo_helpdesk"
+    if kind == "odoo":
+        return "odoo_accounting" if "account" in reference else "odoo_helpdesk"
+    if kind in EXPLICIT_ODOO_DESTINATIONS:
+        return kind
+    if kind == "webhook":
+        return LEGACY_ODOO_WEBHOOK_DESTINATIONS.get(reference, raw_kind)
+    return raw_kind
+
+
+def middleware_inbound_eligible(route: Any, disposition: str) -> bool:
+    """Allow only accepted mail bound to an explicit/allowlisted Odoo route."""
+
+    return (
+        disposition == "ACCEPT"
+        and middleware_destination_kind(route) in EXPLICIT_ODOO_DESTINATIONS
+    )
+
+
+def _due_event_predicate(tenant_id: str, current: Any):
+    return (
+        provider.ProviderEvent.state == "DEAD_LETTER",
+        provider.ProviderEvent.tenant_id == tenant_id,
+        provider.ProviderEvent.available_at <= current,
+    )
+
+
+def _due_usage_predicate(tenant_id: str, current: Any):
+    return (
+        provider.ProviderUsageEvent.state == "DEAD_LETTER",
+        provider.ProviderUsageEvent.tenant_id == tenant_id,
+        provider.ProviderUsageEvent.available_at <= current,
+    )
+
+
+def _unreviewed_event_predicate():
+    return or_(
+        provider.ProviderEvent.last_error.is_(None),
+        provider.ProviderEvent.last_error != BLOCKED_RECONCILIATION_MARKER,
+    )
+
+
+def _event_ordering():
+    # Previously classified blocked records remain critically visible, but
+    # unreviewed later records always sort ahead of them on the next page.
+    return (
+        case(
+            (
+                provider.ProviderEvent.last_error
+                == BLOCKED_RECONCILIATION_MARKER,
+                1,
+            ),
+            else_=0,
+        ),
+        provider.ProviderEvent.created_at,
+        provider.ProviderEvent.id,
+    )
+
+
+def _load_events(
+    session: Any,
+    *,
+    tenant_id: str,
+    current: Any,
+    limit: int,
+    excluded_ids: set[str] | None = None,
+) -> list[Any]:
+    if limit <= 0:
+        return []
+    statement = select(provider.ProviderEvent).where(
+        *_due_event_predicate(tenant_id, current)
+    )
+    if excluded_ids:
+        statement = statement.where(
+            provider.ProviderEvent.id.not_in(sorted(excluded_ids))
+        )
+    return list(
+        session.scalars(
+            statement.order_by(*_event_ordering())
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        ).all()
+    )
+
+
+def _load_usages(
+    session: Any,
+    *,
+    tenant_id: str,
+    current: Any,
+    limit: int,
+) -> list[Any]:
+    if limit <= 0:
+        return []
+    return list(
+        session.scalars(
+            select(provider.ProviderUsageEvent)
+            .where(*_due_usage_predicate(tenant_id, current))
+            .order_by(
+                provider.ProviderUsageEvent.created_at,
+                provider.ProviderUsageEvent.id,
+            )
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        ).all()
+    )
+
+
+def _count(session: Any, statement: Any) -> int:
+    return int(session.scalar(statement) or 0)
+
+
+def reconcile_provider_outbox_dead_letters(
+    session: Any,
+    *,
+    tenant_id: str,
+    limit: int = 50,
+    apply: bool = False,
+) -> dict[str, int | bool]:
+    """Plan or apply one bounded provider-outbox reconciliation page.
+
+    The batch is shared fairly between event and usage queues whenever both
+    contain due records. Blocked event rows stay ``DEAD_LETTER`` and keep the
+    critical marker, but are sorted behind unreviewed rows on later calls. This
+    guarantees progress without fabricating attachment content or acknowledging
+    unresolved data as delivered/skipped.
+    """
+
+    if not 1 <= limit <= 50:
+        raise ValueError("provider_outbox_reconcile_limit_out_of_range")
+
+    current = provider.now()
+    due_event_count = _count(
+        session,
+        select(func.count())
+        .select_from(provider.ProviderEvent)
+        .where(*_due_event_predicate(tenant_id, current)),
+    )
+    due_usage_count = _count(
+        session,
+        select(func.count())
+        .select_from(provider.ProviderUsageEvent)
+        .where(*_due_usage_predicate(tenant_id, current)),
+    )
+
+    if due_event_count and due_usage_count:
+        event_budget = max(1, limit // 2)
+        usage_budget = limit - event_budget
+    elif due_event_count:
+        event_budget, usage_budget = limit, 0
+    else:
+        event_budget, usage_budget = 0, limit
+
+    events = _load_events(
+        session,
+        tenant_id=tenant_id,
+        current=current,
+        limit=event_budget,
+    )
+    usages = _load_usages(
+        session,
+        tenant_id=tenant_id,
+        current=current,
+        limit=usage_budget,
+    )
+
+    # Backfill unused capacity without exceeding the fixed transaction bound.
+    unused = limit - len(events) - len(usages)
+    if unused and due_event_count > len(events):
+        extra_events = _load_events(
+            session,
+            tenant_id=tenant_id,
+            current=current,
+            limit=unused,
+            excluded_ids={str(item.id) for item in events},
+        )
+        events.extend(extra_events)
+        unused -= len(extra_events)
+    if unused and due_usage_count > len(usages):
+        # The initial usage query already starts at the oldest row. Fetching a
+        # larger prefix and taking the unseen suffix avoids a mutable cursor.
+        expanded = _load_usages(
+            session,
+            tenant_id=tenant_id,
+            current=current,
+            limit=len(usages) + unused,
+        )
+        seen = {str(item.id) for item in usages}
+        usages.extend(item for item in expanded if str(item.id) not in seen)
+
+    result: dict[str, int | bool] = {
+        "apply": apply,
+        "examined": 0,
+        "events_requeued": 0,
+        "events_skipped": 0,
+        "events_blocked": 0,
+        "usage_requeued": 0,
+    }
+
+    for event in events:
+        result["examined"] = int(result["examined"]) + 1
+        upgraded = None
+        if event.kind == "inbound.received":
+            decision, upgraded = provider._upgrade_legacy_inbound_event(
+                session, event
+            )
+        elif event.kind in core.SMTP_EVENT_MAP:
+            decision = "requeue"
+        else:
+            decision = "blocked"
+
+        key = {
+            "requeue": "events_requeued",
+            "skipped": "events_skipped",
+            "blocked": "events_blocked",
+        }[decision]
+        result[key] = int(result[key]) + 1
+        if not apply:
+            continue
+
+        if decision == "skipped":
+            event.state = "SKIPPED"
+            event.last_error = "middleware_delivery_not_applicable"
+        elif decision == "requeue":
+            if upgraded is not None:
+                event.payload_json = provider.json.dumps(
+                    upgraded,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            event.state = "RETRY"
+            event.attempts = 0
+            event.available_at = current
+            event.last_error = None
+        else:
+            event.state = "DEAD_LETTER"
+            event.last_error = BLOCKED_RECONCILIATION_MARKER
+        event.updated_at = current
+
+    result["examined"] = int(result["examined"]) + len(usages)
+    result["usage_requeued"] = len(usages)
+    if apply:
+        for usage in usages:
+            usage.state = "RETRY"
+            usage.attempts = 0
+            usage.available_at = current
+            usage.last_error = None
+        session.flush()
+
+    due_events_remaining = _count(
+        session,
+        select(func.count())
+        .select_from(provider.ProviderEvent)
+        .where(*_due_event_predicate(tenant_id, current)),
+    )
+    due_usages_remaining = _count(
+        session,
+        select(func.count())
+        .select_from(provider.ProviderUsageEvent)
+        .where(*_due_usage_predicate(tenant_id, current)),
+    )
+    unreviewed_events_remaining = _count(
+        session,
+        select(func.count())
+        .select_from(provider.ProviderEvent)
+        .where(
+            *_due_event_predicate(tenant_id, current),
+            _unreviewed_event_predicate(),
+        ),
+    )
+    blocked_events_visible = _count(
+        session,
+        select(func.count())
+        .select_from(provider.ProviderEvent)
+        .where(
+            provider.ProviderEvent.state == "DEAD_LETTER",
+            provider.ProviderEvent.tenant_id == tenant_id,
+            provider.ProviderEvent.last_error
+            == BLOCKED_RECONCILIATION_MARKER,
+        ),
+    )
+
+    result.update(
+        {
+            "due_events_remaining": due_events_remaining,
+            "due_usage_remaining": due_usages_remaining,
+            "unreviewed_events_remaining": unreviewed_events_remaining,
+            "blocked_events_visible": blocked_events_visible,
+            "remaining": due_events_remaining + due_usages_remaining,
+            "has_more": bool(due_events_remaining or due_usages_remaining),
+        }
+    )
+    return result
+
+
+def install_provider_reconciliation_fixes() -> None:
+    """Install the compatibility/progress functions into provider endpoints."""
+
+    global _INSTALLED
+    if _INSTALLED:
+        return
+    provider.middleware_destination_kind = middleware_destination_kind
+    provider.middleware_inbound_eligible = middleware_inbound_eligible
+    provider.reconcile_provider_outbox_dead_letters = (
+        reconcile_provider_outbox_dead_letters
+    )
+    _INSTALLED = True
+
+
+__all__ = [
+    "BLOCKED_RECONCILIATION_MARKER",
+    "EXPLICIT_ODOO_DESTINATIONS",
+    "LEGACY_ODOO_WEBHOOK_DESTINATIONS",
+    "install_provider_reconciliation_fixes",
+    "middleware_destination_kind",
+    "middleware_inbound_eligible",
+    "reconcile_provider_outbox_dead_letters",
+]
