@@ -64,6 +64,7 @@ DURABLE_IDEMPOTENCY = {
     ("post", "/v1/messages"),
     ("post", "/v1/email/send"),
     ("post", "/v1/internal/email/send"),
+    ("post", "/v1/internal/email/communications/messages"),
     ("post", "/v1/internal/email/beyvra/send"),
     ("post", "/app/api/email/send"),
     ("post", "/app/api/mailboxes/{mailbox_id}/send"),
