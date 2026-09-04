@@ -73,6 +73,12 @@ if not getattr(app.state, "klyrow_browser_api_routes_registered", False):
 else:
     auth_bff._identity_context = resolve_identity_context_with_provisioning
 
+# Install cross-cutting runtime parity repairs only after every source module
+# that captured the historical helpers has been imported.
+from .runtime_authority_fixes import install_runtime_authority_fixes
+
+install_runtime_authority_fixes()
+
 # The core app may have generated OpenAPI before browser composition.
 app.openapi_schema = None
 
@@ -107,6 +113,11 @@ def platform_admin_ui(path: str = ""):
 @app.get("/app/{path:path}", include_in_schema=False)
 def product_app_ui(path: str = ""):
     return _ui_index()
+
+
+from .openapi_authority import install_openapi_authority
+
+install_openapi_authority(app)
 
 
 __all__ = ["app"]

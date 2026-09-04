@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import Boolean, DateTime, String, Text, UniqueConstraint, func, select, text
 from sqlalchemy.exc import IntegrityError
@@ -27,6 +28,7 @@ from .main import (
     Domain,
     EmailOutbox,
     Event,
+    Idempotency,
     Message,
     MiddlewareCommandOperation,
     Suppression,
@@ -35,6 +37,8 @@ from .main import (
     audit,
     auth,
     db,
+    scoped_idempotency_key,
+    semantic_request_hash,
 )
 from .messaging import Template, TemplateUpdate, TemplateVersion, template_update, validate_html
 from .mautic_contract import SUPPORTED_MAUTIC_COMMANDS
@@ -128,6 +132,74 @@ def _tenant_item(s: Session, model: Any, item_id: str, tenant_id: str) -> Any:
     if item is None:
         raise HTTPException(404, "not_found")
     return item
+
+
+def _tenant_item_for_update(s: Session, model: Any, item_id: str, tenant_id: str) -> Any:
+    item = s.scalar(
+        select(model)
+        .where(model.id == item_id, model.tenant_id == tenant_id)
+        .with_for_update()
+    )
+    if item is None:
+        raise HTTPException(404, "not_found")
+    return item
+
+
+def _idempotency_begin(
+    s: Session,
+    ctx: dict[str, Any],
+    raw_key: str,
+    *,
+    action: str,
+    resource: str,
+    semantic_payload: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str, str]:
+    if not isinstance(raw_key, str) or not 8 <= len(raw_key) <= 200:
+        raise HTTPException(400, "idempotency_key_required")
+    storage_key = scoped_idempotency_key(
+        ctx, raw_key, action=action, resource=resource, api_version="v1"
+    )
+    request_hash = semantic_request_hash(
+        action=action, resource=resource, payload=semantic_payload, api_version="v1"
+    )
+    prior = s.scalar(
+        select(Idempotency).where(
+            Idempotency.tenant_id == ctx["tenant"], Idempotency.key == storage_key
+        )
+    )
+    if prior is None:
+        return None, storage_key, request_hash
+    if prior.request_hash != request_hash:
+        raise HTTPException(409, "idempotency_key_payload_mismatch")
+    try:
+        response = json.loads(prior.response_json)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("stored idempotency response is invalid") from exc
+    if not isinstance(response, dict):
+        raise RuntimeError("stored idempotency response is invalid")
+    return response, storage_key, request_hash
+
+
+def _idempotency_complete(
+    s: Session,
+    ctx: dict[str, Any],
+    *,
+    storage_key: str,
+    request_hash: str,
+    resource: str,
+    response: dict[str, Any],
+) -> None:
+    s.add(
+        Idempotency(
+            key=storage_key,
+            tenant_id=ctx["tenant"],
+            request_hash=request_hash,
+            resource_id=resource,
+            response_json=json.dumps(
+                jsonable_encoder(response), separators=(",", ":"), sort_keys=True
+            ),
+        )
+    )
 
 
 def _operation_json(
@@ -496,10 +568,18 @@ def domain_verification(
 
 @router.post("/v1/messages/{message_id}/cancel")
 def message_cancel(
-    message_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
+    message_id: str,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=200),
 ) -> dict[str, Any]:
     _require_permission(ctx, "mail.send")
-    item = _tenant_item(s, Message, message_id, ctx["tenant"])
+    item = _tenant_item_for_update(s, Message, message_id, ctx["tenant"])
+    prior, storage_key, request_hash = _idempotency_begin(
+        s, ctx, idempotency_key, action="message.cancel", resource=message_id, semantic_payload={}
+    )
+    if prior is not None:
+        return prior
     if item.status in {"delivered", "bounced", "complained", "failed", "cancelled"}:
         raise HTTPException(409, "terminal_message_cannot_cancel")
     outbox = s.scalar(
@@ -515,8 +595,12 @@ def message_cancel(
         outbox.updated_at = now()
     item.status = "cancelled"
     audit(s, ctx, "message.cancelled")
+    result = {"id": item.id, "status": item.status}
+    _idempotency_complete(
+        s, ctx, storage_key=storage_key, request_hash=request_hash, resource=message_id, response=result
+    )
     s.commit()
-    return {"id": item.id, "status": item.status}
+    return result
 
 
 @router.get("/v1/templates/{template_id}")
@@ -659,35 +743,64 @@ def campaign_schedule(
     body: CampaignSchedule,
     ctx: dict = Depends(auth),
     s: Session = Depends(db),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=200),
 ) -> dict[str, Any]:
     from .main import Campaign
 
     _require_permission(ctx, "campaign.manage")
-    item = _tenant_item(s, Campaign, campaign_id, ctx["tenant"])
+    item = _tenant_item_for_update(s, Campaign, campaign_id, ctx["tenant"])
+    prior, storage_key, request_hash = _idempotency_begin(
+        s,
+        ctx,
+        idempotency_key,
+        action="campaign.schedule",
+        resource=campaign_id,
+        semantic_payload=body.model_dump(mode="json"),
+    )
+    if prior is not None:
+        return prior
     if body.scheduled_at.astimezone(timezone.utc) <= now():
         raise HTTPException(422, "schedule_must_be_future")
     item.status = "scheduled"
     item.scheduled_at = body.scheduled_at.astimezone(timezone.utc)
     audit(s, ctx, "campaign.scheduled")
+    result = jsonable_encoder(
+        {"id": item.id, "status": item.status, "scheduled_at": item.scheduled_at}
+    )
+    _idempotency_complete(
+        s, ctx, storage_key=storage_key, request_hash=request_hash, resource=campaign_id, response=result
+    )
     s.commit()
-    return {"id": item.id, "status": item.status, "scheduled_at": item.scheduled_at}
+    return result
 
 
 @router.post("/v1/campaigns/{campaign_id}/cancel")
 def campaign_cancel(
-    campaign_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
+    campaign_id: str,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=200),
 ) -> dict[str, Any]:
     from .main import Campaign
 
     _require_permission(ctx, "campaign.manage")
-    item = _tenant_item(s, Campaign, campaign_id, ctx["tenant"])
+    item = _tenant_item_for_update(s, Campaign, campaign_id, ctx["tenant"])
+    prior, storage_key, request_hash = _idempotency_begin(
+        s, ctx, idempotency_key, action="campaign.cancel", resource=campaign_id, semantic_payload={}
+    )
+    if prior is not None:
+        return prior
     if item.status in {"completed", "cancelled"}:
         raise HTTPException(409, "campaign_terminal")
     item.status = "cancelled"
     item.scheduled_at = None
     audit(s, ctx, "campaign.cancelled")
+    result = {"id": item.id, "status": item.status}
+    _idempotency_complete(
+        s, ctx, storage_key=storage_key, request_hash=request_hash, resource=campaign_id, response=result
+    )
     s.commit()
-    return {"id": item.id, "status": item.status}
+    return result
 
 
 @router.get("/v1/tracking/events")
@@ -817,9 +930,19 @@ def operation_attempts(operation_id: str, ctx: dict = Depends(auth), s: Session 
 
 
 @router.post("/v1/operations/{operation_id}/cancel")
-def operation_cancel(operation_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
+def operation_cancel(
+    operation_id: str,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=200),
+) -> dict[str, Any]:
     item = _find_operation_for_update(s, operation_id, ctx["tenant"])
     _authorize_operation_mutation(ctx, item)
+    prior, storage_key, request_hash = _idempotency_begin(
+        s, ctx, idempotency_key, action="operation.cancel", resource=operation_id, semantic_payload={}
+    )
+    if prior is not None:
+        return prior
     if isinstance(item, MiddlewareCommandOperation):
         if item.state in {"completed", "failed", "cancelled"}:
             raise HTTPException(409, "operation_terminal")
@@ -835,30 +958,50 @@ def operation_cancel(operation_id: str, ctx: dict = Depends(auth), s: Session = 
         item.state = "CANCELLED"
         item.updated_at = now()
     audit(s, ctx, "operation.cancelled")
+    result = _operation_json(item, s)
+    _idempotency_complete(
+        s, ctx, storage_key=storage_key, request_hash=request_hash, resource=operation_id, response=result
+    )
     s.commit()
-    return _operation_json(item, s)
+    return result
 
 
 @router.post("/v1/operations/{operation_id}/reconcile")
-def operation_reconcile(operation_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
+def operation_reconcile(
+    operation_id: str,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=200),
+) -> dict[str, Any]:
     item = _find_operation_for_update(s, operation_id, ctx["tenant"])
     _authorize_operation_mutation(ctx, item)
+    prior, storage_key, request_hash = _idempotency_begin(
+        s, ctx, idempotency_key, action="operation.reconcile", resource=operation_id, semantic_payload={}
+    )
+    if prior is not None:
+        return prior
+    changed = False
     if isinstance(item, MiddlewareCommandOperation):
-        if item.state != "failed":
-            return _operation_json(item, s)
-        item.state = "accepted"
-        item.error = None
-        item.updated_at = now()
+        if item.state == "failed":
+            item.state = "accepted"
+            item.error = None
+            item.updated_at = now()
+            changed = True
     else:
-        if item.state not in {"RETRY", "DEAD_LETTER"}:
-            return _operation_json(item, s)
-        item.state = "PENDING"
-        item.last_error = None
-        item.next_attempt_at = now()
-        item.updated_at = now()
-    audit(s, ctx, "operation.reconciliation_requested")
+        if item.state in {"RETRY", "DEAD_LETTER"}:
+            item.state = "PENDING"
+            item.last_error = None
+            item.next_attempt_at = now()
+            item.updated_at = now()
+            changed = True
+    if changed:
+        audit(s, ctx, "operation.reconciliation_requested")
+    result = _operation_json(item, s)
+    _idempotency_complete(
+        s, ctx, storage_key=storage_key, request_hash=request_hash, resource=operation_id, response=result
+    )
     s.commit()
-    return _operation_json(item, s)
+    return result
 
 
 @router.get("/v1/providers/postal/health")
@@ -895,16 +1038,41 @@ def mautic_command(
         mautic_request(body.command, body.payload)
     except (TypeError, ValueError) as error:
         raise HTTPException(422, "mautic_command_payload_invalid") from error
-    semantic = json.dumps({"command": body.command, "aggregate_id": body.aggregate_id, "payload": body.payload, "tenant_id": ctx["tenant"]}, separators=(",", ":"), sort_keys=True)
-    digest = hashlib.sha256(semantic.encode()).hexdigest()
-    prior = s.scalar(select(IntegrationOutbox).where(IntegrationOutbox.tenant_id == ctx["tenant"], IntegrationOutbox.target == "MAUTIC", IntegrationOutbox.idempotency_key == idempotency_key))
+    action = "mautic.command"
+    semantic_payload = {
+        "command": body.command,
+        "aggregate_id": body.aggregate_id,
+        "payload": body.payload,
+    }
+    digest = semantic_request_hash(
+        action=action, resource=body.aggregate_id, payload=semantic_payload
+    )
+    storage_key = scoped_idempotency_key(
+        ctx, idempotency_key, action=action, resource=body.aggregate_id
+    )
+    prior = s.scalar(select(IntegrationOutbox).where(IntegrationOutbox.tenant_id == ctx["tenant"], IntegrationOutbox.target == "MAUTIC", IntegrationOutbox.idempotency_key == storage_key))
+    if prior is None:
+        legacy = s.scalar(select(IntegrationOutbox).where(IntegrationOutbox.tenant_id == ctx["tenant"], IntegrationOutbox.target == "MAUTIC", IntegrationOutbox.idempotency_key == idempotency_key))
+        if legacy:
+            legacy_semantic = json.dumps(
+                {**semantic_payload, "tenant_id": ctx["tenant"]},
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            try:
+                legacy_digest = json.loads(legacy.payload_json).get("semantic_sha256")
+            except (TypeError, ValueError):
+                legacy_digest = None
+            if legacy_digest != hashlib.sha256(legacy_semantic.encode()).hexdigest():
+                raise HTTPException(409, "idempotency_key_payload_mismatch")
+            return _operation_json(legacy, s)
     if prior:
         prior_payload = json.loads(prior.payload_json)
         if prior_payload.get("semantic_sha256") != digest:
             raise HTTPException(409, "idempotency_key_payload_mismatch")
         return _operation_json(prior, s)
     payload = {"envelope": {"request_id": body.request_id, "correlation_id": x_correlation_id, "tenant_id": ctx["tenant"], "actor": ctx["sub"], "operation_id": body.operation_id, "idempotency_key": idempotency_key, "api_version": "v1", "timestamp": body.timestamp.isoformat(), "trace_context": body.trace_context}, "command": body.command, "payload": body.payload, "semantic_sha256": digest}
-    item = IntegrationOutbox(id=body.operation_id or str(uuid.uuid4()), tenant_id=ctx["tenant"], target="MAUTIC", event_type=body.command, aggregate_id=body.aggregate_id, payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True), idempotency_key=idempotency_key)
+    item = IntegrationOutbox(id=body.operation_id or str(uuid.uuid4()), tenant_id=ctx["tenant"], target="MAUTIC", event_type=body.command, aggregate_id=body.aggregate_id, payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True), idempotency_key=storage_key)
     s.add(item)
     audit(s, ctx, "mautic.command.queued")
     try:
@@ -914,7 +1082,7 @@ def mautic_command(
         prior = s.scalar(select(IntegrationOutbox).where(
             IntegrationOutbox.tenant_id == ctx["tenant"],
             IntegrationOutbox.target == "MAUTIC",
-            IntegrationOutbox.idempotency_key == idempotency_key,
+            IntegrationOutbox.idempotency_key == storage_key,
         ))
         if prior is None:
             raise
@@ -945,11 +1113,16 @@ def mautic_operation(operation_id: str, ctx: dict = Depends(auth), s: Session = 
 
 
 @router.post("/v1/integrations/mautic/operations/{operation_id}/reconcile")
-def mautic_reconcile(operation_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
+def mautic_reconcile(
+    operation_id: str,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=200),
+) -> dict[str, Any]:
     item = _tenant_item(s, IntegrationOutbox, operation_id, ctx["tenant"])
     if item.target != "MAUTIC":
         raise HTTPException(404, "not_found")
-    return operation_reconcile(operation_id, ctx, s)
+    return operation_reconcile(operation_id, ctx, s, idempotency_key)
 
 
 @router.get("/v1/system/capabilities")
