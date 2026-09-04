@@ -1,9 +1,12 @@
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, HTTPException
+from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from apps.gateway.app import platform_owner
 from apps.gateway.app.auth_bff import SESSION_COOKIE
@@ -19,6 +22,16 @@ class _FakeSession:
 
     def scalar(self, _statement):
         return SimpleNamespace(revoked_at=None)
+
+
+class _LockingSession:
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.statements = []
+
+    def scalar(self, statement):
+        self.statements.append(statement)
+        return self.responses.pop(0)
 
 
 def _runtime_app(monkeypatch, validator):
@@ -43,17 +56,75 @@ def _runtime_app(monkeypatch, validator):
         )
         return response
 
-    platform_owner.install_platform_owner_guard(app)
-
     @app.post("/app/api/credits")
     def protected_operation():
         return {"handler": "ran"}
+
+    @app.get("/app/api/admin/test")
+    def privileged_operation():
+        return {"handler": "admin-ran"}
 
     @app.get("/health/live")
     def public_health():
         return {"status": "ok"}
 
+    platform_owner.install_platform_owner_guard(app)
     return app
+
+
+def _request(path: str = "/app/api/admin/test") -> Request:
+    return Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "https",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 1234),
+            "server": ("app.klyrow.com", 443),
+            "state": {},
+        }
+    )
+
+
+def _authority_snapshot(*, role: str = "platform_admin"):
+    item = SimpleNamespace(
+        id="browser-session",
+        user_id="owner-user",
+        tenant_id="owner-tenant",
+        identity_id="owner-identity",
+        role="OWNER",
+        revoked_at=None,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
+    )
+    user = SimpleNamespace(
+        id="owner-user",
+        role=role,
+        enabled=True,
+    )
+    member = SimpleNamespace(
+        user_id="owner-user",
+        tenant_id="owner-tenant",
+        role="OWNER",
+        active=True,
+    )
+    identity = SimpleNamespace(
+        id="owner-identity",
+        user_id="owner-user",
+        issuer="https://auth.codestra.co/realms/codestra",
+        subject="owner-subject",
+        enabled=True,
+    )
+    context = {
+        "sid": item.id,
+        "sub": item.user_id,
+        "tenant": item.tenant_id,
+        "identity_id": item.identity_id,
+    }
+    return item, user, member, identity, context
 
 
 def test_production_composition_installs_exact_owner_guard() -> None:
@@ -69,6 +140,101 @@ def test_guard_covers_every_browser_api_for_platform_admin_sessions() -> None:
     assert 'PLATFORM_OWNER_PATH_PREFIXES = ("/app/api/",)' in source
     assert "PlatformOwnerConfig.from_env" in source
     assert "validate_platform_owner_claims" in source
+
+
+def test_every_admin_route_gets_same_session_owner_dependency(monkeypatch) -> None:
+    app = _runtime_app(monkeypatch, lambda _session, _item: None)
+    admin_routes = [
+        route
+        for route in app.router.routes
+        if isinstance(route, APIRoute)
+        and route.path.startswith("/app/api/admin/")
+    ]
+    assert [route.path for route in admin_routes] == ["/app/api/admin/test"]
+    for route in admin_routes:
+        assert route.dependant.dependencies
+        assert (
+            route.dependant.dependencies[0].call
+            is platform_owner.platform_owner_admin_guard
+        )
+    assert app.state.klyrow_platform_owner_admin_routes == (
+        "/app/api/admin/test",
+    )
+
+
+def test_locked_admin_authority_uses_four_shared_refreshing_locks() -> None:
+    item, user, member, identity, context = _authority_snapshot()
+    session = _LockingSession(item, user, member, identity)
+
+    assert platform_owner._locked_admin_authority(session, context) == (
+        item,
+        user,
+        member,
+        identity,
+    )
+    assert len(session.statements) == 4
+    assert all(
+        statement._for_update_arg is not None
+        for statement in session.statements
+    )
+    assert all(
+        statement.get_execution_options().get("populate_existing") is True
+        for statement in session.statements
+    )
+
+
+def test_admin_guard_validates_locked_snapshot_and_marks_request(
+    monkeypatch,
+) -> None:
+    item, user, member, identity, context = _authority_snapshot()
+    session = _LockingSession(item, user, member, identity)
+    observed = []
+
+    def validate(*values, require_platform_admin):
+        observed.append((values, require_platform_admin))
+
+    monkeypatch.setattr(platform_owner, "_validate_owner_objects", validate)
+    request = _request()
+    platform_owner.platform_owner_admin_guard(
+        request,
+        ctx=context,
+        s=session,
+    )
+
+    assert observed == [
+        ((item, user, member, identity), True),
+    ]
+    assert request.state.klyrow_platform_owner_validated is True
+    assert request.state.klyrow_platform_owner_session_id == item.id
+
+
+def test_admin_guard_denies_non_platform_role_before_handler() -> None:
+    item, user, member, identity, context = _authority_snapshot(
+        role="tenant_admin"
+    )
+    session = _LockingSession(item, user, member, identity)
+
+    with pytest.raises(HTTPException) as denied:
+        platform_owner.platform_owner_admin_guard(
+            _request(),
+            ctx=context,
+            s=session,
+        )
+
+    assert denied.value.status_code == 403
+    assert denied.value.detail == "platform_admin_required"
+    assert denied.value.headers == {"Cache-Control": "no-store"}
+
+
+def test_same_transaction_lock_contract_is_explicit_in_source() -> None:
+    source = Path("apps/gateway/app/platform_owner.py").read_text(
+        encoding="utf-8"
+    )
+    assert source.count(".with_for_update(read=True)") == 4
+    assert source.count(".execution_options(populate_existing=True)") >= 4
+    assert "platform_owner_admin_guard" in source
+    assert "route.dependant.dependencies.insert" in source
+    assert "request.state.klyrow_platform_owner_validated = True" in source
 
 
 def test_unbound_step_up_redirect_is_hidden_and_fails_closed() -> None:
@@ -189,6 +355,10 @@ def test_runtime_guard_does_not_wrap_non_browser_api_routes(
 
 def test_guard_refuses_late_installation_after_stack_build() -> None:
     app = FastAPI()
+
+    @app.get("/app/api/admin/test")
+    def admin_test():
+        return {"status": "ok"}
 
     @app.get("/")
     def root():
