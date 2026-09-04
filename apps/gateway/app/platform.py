@@ -19,6 +19,10 @@ from .invitation_flow import (
     router as invitation_flow_router,
 )
 from .browser_email_setup import router as browser_email_setup_router
+from .platform_owner import (
+    install_platform_owner_guard,
+    router as platform_owner_router,
+)
 from .postal_callback_attribution import (
     install_postal_callback_extension,
     router as postal_callback_router,
@@ -61,6 +65,7 @@ if not getattr(app.state, "klyrow_browser_api_routes_registered", False):
     auth_bff._identity_context = resolve_identity_context_with_provisioning
     for platform_router in (
         auth_bff_router,
+        platform_owner_router,
         browser_auth_actions_router,
         tenancy_onboarding_router,
         invitation_flow_router,
@@ -72,6 +77,10 @@ if not getattr(app.state, "klyrow_browser_api_routes_registered", False):
     app.state.klyrow_browser_api_routes_registered = True
 else:
     auth_bff._identity_context = resolve_identity_context_with_provisioning
+
+# Install after route registration but before the ASGI middleware stack is
+# built. Platform-owner admin APIs then fail closed before their handlers run.
+install_platform_owner_guard(app)
 
 # The core app may have generated OpenAPI before browser composition.
 app.openapi_schema = None
