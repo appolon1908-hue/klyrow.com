@@ -41,11 +41,14 @@ jobs:
   deploy-readiness:
     uses: appolon1908-hue/Infustruction-repo/.github/workflows/reusable-codestra-deploy-readiness.yml@1b4a90810eb03db3eae2b676b2d418daa434ec16
     with:
-      repository_class: frontend
+      repository_class: application
       run_stack_tests: false
-      artifact_strategy: auto
+      # The canonical release workflow publishes the gateway, web, migration,
+      # and provisioner images independently. A generic single-Dockerfile
+      # image is not a deployable representation of this monorepo.
+      artifact_strategy: source-bundle
       runtime_deployable: true
-      health_paths: "/,/health"
+      health_paths: "/healthz,/readyz,/version"
       operation: ${{ github.event_name == 'workflow_dispatch' && inputs.operation || 'verify' }}
       confirmation: ${{ github.event_name == 'workflow_dispatch' && inputs.confirmation || '' }}
       canary_percent: ${{ github.event_name == 'workflow_dispatch' && inputs.canary_percent || '1' }}
