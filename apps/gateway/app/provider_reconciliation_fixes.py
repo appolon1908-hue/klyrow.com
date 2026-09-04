@@ -9,6 +9,7 @@ hiding or resolving lossy records.
 from __future__ import annotations
 
 import binascii
+from collections import Counter
 from typing import Any
 
 from sqlalchemy import case, func, or_, select
@@ -83,38 +84,121 @@ def _scoped_inbound_route(session: Any, item: Any, event: Any) -> Any | None:
     )
 
 
-def _attachment_content_complete(attachment: Any) -> bool:
-    """Accept valid base64 content, including the canonical empty payload."""
-
+def _decode_attachment(attachment: Any) -> bytes | None:
     if (
         not isinstance(attachment, dict)
         or "data_b64" not in attachment
         or not isinstance(attachment["data_b64"], str)
     ):
-        return False
+        return None
     try:
-        decoded = provider.base64.b64decode(
+        return provider.base64.b64decode(
             attachment["data_b64"].encode("ascii"),
             validate=True,
         )
     except (UnicodeEncodeError, ValueError, binascii.Error):
-        return False
+        return None
 
-    expected_size = attachment.get("size")
-    if expected_size is not None:
+
+def _normalized_manifest(item: Any) -> list[dict[str, Any]] | None:
+    """Return validated relational attachment metadata or ``None``."""
+
+    try:
+        raw = provider.json.loads(item.attachments_json or "[]")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(raw, list):
+        return None
+
+    manifest: list[dict[str, Any]] = []
+    for attachment in raw:
+        if not isinstance(attachment, dict):
+            return None
+        filename = attachment.get("filename")
+        content_type = attachment.get("content_type")
+        digest = attachment.get("sha256")
         try:
-            if int(expected_size) != len(decoded):
-                return False
+            size = int(attachment.get("size"))
         except (TypeError, ValueError):
-            return False
+            return None
+        if (
+            not isinstance(filename, str)
+            or not filename
+            or not isinstance(content_type, str)
+            or not content_type
+            or size < 0
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdefABCDEF" for character in digest)
+        ):
+            return None
+        manifest.append(
+            {
+                "filename": filename,
+                "content_type": content_type,
+                "size": size,
+                "sha256": digest.lower(),
+            }
+        )
+    return manifest
 
-    expected_hash = attachment.get("sha256")
-    if expected_hash is not None and (
-        not isinstance(expected_hash, str)
-        or provider.hashlib.sha256(decoded).hexdigest() != expected_hash.lower()
+
+def _attachment_key(attachment: dict[str, Any]) -> tuple[str, str, int, str]:
+    return (
+        str(attachment["filename"]),
+        str(attachment["content_type"]),
+        int(attachment["size"]),
+        str(attachment["sha256"]).lower(),
+    )
+
+
+def _authoritative_replay_attachments(
+    item: Any,
+    payload_attachments: Any,
+) -> list[dict[str, Any]] | None:
+    """Match every replay byte sequence to the relational attachment manifest."""
+
+    manifest = _normalized_manifest(item)
+    if manifest is None or not isinstance(payload_attachments, list):
+        return None
+    if len(manifest) != len(payload_attachments):
+        return None
+
+    supplied: dict[tuple[str, str, int, str], list[dict[str, Any]]] = {}
+    for candidate in payload_attachments:
+        if not isinstance(candidate, dict):
+            return None
+        try:
+            candidate_metadata = {
+                "filename": candidate["filename"],
+                "content_type": candidate["content_type"],
+                "size": int(candidate["size"]),
+                "sha256": str(candidate["sha256"]).lower(),
+            }
+        except (KeyError, TypeError, ValueError):
+            return None
+        supplied.setdefault(_attachment_key(candidate_metadata), []).append(candidate)
+
+    if Counter(map(_attachment_key, manifest)) != Counter(
+        key for key, values in supplied.items() for _ in values
     ):
-        return False
-    return True
+        return None
+
+    normalized: list[dict[str, Any]] = []
+    for expected in manifest:
+        candidates = supplied.get(_attachment_key(expected))
+        if not candidates:
+            return None
+        candidate = candidates.pop()
+        decoded = _decode_attachment(candidate)
+        if (
+            decoded is None
+            or len(decoded) != expected["size"]
+            or provider.hashlib.sha256(decoded).hexdigest() != expected["sha256"]
+        ):
+            return None
+        normalized.append({**expected, "data_b64": candidate["data_b64"]})
+    return normalized
 
 
 def _upgrade_legacy_inbound_event(
@@ -145,19 +229,22 @@ def _upgrade_legacy_inbound_event(
     if not isinstance(existing, dict):
         return "blocked", None
 
+    manifest = _normalized_manifest(item)
+    if manifest is None:
+        return "blocked", None
+
     required = ("recipient", "sender", "subject", "destination_kind")
     if all(existing.get(field) is not None for field in required):
-        raw_attachments = existing.get("attachments") or []
-        if not isinstance(raw_attachments, list) or any(
-            not _attachment_content_complete(attachment)
-            for attachment in raw_attachments
-        ):
+        replay_attachments = _authoritative_replay_attachments(
+            item,
+            existing.get("attachments", []),
+        )
+        if replay_attachments is None:
             return "blocked", None
 
         # The relational rows selected through the event tenant are the
-        # authority for all identity and message metadata. Retain only the
-        # replayable attachment bytes and non-authority transport metadata from
-        # the historical payload.
+        # authority for identity and message metadata. Retain only verified
+        # replay bytes and bounded transport metadata from the old payload.
         existing.update(
             {
                 "event_id": event.id,
@@ -175,16 +262,12 @@ def _upgrade_legacy_inbound_event(
                 "message_id": item.message_id_header,
                 "text": item.text_body,
                 "html": item.html_body,
-                "attachments": raw_attachments,
+                "attachments": replay_attachments,
             }
         )
         return "requeue", existing
 
-    try:
-        attachments = provider.json.loads(item.attachments_json or "[]")
-    except (TypeError, ValueError):
-        return "blocked", None
-    if attachments:
+    if manifest:
         # Historical rows intentionally retained only attachment hashes. Never
         # fabricate content or acknowledge a lossy replay.
         return "blocked", None
@@ -216,6 +299,174 @@ def _upgrade_legacy_inbound_event(
         payload_hash=payload_hash,
     )
     return "requeue", upgraded
+
+
+def _bounded_text(value: Any, default: str, *, limit: int = 500) -> str:
+    if not isinstance(value, str):
+        return default
+    normalized = value.strip()
+    return normalized[:limit] if normalized else default
+
+
+def _bounded_metadata(value: Any) -> dict[str, Any]:
+    """Retain only non-authority scalar provider diagnostics."""
+
+    if not isinstance(value, dict):
+        return {}
+    allowed = {
+        "provider_event",
+        "provider_message_token",
+        "smtp_status",
+        "reason",
+        "event_source",
+    }
+    result: dict[str, Any] = {}
+    for key in sorted(allowed):
+        item = value.get(key)
+        if isinstance(item, str):
+            result[key] = item[:500]
+        elif isinstance(item, (bool, int, float)) or item is None:
+            if key in value:
+                result[key] = item
+    return result
+
+
+def _bounded_attempt(value: Any) -> int:
+    try:
+        return max(1, min(int(value), 1000))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _upgrade_lifecycle_event(
+    session: Any,
+    event: Any,
+) -> tuple[str, dict[str, Any] | None]:
+    """Rebuild a lifecycle payload from tenant-scoped message authority."""
+
+    try:
+        existing = provider.json.loads(event.payload_json)
+    except (TypeError, ValueError):
+        return "blocked", None
+    if not isinstance(existing, dict):
+        return "blocked", None
+
+    provider_message = session.scalar(
+        select(provider.ProviderMessage).where(
+            provider.ProviderMessage.id == event.message_id,
+            provider.ProviderMessage.tenant_id == event.tenant_id,
+        )
+    )
+    core_message = None
+    outbox = None
+    if provider_message is None:
+        core_message = session.scalar(
+            select(core.Message).where(
+                core.Message.id == event.message_id,
+                core.Message.tenant_id == event.tenant_id,
+            )
+        )
+        if core_message is not None:
+            outbox = session.scalar(
+                select(core.EmailOutbox).where(
+                    core.EmailOutbox.message_id == event.message_id,
+                    core.EmailOutbox.tenant_id == event.tenant_id,
+                )
+            )
+    if provider_message is None and core_message is None:
+        return "blocked", None
+
+    if provider_message is not None:
+        sender = provider_message.sender
+        recipient = provider_message.recipient
+        correlation_id = provider_message.correlation_id or event.id
+        provider_message_id = (
+            provider_message.provider_message_id or provider_message.id
+        )
+        stream = str(provider_message.stream or "TRANSACTIONAL").lower()
+        status = str(provider_message.status or event.kind.rsplit(".", 1)[-1]).lower()
+    else:
+        sender = core_message.sender
+        recipient = core_message.recipient
+        correlation_id = (
+            getattr(outbox, "correlation_id", None)
+            or existing.get("correlation_id")
+            or event.id
+        )
+        provider_message_id = (
+            getattr(outbox, "provider_message_id", None)
+            or existing.get("provider_message_id")
+            or core_message.id
+        )
+        stream = _bounded_text(existing.get("stream"), "transactional").lower()
+        status = _bounded_text(
+            existing.get("canonical_status") or existing.get("status"),
+            str(core_message.status or event.kind.rsplit(".", 1)[-1]),
+        ).lower()
+
+    occurred_at = _bounded_text(
+        existing.get("occurred_at") or existing.get("timestamp"),
+        event.created_at.isoformat(),
+        limit=100,
+    )
+    operation_id = _bounded_text(
+        getattr(outbox, "operation_id", None) or existing.get("operation_id"),
+        event.message_id,
+        limit=200,
+    )
+    correlation_id = _bounded_text(correlation_id, event.id, limit=200)
+    causation_id = _bounded_text(
+        existing.get("causation_id"),
+        correlation_id,
+        limit=200,
+    )
+    provider_name = _bounded_text(existing.get("provider"), "klyrow", limit=100)
+    metadata = _bounded_metadata(existing.get("metadata"))
+
+    rebuilt = {
+        "event_id": event.id,
+        "schema_version": _bounded_text(
+            existing.get("schema_version") or existing.get("event_version"),
+            "1.0",
+            limit=20,
+        ),
+        "event": event.kind,
+        "event_version": _bounded_text(existing.get("event_version"), "1.0", limit=20),
+        "occurred_at": occurred_at,
+        "timestamp": occurred_at,
+        "tenant_id": event.tenant_id,
+        "customer_id": event.tenant_id,
+        "operation_id": operation_id,
+        "message_id": event.message_id,
+        "provider_message_id": _bounded_text(
+            provider_message_id,
+            event.message_id,
+            limit=200,
+        ),
+        "stream": stream,
+        "recipient": recipient,
+        "sender": sender,
+        "recipient_reference": (
+            "sha256:"
+            + provider.hashlib.sha256(str(recipient).lower().encode()).hexdigest()
+        ),
+        "status": status,
+        "canonical_status": status,
+        "provider": provider_name,
+        "correlation_id": correlation_id,
+        "causation_id": causation_id,
+        "attempt": _bounded_attempt(existing.get("attempt")),
+        "metadata": metadata,
+    }
+    rebuilt["payload_hash"] = provider.hashlib.sha256(
+        provider.json.dumps(
+            rebuilt,
+            separators=(",", ":"),
+            sort_keys=True,
+            default=str,
+        ).encode()
+    ).hexdigest()
+    return "requeue", rebuilt
 
 
 def _due_event_predicate(tenant_id: str, current: Any):
@@ -419,7 +670,7 @@ def reconcile_provider_outbox_dead_letters(
                 session, event
             )
         elif event.kind in core.SMTP_EVENT_MAP:
-            decision = "requeue"
+            decision, upgraded = _upgrade_lifecycle_event(session, event)
         else:
             decision = "blocked"
 
@@ -526,7 +777,9 @@ __all__ = [
     "BLOCKED_RECONCILIATION_MARKER",
     "EXPLICIT_ODOO_DESTINATIONS",
     "LEGACY_ODOO_WEBHOOK_DESTINATIONS",
+    "_authoritative_replay_attachments",
     "_upgrade_legacy_inbound_event",
+    "_upgrade_lifecycle_event",
     "install_provider_reconciliation_fixes",
     "middleware_destination_kind",
     "middleware_inbound_eligible",
