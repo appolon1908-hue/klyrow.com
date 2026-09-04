@@ -1,7 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from fastapi import FastAPI
+import pytest
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from apps.gateway.app import platform_owner
@@ -51,10 +52,18 @@ def test_guard_covers_every_browser_api_for_platform_admin_sessions() -> None:
     assert "validate_platform_owner_claims" in source
 
 
-def test_unbound_step_up_redirect_is_fail_closed() -> None:
+def test_unbound_step_up_redirect_is_hidden_and_fails_closed() -> None:
     source = Path("apps/gateway/app/platform_owner.py").read_text(encoding="utf-8")
+    assert '@router.get("/auth/step-up", include_in_schema=False)' in source
     assert "platform_owner_step_up_flow_binding_required" in source
     assert "_authorization_url(" not in source
+
+    with pytest.raises(HTTPException) as denied:
+        platform_owner.platform_owner_step_up(_ctx={"sub": "owner-candidate"})
+
+    assert denied.value.status_code == 503
+    assert denied.value.detail == "platform_owner_step_up_flow_binding_required"
+    assert denied.value.headers == {"Cache-Control": "no-store"}
 
 
 def test_runtime_guard_blocks_before_a_browser_api_handler(monkeypatch) -> None:
