@@ -1,6 +1,6 @@
 # Middleware integration
 
-Klyrow uses the private vSwitch (`10.40.0.2:18000` to `10.40.0.1:8095`) and dedicated `KLYROW_MIDDLEWARE_API_KEY` and `KLYROW_WEBHOOK_SECRET`. Never reuse Kyqra/Telnexa credentials.
+Klyrow receives private commands on `10.40.0.4:18000` and publishes outbound events through the dedicated Server A mTLS edge at `https://middleware-email-events.internal.codestra.agency:18080`. The deployment overlay pins that TLS hostname to private Server A address `10.40.0.1` inside the gateway and worker containers. Klyrow uses dedicated `KLYROW_MIDDLEWARE_API_KEY` and `KLYROW_WEBHOOK_SECRET` identities; never reuse Kyqra or Telnexa credentials.
 
 Sign the exact request body with HMAC-SHA256 over `timestamp + "\n" + event_id + "\n" + "klyrow" + "\n" + body`. Send `Authorization: Bearer <KLYROW_MIDDLEWARE_API_KEY>`, `X-Source-System: klyrow`, `X-Klyrow-Timestamp`, `X-Klyrow-Event-Id`, and `X-Klyrow-Signature: sha256=<lowercase hex>`. The receiver rejects timestamps outside five minutes, uses constant-time comparison, and persists event IDs to reject replay. Supported event names include queued, sent, delivered, bounced, complained, opened, clicked, unsubscribed, campaign started/completed/failed.
 
@@ -12,7 +12,7 @@ Klyrow events enter middleware at `/api/v1/klyrow/events`; dedicated paths also 
 
 Retries use bounded exponential backoff in the event delivery layer; receivers must return the prior resource for the same idempotency key/body and reject reuse with a different body. Rotate the API key and HMAC secret independently: install new values on both ends, restart the two integration services, run signed/invalid/replay tests, then revoke the old values. Logs include system, event/message/campaign/customer IDs but never credentials or authorization headers.
 
-Provider events are persisted locally before private fan-out. Canonical message status, audit, and hard-bounce/complaint suppression therefore remain correct if a downstream consumer is unavailable. Delivery to middleware `:8095` and the dedicated email worker `:18080` uses the same bearer plus HMAC identity. Failed fan-out retries every five seconds, stops after five attempts, and remains visible as `dlq`; exact replay returns the prior idempotent result.
+Provider events are persisted locally before private fan-out. Canonical message status, audit, and hard-bounce/complaint suppression therefore remain correct if a downstream consumer is unavailable. All outbound middleware and dedicated email-event traffic uses the same private mTLS hostname, client certificate, bearer, and HMAC identity; downgrade to the historical plaintext `:8095` endpoint is rejected. Failed fan-out retries every five seconds, stops after five attempts, and remains visible as `dlq`; exact replay returns the prior idempotent result.
 
 ## Synthetic downstream certification — 2026-08-16
 

@@ -38,7 +38,7 @@ gpg --batch --homedir "$gpg_home" --import "$recipient_file" >/dev/null 2>&1
 recipient="$(gpg --batch --homedir "$gpg_home" --with-colons --list-keys | awk -F: '$1=="fpr"{print $10;exit}')"
 [[ "$recipient" =~ ^[A-F0-9]{40,64}$ ]] || { echo "Backup recipient fingerprint invalid" >&2; exit 2; }
 
-paths=(config docker docs scripts docker-compose.yml .env)
+paths=(config deploy docker docs scripts docker-compose.yml docker-compose.postal-provisioning.yml docker-compose.web.yml .env)
 [[ -d secrets ]] && paths+=(secrets)
 tar -cz -C "$stage" klyrow.dump mautic.sql.gz postal.sql.gz mautic-files.tar.gz rabbitmq-definitions.json rabbitmq-queues.json MANIFEST.sha256 -C "$ROOT" "${paths[@]}" |
   gpg --batch --yes --homedir "$gpg_home" --trust-model always --recipient "$recipient" --output "$archive" --encrypt
