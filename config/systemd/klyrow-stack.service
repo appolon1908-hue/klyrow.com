@@ -1,15 +1,17 @@
 [Unit]
 Description=Klyrow production email platform
 Requires=docker.service
+Wants=network-online.target
 After=docker.service network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/root/klyrow.com
-ExecStart=/usr/bin/docker compose -f docker-compose.yml -f deploy/docker-compose.security-mail.yml up -d
-ExecStop=/usr/bin/docker compose -f docker-compose.yml -f deploy/docker-compose.security-mail.yml stop
+ExecStart=/root/klyrow.com/scripts/start
+ExecStop=/root/klyrow.com/scripts/stop
 TimeoutStartSec=900
+TimeoutStopSec=300
 
 [Install]
 WantedBy=multi-user.target
