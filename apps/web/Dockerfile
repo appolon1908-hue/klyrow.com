@@ -16,11 +16,17 @@ LABEL org.opencontainers.image.source="https://github.com/appolon1908-hue/klyrow
       org.opencontainers.image.revision="$SOURCE_COMMIT_SHA" \
       org.opencontainers.image.version="$SOURCE_COMMIT_SHA"
 # Pin an exact published patched Nginx runtime rather than a moving minor tag.
-# Assert the exact pinned runtime patch level, then return to non-root UID 101.
+# Install the independently checksum-pinned Alpine package from the source tree;
+# neither a moving repository index nor network access participates in this layer.
 USER root
-RUN nginx -v 2>&1 | grep -q 'nginx/1.30.4' \
-    && apk add --no-cache --upgrade 'libexpat=2.8.4-r0' \
-    && rm -f /var/log/apk.log
+COPY apps/web/vendor/libexpat-2.8.4-r0.apk /opt/klyrow/vendor/libexpat-2.8.4-r0.apk
+COPY apps/web/vendor/SHA256SUMS /opt/klyrow/vendor/SHA256SUMS
+RUN cd /opt/klyrow/vendor \
+    && sha256sum -c SHA256SUMS \
+    && apk verify --keys-dir /etc/apk/keys libexpat-2.8.4-r0.apk \
+    && apk add --no-cache --no-network ./libexpat-2.8.4-r0.apk \
+    && rm -f /var/log/apk.log \
+    && nginx -v 2>&1 | grep -q 'nginx/1.30.4'
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /build/dist /usr/share/nginx/html
 RUN printf '{"source_sha":"%s"}\n' "$SOURCE_COMMIT_SHA" > /usr/share/nginx/html/version.json \

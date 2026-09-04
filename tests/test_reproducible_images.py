@@ -27,7 +27,21 @@ def test_python_dependency_closure_is_exactly_pinned():
 
 def test_web_runtime_does_not_retain_nondeterministic_package_log():
     dockerfile = (ROOT / "apps/web/Dockerfile").read_text(encoding="utf-8")
+    checksums = (ROOT / "apps/web/vendor/SHA256SUMS").read_text(encoding="utf-8")
     assert "apk upgrade" not in dockerfile
+    assert "apk add --no-cache --no-network ./libexpat-2.8.4-r0.apk" in dockerfile
+    assert "apk verify --keys-dir /etc/apk/keys libexpat-2.8.4-r0.apk" in dockerfile
+    assert "sha256sum -c SHA256SUMS" in dockerfile
+    assert "--repository" not in dockerfile
+    assert "dl-cdn.alpinelinux.org" not in dockerfile
+    assert checksums == (
+        "34fa41e3994d9a844f50a7c01cb40bb2e272fa7f506b96e92a2b4a20b23a81bc  "
+        "libexpat-2.8.4-r0.apk\n"
+    )
+    assert __import__("hashlib").sha256(
+        (ROOT / "apps/web/vendor/libexpat-2.8.4-r0.apk").read_bytes()
+    ).hexdigest() == checksums.split()[0]
+    assert "rm -f /var/log/apk.log" in dockerfile
 
 
 def test_every_container_build_stage_pins_its_base_manifest_digest():
@@ -74,9 +88,13 @@ def test_postal_runtime_is_patched_from_immutable_os_and_gem_inputs():
     assert 'gem "rails", "= 7.2.3.2"' in gemfile
     assert 'gem "jwt", "= 2.10.3"' in gemfile
     assert 'gem "puma", "= 7.2.1"' in gemfile
+    assert 'gem "resolv", "= 0.7.2"' in gemfile
     assert 'gem "zlib", "= 3.2.3"' in gemfile
+    assert dockerfile.count("resolv-0.6.2") >= 7
+    assert '"resolv"=>"0.7.2"' in dockerfile
     assert "CHECKSUMS" in lock
     assert "rails (7.2.3.2) sha256=" in lock
+    assert "resolv (0.7.2) sha256=" in lock
     assert "zlib (3.2.3) sha256=" in lock
     assert 'ARG SOURCE_SHA' in dockerfile
     assert 'ARG SOURCE_DATE_EPOCH' in dockerfile

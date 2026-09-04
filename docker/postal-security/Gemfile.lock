@@ -477,7 +477,7 @@ DEPENDENCIES
   puma (= 7.2.1)
   rackup
   rails (= 7.2.3.2)
-  resolv
+  resolv (= 0.7.2)
   rspec
   rspec-rails
   rubocop

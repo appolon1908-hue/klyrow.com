@@ -33,14 +33,17 @@ RUN export SOURCE_DATE_EPOCH \
     && bundle install --jobs 1 --retry 3 \
     && bundle clean --force \
     && rm -rf \
+        /opt/postal/app/vendor/bundle/ruby/3.4.0/gems/resolv-0.6.2 \
         /usr/local/bundle/gems/{activestorage-7.1.6,activesupport-7.1.6,addressable-2.8.6,bcrypt-3.1.20,concurrent-ruby-1.3.6,faraday-2.9.0,jwt-2.8.1,net-imap-0.5.8,puma-7.0.4,resolv-0.6.2,uri-1.0.3,websocket-driver-0.8.0} \
         /usr/local/bundle/extensions/*/*/{bcrypt-3.1.20,puma-7.0.4,resolv-0.6.2,websocket-driver-0.8.0} \
         /usr/local/lib/ruby/gems/3.4.0/gems/{erb-4.0.4,net-imap-0.5.8,resolv-0.6.2,uri-1.0.3,zlib-3.2.1} \
     && rm -f \
+        /opt/postal/app/vendor/bundle/ruby/3.4.0/specifications/resolv-0.6.2.gemspec \
         /usr/local/bundle/cache/resolv-0.6.2.gem \
         /usr/local/bundle/specifications/{activestorage-7.1.6,activesupport-7.1.6,addressable-2.8.6,bcrypt-3.1.20,concurrent-ruby-1.3.6,faraday-2.9.0,jwt-2.8.1,net-imap-0.5.8,puma-7.0.4,resolv-0.6.2,uri-1.0.3,websocket-driver-0.8.0}.gemspec \
         /usr/local/lib/ruby/gems/3.4.0/cache/net-imap-0.5.8.gem \
         /usr/local/lib/ruby/gems/3.4.0/specifications/net-imap-0.5.8.gemspec \
+        /usr/local/bundle/cache/resolv-0.6.2.gem \
     && rm -rf /usr/lib/node_modules/npm /usr/lib/node_modules/corepack \
     && rm -f /usr/bin/npm /usr/bin/npx /usr/bin/corepack \
     && rm -f \
