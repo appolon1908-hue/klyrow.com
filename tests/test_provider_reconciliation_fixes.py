@@ -187,10 +187,29 @@ def test_reconciliation_advances_past_more_than_one_full_blocked_page(
         )
 
     assert "message.delivered" in SMTP_EVENT_MAP
+    recoverable_message = ProviderMessage(
+        id="recoverable-message",
+        tenant_id="tenant-a",
+        correlation_id="recoverable-correlation",
+        idempotency_key="recoverable-idempotency",
+        request_hash="recoverable-request",
+        sender="recoverable-sender@example.com",
+        recipient="recoverable-recipient@example.com",
+        subject="Recoverable lifecycle",
+        payload_json="{}",
+        stream="TRANSACTIONAL",
+        status="DELIVERED",
+        sandbox=True,
+        provider_message_id="postal-recoverable",
+        attempts=1,
+        available_at=old,
+        created_at=old,
+        updated_at=old,
+    )
     recoverable = ProviderEvent(
         id="recoverable-event",
         tenant_id="tenant-a",
-        message_id="recoverable-message",
+        message_id=recoverable_message.id,
         kind="message.delivered",
         payload_json='{"event_id":"recoverable-event"}',
         state="DEAD_LETTER",
@@ -244,7 +263,16 @@ def test_reconciliation_advances_past_more_than_one_full_blocked_page(
         last_error="server_a_delivery_failed",
         created_at=old,
     )
-    isolated_session.add_all([*blocked, recoverable, foreign, message, usage])
+    isolated_session.add_all(
+        [
+            *blocked,
+            recoverable_message,
+            recoverable,
+            foreign,
+            message,
+            usage,
+        ]
+    )
     isolated_session.commit()
 
     first = reconcile_provider_outbox_dead_letters(
