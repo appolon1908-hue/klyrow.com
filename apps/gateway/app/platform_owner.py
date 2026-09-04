@@ -28,9 +28,10 @@ from .tenancy import OidcIdentity, TenantMember
 
 router = APIRouter(tags=["Platform owner security"])
 # The middleware is defense in depth for every browser API request made with a
-# platform-admin session. Privileged admin handlers also receive a request-
-# scoped dependency that locks and revalidates the same authority rows used by
-# the handler transaction, closing promotion/demotion races.
+# platform-admin session. Every browser API handler also receives a request-
+# scoped dependency that locks the authority rows used by that handler's
+# transaction. Normal users continue after the lock; any current platform role
+# must satisfy the exact-owner policy.
 PLATFORM_OWNER_PATH_PREFIXES = ("/app/api/",)
 PLATFORM_OWNER_ADMIN_PREFIX = "/app/api/admin"
 
@@ -75,16 +76,12 @@ def _validate_owner_objects(
     identity: OidcIdentity | None,
     *,
     require_platform_admin: bool,
-) -> None:
+) -> bool:
     """Validate exact owner identity from one coherent authority snapshot."""
 
     user_is_platform_admin = bool(
         user and str(user.role or "").lower() == "platform_admin"
     )
-    if require_platform_admin and not user_is_platform_admin:
-        raise PlatformOwnerError(403, "platform_admin_required")
-    if not require_platform_admin and not _platform_role_present(item, user, member):
-        return
     if not user or not user.enabled or user.id != item.user_id:
         raise PlatformOwnerError(403, "platform_owner_account_disabled")
     if (
@@ -101,6 +98,10 @@ def _validate_owner_objects(
         or identity.user_id != item.user_id
     ):
         raise PlatformOwnerError(403, "platform_owner_identity_mismatch")
+    if require_platform_admin and not user_is_platform_admin:
+        raise PlatformOwnerError(403, "platform_admin_required")
+    if not require_platform_admin and not _platform_role_present(item, user, member):
+        return False
     try:
         canonical_issuer = auth_bff._canonical_issuer()
     except HTTPException as exc:
@@ -115,6 +116,7 @@ def _validate_owner_objects(
         claims=_stored_claims(item),
         now_epoch=int(time.time()),
     )
+    return True
 
 
 def _validate_session(s: Session, item: BrowserSession) -> None:
@@ -151,10 +153,10 @@ def _validate_raw_session(raw: str) -> None:
             _validate_session(s, item)
 
 
-def _locked_admin_authority(
+def _locked_browser_authority(
     s: Session, ctx: dict
-) -> tuple[BrowserSession, User, TenantMember, OidcIdentity]:
-    """Lock the exact browser authority rows in the handler's SQL transaction."""
+) -> tuple[BrowserSession, User | None, TenantMember | None, OidcIdentity | None]:
+    """Lock browser authority rows in the handler's request-scoped transaction."""
 
     session_id = str(ctx.get("sid") or "")
     if not session_id:
@@ -204,52 +206,62 @@ def _locked_admin_authority(
     return item, user, member, identity
 
 
-def platform_owner_admin_guard(
-    request: Request,
-    ctx: dict = Depends(browser_context),
-    s: Session = Depends(db),
-) -> None:
-    """Authorize a browser admin route in the handler's request-scoped session."""
-
-    try:
-        item, user, member, identity = _locked_admin_authority(s, ctx)
-        _validate_owner_objects(
-            item,
-            user,
-            member,
-            identity,
-            require_platform_admin=True,
-        )
-    except PlatformOwnerError as exc:
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=exc.detail,
-            headers={"Cache-Control": "no-store"},
-        ) from exc
-    request.state.klyrow_platform_owner_validated = True
-    request.state.klyrow_platform_owner_session_id = item.id
-
-
 def _is_browser_admin_path(path: str) -> bool:
     return path == PLATFORM_OWNER_ADMIN_PREFIX or path.startswith(
         PLATFORM_OWNER_ADMIN_PREFIX + "/"
     )
 
 
-def _install_admin_route_dependencies(app) -> tuple[str, ...]:
-    """Attach the same-session owner dependency to every effective admin API."""
+def _is_browser_api_path(path: str) -> bool:
+    return path.startswith(PLATFORM_OWNER_PATH_PREFIXES)
+
+
+def platform_owner_role_stability_guard(
+    request: Request,
+    ctx: dict = Depends(browser_context),
+    s: Session = Depends(db),
+) -> None:
+    """Lock role authority and validate exact ownership when platform-wide."""
+
+    try:
+        item, user, member, identity = _locked_browser_authority(s, ctx)
+        validated = _validate_owner_objects(
+            item,
+            user,
+            member,
+            identity,
+            require_platform_admin=_is_browser_admin_path(request.url.path),
+        )
+        # browser_context is dependency-cached for the handler. Refresh its role
+        # from the locked membership so a concurrent demotion cannot leave stale
+        # platform authority in the handler-visible context.
+        ctx["role"] = member.role
+    except PlatformOwnerError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers={"Cache-Control": "no-store"},
+        ) from exc
+    request.state.klyrow_platform_owner_authority_locked = True
+    request.state.klyrow_platform_owner_validated = validated
+    request.state.klyrow_platform_owner_session_id = item.id
+
+
+def _install_browser_route_dependencies(app) -> tuple[str, ...]:
+    """Attach the same-session role-stability guard to every browser API."""
 
     protected: list[str] = []
     for route in app.router.routes:
-        if not isinstance(route, APIRoute) or not _is_browser_admin_path(route.path):
+        if not isinstance(route, APIRoute) or not _is_browser_api_path(route.path):
             continue
         protected.append(route.path)
         if any(
-            getattr(dependant, "call", None) is platform_owner_admin_guard
+            getattr(dependant, "call", None)
+            is platform_owner_role_stability_guard
             for dependant in route.dependant.dependencies
         ):
             continue
-        marker = Depends(platform_owner_admin_guard)
+        marker = Depends(platform_owner_role_stability_guard)
         route.dependencies.insert(0, marker)
         route.dependant.dependencies.insert(
             0,
@@ -259,9 +271,9 @@ def _install_admin_route_dependencies(app) -> tuple[str, ...]:
             ),
         )
     if not protected:
-        raise RuntimeError("platform owner admin routes were not registered")
+        raise RuntimeError("platform owner browser routes were not registered")
     result = tuple(sorted(set(protected)))
-    app.state.klyrow_platform_owner_admin_routes = result
+    app.state.klyrow_platform_owner_browser_routes = result
     return result
 
 
@@ -274,7 +286,7 @@ def install_platform_owner_guard(app) -> None:
         raise RuntimeError(
             "platform owner guard must be installed before the ASGI stack is built"
         )
-    _install_admin_route_dependencies(app)
+    _install_browser_route_dependencies(app)
     if getattr(app.state, "klyrow_platform_owner_guard_installed", False):
         return
 
