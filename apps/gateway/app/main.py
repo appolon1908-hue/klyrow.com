@@ -412,7 +412,7 @@ async def emit_middleware(event_type:str,payload:dict)->bool:
     source_payload=dict(payload)
     source_payload_hash=str(source_payload.get("payload_hash") or hashlib.sha256(json.dumps(source_payload,separators=(",",":"),sort_keys=True,default=str).encode()).hexdigest())
     event_id=payload.get("event_id") or str(uuid.uuid4())
-    if event_type.startswith(("klyrow.email.", "klyrow.message.")):
+    if event_type.startswith(("klyrow.email.", "klyrow.message.")) and event_type != "klyrow.email.inbound_received":
         payload={"event_id":event_id,"schema_version":str(payload.get("schema_version") or payload.get("event_version") or "1.0"),"source_system":"klyrow","event_type":event_type,"event_version":str(payload.get("event_version") or "1.0"),
             "occurred_at":str(payload.get("occurred_at") or datetime.now(timezone.utc).isoformat()),"tenant_id":str(payload.get("tenant_id") or payload.get("customer_id") or ""),
             "operation_id":str(payload.get("operation_id") or payload.get("message_id") or event_id),"payload_hash":source_payload_hash,
@@ -429,7 +429,8 @@ async def emit_middleware(event_type:str,payload:dict)->bool:
     # send them through the legacy generic route first: a failure there used
     # to abort delivery before the dedicated, mTLS-protected endpoint was
     # attempted and incorrectly exhausted the outbox into DLQ.
-    if event_type.startswith(("klyrow.email.", "klyrow.message.")) and email_target:
+    dedicated_event = event_type == "klyrow.usage.recorded" or event_type.startswith(("klyrow.email.", "klyrow.message."))
+    if dedicated_event and email_target:
         targets=[email_target]
     else:
         if not base:return False
@@ -765,8 +766,9 @@ def metrics(authorization:str=Header(default="")):
     with DB() as s:
         for status in ("QUEUED","PROCESSING","DEFERRED","FAILED","DEAD_LETTER"):
             PROVIDER_QUEUE.labels(status).set(s.scalar(select(func.count()).select_from(ProviderMessage).where(ProviderMessage.status==status)) or 0)
-        for state in ("PENDING","RETRY","DELIVERED","DEAD_LETTER"):
+        for state in ("PENDING","RETRY","DELIVERED","SKIPPED","DEAD_LETTER"):
             PROVIDER_EVENTS.labels(state).set(s.scalar(select(func.count()).select_from(ProviderEvent).where(ProviderEvent.state==state)) or 0)
+        for state in ("PENDING","RETRY","DELIVERED","DEAD_LETTER"):
             PROVIDER_USAGE.labels(state).set(s.scalar(select(func.count()).select_from(ProviderUsageEvent).where(ProviderUsageEvent.state==state)) or 0)
         active=s.scalars(select(EmailOutbox).where(EmailOutbox.state.in_(("pending","sending","retry")))).all()
         ages=[]

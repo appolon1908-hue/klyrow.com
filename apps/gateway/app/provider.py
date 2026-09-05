@@ -444,6 +444,19 @@ class SmtpPreflightIn(BaseModel):
     stream: str = "TRANSACTIONAL"
 
 
+class ProviderOutboxReconcileIn(BaseModel):
+    reason: str = Field(min_length=8, max_length=500)
+    limit: int = Field(default=50, ge=1, le=50)
+    apply: bool = False
+    confirmation: Optional[str] = None
+
+    @model_validator(mode="after")
+    def require_fixed_apply_confirmation(self):
+        if self.apply and self.confirmation != "RECONCILE_PROVIDER_OUTBOX":
+            raise ValueError("provider_outbox_reconcile_confirmation_required")
+        return self
+
+
 EXECUTABLE_SUFFIXES = {".exe", ".com", ".bat", ".cmd", ".ps1", ".js", ".jar", ".scr", ".msi", ".dll"}
 
 
@@ -484,6 +497,77 @@ def parse_inbound(raw: bytes, max_message_bytes: int, max_attachment_bytes: int)
         "references": message.get("References"), "subject": message.get("Subject", ""), "text": text_body,
         "html": html_body, "attachments": attachments, "attachment_contents": attachment_contents,
         "disposition": disposition}
+
+
+MIDDLEWARE_INBOUND_DESTINATIONS = {"odoo_helpdesk", "odoo_accounting"}
+
+
+def middleware_destination_kind(route) -> str:
+    """Return the closed Server A destination name for either route model."""
+    destination = str(route.destination_kind)
+    if destination == "SUPPORT":
+        return "odoo_helpdesk"
+    if destination == "ODOO":
+        return "odoo_accounting" if "account" in str(route.destination_ref or "").lower() else "odoo_helpdesk"
+    return destination
+
+
+def middleware_inbound_eligible(route, disposition: str) -> bool:
+    """Only accepted Odoo-bound mail crosses the protected Server A edge."""
+    return disposition == "ACCEPT" and middleware_destination_kind(route) in MIDDLEWARE_INBOUND_DESTINATIONS
+
+
+def middleware_inbound_payload(
+    *,
+    event_id: str,
+    item: ProviderInbound,
+    route,
+    parsed: dict,
+    occurred_at: str,
+    payload_hash: str,
+) -> dict:
+    """Build the durable, replayable Server A inbound-mail contract."""
+    metadata = list(parsed.get("attachments") or [])
+    contents = list(parsed.get("attachment_contents") or [])
+    if len(metadata) != len(contents):
+        raise ValueError("inbound_attachment_content_unavailable")
+    attachments = []
+    for details, content in zip(metadata, contents, strict=True):
+        if not isinstance(content, bytes):
+            raise ValueError("invalid_inbound_attachment_content")
+        attachments.append({**details, "data_b64": base64.b64encode(content).decode("ascii")})
+    return {
+        "event_id": event_id,
+        "schema_version": "1.0",
+        "event": "inbound.received",
+        "timestamp": occurred_at,
+        "occurred_at": occurred_at,
+        "payload_hash": payload_hash,
+        "tenant_id": item.tenant_id,
+        "inbound_id": item.id,
+        "provider_event_id": item.provider_event_id,
+        "route_id": item.route_id,
+        "destination_kind": middleware_destination_kind(route),
+        "destination_ref": route.destination_ref,
+        "disposition": item.disposition,
+        "recipient": item.recipient,
+        "sender": item.sender,
+        "subject": item.subject,
+        "message_id": parsed.get("message_id"),
+        "in_reply_to": parsed.get("in_reply_to"),
+        "references": parsed.get("references"),
+        "date": parsed.get("date"),
+        "cc": parsed.get("cc"),
+        "text": parsed.get("text"),
+        "html": parsed.get("html"),
+        "attachments": attachments,
+        "auth_verdict": item.auth_verdict,
+        "spf_result": item.spf_result,
+        "dkim_result": item.dkim_result,
+        "dmarc_result": item.dmarc_result,
+        "arc_result": item.arc_result,
+        "dmarc_fail_action": item.dmarc_fail_action,
+    }
 
 
 def smtp_authorize(s: Session, payload: SmtpPreflightIn, tenant_id: str) -> SmtpCredential:
@@ -802,6 +886,131 @@ def recover_expired_leases(s: Session, max_attempts: int = 5) -> int:
     return len(expired)
 
 
+def _inbound_route_for_event(s: Session, item: ProviderInbound):
+    route = s.get(InboundRouteConfig, item.route_id)
+    if route is not None:
+        return route
+    from .messaging import InboundRoute
+    return s.get(InboundRoute, item.route_id)
+
+
+def _upgrade_legacy_inbound_event(s: Session, event: ProviderEvent) -> tuple[str, Optional[dict]]:
+    """Classify and, when possible, upgrade one historical inbound event."""
+    item = s.get(ProviderInbound, event.message_id)
+    route = _inbound_route_for_event(s, item) if item else None
+    if item is None or route is None:
+        return "blocked", None
+    if not middleware_inbound_eligible(route, item.disposition):
+        return "skipped", None
+    existing = json.loads(event.payload_json)
+    if all(existing.get(field) is not None for field in ("recipient", "sender", "subject", "destination_kind")):
+        existing_attachments = list(existing.get("attachments") or [])
+        if any(not isinstance(attachment, dict) or not attachment.get("data_b64") for attachment in existing_attachments):
+            return "blocked", None
+        existing["destination_kind"] = middleware_destination_kind(route)
+        return "requeue", existing
+    attachments = json.loads(item.attachments_json or "[]")
+    if attachments:
+        # Historical rows intentionally retained only attachment hashes. Never
+        # fabricate content or acknowledge a lossy replay.
+        return "blocked", None
+    parsed = {
+        "message_id": item.message_id_header,
+        "in_reply_to": existing.get("in_reply_to"),
+        "references": existing.get("references"),
+        "date": existing.get("date"),
+        "cc": existing.get("cc"),
+        "text": item.text_body,
+        "html": item.html_body,
+        "attachments": [],
+        "attachment_contents": [],
+    }
+    upgraded = middleware_inbound_payload(
+        event_id=event.id,
+        item=item,
+        route=route,
+        parsed=parsed,
+        occurred_at=str(existing.get("occurred_at") or event.created_at.isoformat()),
+        payload_hash=str(existing.get("payload_hash") or hashlib.sha256(event.payload_json.encode()).hexdigest()),
+    )
+    return "requeue", upgraded
+
+
+def reconcile_provider_outbox_dead_letters(
+    s: Session, *, tenant_id: str, limit: int = 50, apply: bool = False
+) -> dict[str, int | bool]:
+    """Plan or apply one bounded, auditable provider-outbox recovery batch."""
+    if not 1 <= limit <= 50:
+        raise ValueError("provider_outbox_reconcile_limit_out_of_range")
+    from .main import SMTP_EVENT_MAP
+
+    result: dict[str, int | bool] = {
+        "apply": apply,
+        "examined": 0,
+        "events_requeued": 0,
+        "events_skipped": 0,
+        "events_blocked": 0,
+        "usage_requeued": 0,
+    }
+    events = list(s.scalars(
+        select(ProviderEvent)
+        .where(ProviderEvent.state == "DEAD_LETTER", ProviderEvent.tenant_id == tenant_id)
+        .order_by(ProviderEvent.created_at, ProviderEvent.id)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    ).all())
+    for event in events:
+        result["examined"] = int(result["examined"]) + 1
+        upgraded = None
+        if event.kind == "inbound.received":
+            decision, upgraded = _upgrade_legacy_inbound_event(s, event)
+        elif event.kind in SMTP_EVENT_MAP:
+            decision = "requeue"
+        else:
+            decision = "blocked"
+        result_key = {"requeue": "events_requeued", "skipped": "events_skipped", "blocked": "events_blocked"}[decision]
+        result[result_key] = int(result[result_key]) + 1
+        if not apply:
+            continue
+        if decision == "skipped":
+            event.state = "SKIPPED"
+            event.last_error = "middleware_delivery_not_applicable"
+        elif decision == "requeue":
+            if upgraded is not None:
+                event.payload_json = json.dumps(upgraded, separators=(",", ":"), sort_keys=True)
+            event.state = "RETRY"
+            event.attempts = 0
+            event.available_at = now()
+            event.last_error = None
+        else:
+            # Unknown or lossy events remain on the existing critical alert;
+            # reconciliation must never make unresolved data disappear.
+            event.state = "DEAD_LETTER"
+            event.last_error = "operator_reconciliation_required"
+        event.updated_at = now()
+
+    remaining = limit - len(events)
+    if remaining:
+        usages = list(s.scalars(
+            select(ProviderUsageEvent)
+            .where(ProviderUsageEvent.state == "DEAD_LETTER", ProviderUsageEvent.tenant_id == tenant_id)
+            .order_by(ProviderUsageEvent.created_at, ProviderUsageEvent.id)
+            .limit(remaining)
+            .with_for_update(skip_locked=True)
+        ).all())
+        result["examined"] = int(result["examined"]) + len(usages)
+        result["usage_requeued"] = int(result["usage_requeued"]) + len(usages)
+        if apply:
+            for usage in usages:
+                usage.state = "RETRY"
+                usage.attempts = 0
+                usage.available_at = now()
+                usage.last_error = None
+    if apply:
+        s.flush()
+    return result
+
+
 async def dispatch_provider_outbox(limit: int = 50) -> dict:
     from .main import DB, SMTP_EVENT_MAP, emit_middleware
     delivered = 0
@@ -847,7 +1056,7 @@ async def dispatch_provider_outbox(limit: int = 50) -> dict:
         usages = list(s.scalars(select(ProviderUsageEvent).where(ProviderUsageEvent.state.in_(["PENDING", "RETRY"]),
             ProviderUsageEvent.available_at <= now()).limit(limit)).all())
     for snapshot in usages:
-        ok = await emit_middleware("klyrow.usage.recorded", {"usage_event_id": snapshot.id,
+        ok = await emit_middleware("klyrow.usage.recorded", {"event_id": snapshot.id, "usage_event_id": snapshot.id,
             "tenant_id": snapshot.tenant_id, "message_id": snapshot.message_id, "stream": snapshot.stream,
             "billable_units": snapshot.billable_units, "timestamp": snapshot.created_at.isoformat(),
             "provider_result_category": snapshot.result_category})
@@ -1315,14 +1524,23 @@ def inbound_receive(payload: InboundFixtureIn, ctx=Depends(auth), s: Session = D
         dmarc_fail_action=payload.dmarc_fail_action,
         disposition=parsed["disposition"])
     s.add(item)
-    event_id = str(uuid.uuid4())
-    s.add(ProviderEvent(id=event_id, tenant_id=ctx["tenant"], message_id=item.id, kind="inbound.received",
-        payload_json=json.dumps({"event_id": event_id, "event": "inbound.received", "tenant_id": ctx["tenant"],
-            "inbound_id": item.id, "route_id": route.id, "destination_kind": route.destination_kind,
-            "destination_ref": route.destination_ref, "disposition": item.disposition,
-            "auth_verdict": item.auth_verdict, "spf_result": item.spf_result,
-            "dkim_result": item.dkim_result, "dmarc_result": item.dmarc_result,
-            "arc_result": item.arc_result, "dmarc_fail_action": item.dmarc_fail_action}, separators=(",", ":"), sort_keys=True)))
+    if middleware_inbound_eligible(route, item.disposition):
+        event_id = str(uuid.uuid4())
+        event_payload = middleware_inbound_payload(
+            event_id=event_id,
+            item=item,
+            route=route,
+            parsed=parsed,
+            occurred_at=now().isoformat(),
+            payload_hash=hashlib.sha256(raw).hexdigest(),
+        )
+        s.add(ProviderEvent(
+            id=event_id,
+            tenant_id=ctx["tenant"],
+            message_id=item.id,
+            kind="inbound.received",
+            payload_json=json.dumps(event_payload, separators=(",", ":"), sort_keys=True),
+        ))
     # The provider pipeline remains authoritative for SPF/DKIM/DMARC and spam
     # disposition. Webmail receives only the already-attributed, accepted or
     # quarantined tenant record; rejected messages are ignored by the helper.
@@ -1454,28 +1672,23 @@ async def postal_inbound(
         disposition="QUARANTINE",
     )
     s.add(item)
-    event_id = str(uuid.uuid4())
-    destination_kind = route.destination_kind
-    if destination_kind == "SUPPORT":
-        destination_kind = "odoo_helpdesk"
-    elif destination_kind == "ODOO":
-        destination_kind = "odoo_accounting" if "account" in (route.destination_ref or "").lower() else "odoo_helpdesk"
-    normalized = {
-        "event_id": event_id, "schema_version": "1.0", "event": "inbound.received",
-        "occurred_at": datetime.fromtimestamp(payload.timestamp, tz=timezone.utc).isoformat(),
-        "payload_hash": hashlib.sha256(body).hexdigest(), "tenant_id": route.tenant_id,
-        "inbound_id": item.id, "provider_event_id": provider_event_id, "route_id": route.id,
-        "destination_kind": destination_kind, "destination_ref": route.destination_ref,
-        "disposition": item.disposition, "recipient": recipient, "sender": parsed["from"],
-        "subject": parsed["subject"], "message_id": parsed["message_id"],
-        "in_reply_to": parsed["in_reply_to"], "references": parsed["references"],
-        "date": parsed["date"], "cc": parsed["cc"], "text": parsed["text"],
-        "html": parsed["html"], "attachments": attachment_metadata,
-    }
-    s.add(ProviderEvent(
-        id=event_id, tenant_id=route.tenant_id, message_id=item.id, kind="inbound.received",
-        payload_json=json.dumps(normalized, separators=(",", ":"), sort_keys=True),
-    ))
+    if middleware_inbound_eligible(route, item.disposition):
+        event_id = str(uuid.uuid4())
+        normalized = middleware_inbound_payload(
+            event_id=event_id,
+            item=item,
+            route=route,
+            parsed=parsed,
+            occurred_at=datetime.fromtimestamp(payload.timestamp, tz=timezone.utc).isoformat(),
+            payload_hash=hashlib.sha256(body).hexdigest(),
+        )
+        s.add(ProviderEvent(
+            id=event_id,
+            tenant_id=route.tenant_id,
+            message_id=item.id,
+            kind="inbound.received",
+            payload_json=json.dumps(normalized, separators=(",", ":"), sort_keys=True),
+        ))
     if isinstance(route, InboundRouteConfig):
         from .webmail import capture_provider_inbound
         capture_provider_inbound(s, route, item, parsed)
@@ -1581,11 +1794,47 @@ def operation_event_retry(event_id: str, ctx=Depends(auth), s: Session = Depends
     if event.state not in {"RETRY", "DEAD_LETTER"}:
         raise HTTPException(409, "event_not_retryable")
     event.state = "RETRY"
+    event.attempts = 0
     event.available_at = now()
     event.last_error = None
     audit_provider(s, ctx, "event.retry_requested", "accepted", resource_id=event.id)
     s.commit()
     return {"event_id": event.id, "state": event.state}
+
+
+@router.post("/operations/usage/{usage_event_id}/retry")
+def operation_usage_retry(usage_event_id: str, ctx=Depends(auth), s: Session = Depends(db)):
+    if ctx.get("role") != "platform_admin" or not ctx.get("service"):
+        raise HTTPException(403, "operator_authorization_required")
+    event = s.scalar(select(ProviderUsageEvent).where(
+        ProviderUsageEvent.id == usage_event_id,
+        ProviderUsageEvent.tenant_id == ctx["tenant"],
+    ))
+    if not event:
+        raise HTTPException(404, "usage_event_not_found")
+    if event.state not in {"RETRY", "DEAD_LETTER"}:
+        raise HTTPException(409, "usage_event_not_retryable")
+    event.state = "RETRY"
+    event.attempts = 0
+    event.available_at = now()
+    event.last_error = None
+    audit_provider(s, ctx, "usage_event.retry_requested", "accepted", resource_id=event.id)
+    s.commit()
+    return {"usage_event_id": event.id, "state": event.state}
+
+
+@router.post("/operations/outbox/reconcile")
+def operation_outbox_reconcile(payload: ProviderOutboxReconcileIn, ctx=Depends(auth), s: Session = Depends(db)):
+    if ctx.get("role") != "platform_admin" or not ctx.get("service"):
+        raise HTTPException(403, "operator_authorization_required")
+    result = reconcile_provider_outbox_dead_letters(
+        s, tenant_id=ctx["tenant"], limit=payload.limit, apply=payload.apply
+    )
+    if payload.apply:
+        reason_hash = "sha256:" + hashlib.sha256(payload.reason.encode()).hexdigest()
+        audit_provider(s, ctx, "provider_outbox.reconciled", "accepted", correlation_id=reason_hash)
+        s.commit()
+    return result
 
 
 @router.post("/operations/reconcile")

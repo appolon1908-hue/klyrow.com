@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from apps.gateway.app.main import AllowedSender, Base, DB, Domain, InboundRouteConfig, Tenant, app, auth, engine
-from apps.gateway.app.provider import DkimKey, ProviderDomain, ProviderEvent, ProviderInbound, ProviderMessage, ProviderUsageEvent, SandboxCapture, SenderIdentity, SmtpCredential, dispatch_provider_outbox, now, recover_expired_leases
+from apps.gateway.app.provider import DkimKey, ProviderDomain, ProviderEvent, ProviderInbound, ProviderMessage, ProviderUsageEvent, SandboxCapture, SenderIdentity, SmtpCredential, dispatch_provider_outbox, now, reconcile_provider_outbox_dead_letters, recover_expired_leases
 from apps.gateway.app.smtp_relay import GovernedRelay
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
@@ -41,7 +41,7 @@ def setup_module():
         session.add_all([Tenant(id="tenant-a", name="A", quota=100), Tenant(id="tenant-b", name="B", quota=100)])
         session.add(Domain(id="legacy-domain", tenant_id="tenant-a", domain="codestra.co", token="verified", verified=True))
         session.add(AllowedSender(id="allowed-support", tenant_id="tenant-a", address="support@codestra.co", role="support", enabled=True))
-        session.add(InboundRouteConfig(id="route-support", tenant_id="tenant-a", address="support@codestra.co", destination_kind="webhook", destination_ref="server-a:odoo-support", verified=True, enabled=True))
+        session.add(InboundRouteConfig(id="route-support", tenant_id="tenant-a", address="support@codestra.co", destination_kind="odoo_helpdesk", destination_ref="server-a:odoo-support", verified=True, enabled=True))
         session.commit()
 
 
@@ -149,6 +149,14 @@ def test_inbound_exact_route_mime_idempotency_and_quarantine():
     assert client.post("/v1/internal/email/inbound/receive", json={**inbound_payload("postal-event-0005"), "destination_override": "https://attacker.invalid"}).status_code == 403
     with DB() as session:
         assert session.query(ProviderInbound).count() == 2
+        accepted = session.query(ProviderInbound).filter_by(provider_event_id="postal-event-0001").one()
+        event = session.query(ProviderEvent).filter_by(message_id=accepted.id, kind="inbound.received").one()
+        body = json.loads(event.payload_json)
+        assert body["destination_kind"] == "odoo_helpdesk"
+        assert body["disposition"] == "ACCEPT"
+        assert base64.b64decode(body["attachments"][0]["data_b64"]) == b"data\r\n"
+        quarantined_item = session.query(ProviderInbound).filter_by(provider_event_id="postal-event-0003").one()
+        assert session.query(ProviderEvent).filter_by(message_id=quarantined_item.id).count() == 0
 
 
 def test_inbound_dangerous_filename_rejected():
@@ -226,10 +234,7 @@ def test_postal_hash_inbound_requires_signature_timestamp_exact_route_and_replay
         item = session.query(ProviderInbound).filter(
             ProviderInbound.provider_event_id == "postal:route-support:7004"
         ).one()
-        event = session.query(ProviderEvent).filter_by(message_id=item.id, kind="inbound.received").one()
-        normalized = json.loads(event.payload_json)
-        assert normalized["payload_hash"] and normalized["occurred_at"]
-        assert normalized["tenant_id"] == "tenant-a"
+        assert session.query(ProviderEvent).filter_by(message_id=item.id, kind="inbound.received").count() == 0
 
 
 def test_smtp_credential_once_rotation_revocation_and_tenant_isolation():
@@ -343,8 +348,11 @@ def test_event_and_usage_outbox_retries_without_double_billing():
         usage.available_at = now()-timedelta(seconds=1)
         usage_count = session.query(ProviderUsageEvent).count()
         session.commit()
-    with patch("apps.gateway.app.main.emit_middleware", new=AsyncMock(return_value=True)):
+    with patch("apps.gateway.app.main.emit_middleware", new=AsyncMock(return_value=True)) as emit:
         asyncio.run(dispatch_provider_outbox())
+    usage_calls = [call for call in emit.await_args_list if call.args[0] == "klyrow.usage.recorded"]
+    assert len(usage_calls) == 1
+    assert usage_calls[0].args[1]["event_id"] == usage_calls[0].args[1]["usage_event_id"]
     with DB() as session:
         assert session.get(ProviderEvent, event.id).state == "DELIVERED"
         assert session.get(ProviderUsageEvent, usage.id).state == "DELIVERED"
@@ -357,14 +365,116 @@ def test_restricted_operations_retry_and_reconciliation():
     with DB() as session:
         event = session.query(ProviderEvent).filter_by(kind="message.delivered").first()
         event.state = "DEAD_LETTER"
+        event.attempts = 8
+        usage = session.query(ProviderUsageEvent).first()
+        usage.state = "DEAD_LETTER"
+        usage.attempts = 8
         session.commit()
         event_id = event.id
+        usage_id = usage.id
     assert client.post(f"/v1/internal/email/operations/events/{event_id}/retry").json()["state"] == "RETRY"
+    assert client.post(f"/v1/internal/email/operations/usage/{usage_id}/retry").json()["state"] == "RETRY"
+    with DB() as session:
+        assert session.get(ProviderEvent, event_id).attempts == 0
+        assert session.get(ProviderUsageEvent, usage_id).attempts == 0
     reconciliation = client.post("/v1/internal/email/operations/reconcile")
     assert reconciliation.status_code == 200 and reconciliation.json()["status"] == "PASS"
     identity["role"] = "tenant_admin"
     assert client.post("/v1/internal/email/operations/reconcile").status_code == 403
     identity["role"] = "platform_admin"
+
+
+def test_bounded_outbox_reconciliation_requeues_only_eligible_inbound():
+    old = now() - timedelta(days=100)
+    with DB() as session:
+        session.add(InboundRouteConfig(
+            id="route-local-only", tenant_id="tenant-a", address="local@codestra.co",
+            destination_kind="webmail", destination_ref="klyrow:webmail", verified=True, enabled=True,
+        ))
+        eligible = ProviderInbound(
+            id="legacy-inbound-eligible", tenant_id="tenant-a", provider_event_id="legacy-provider-eligible",
+            route_id="route-support", message_id_header="<eligible@example.net>", sender="sender@example.net",
+            recipient="support@codestra.co", subject="Eligible", text_body="body", html_body=None,
+            attachments_json="[]", auth_verdict="PASS", spf_result="PASS", dkim_result="PASS",
+            dmarc_result="PASS", arc_result="NONE", dmarc_fail_action="ACCEPT", disposition="ACCEPT",
+        )
+        local = ProviderInbound(
+            id="legacy-inbound-local", tenant_id="tenant-a", provider_event_id="legacy-provider-local",
+            route_id="route-local-only", message_id_header="<local@example.net>", sender="sender@example.net",
+            recipient="local@codestra.co", subject="Local", text_body="body", html_body=None,
+            attachments_json="[]", auth_verdict="PASS", spf_result="PASS", dkim_result="PASS",
+            dmarc_result="PASS", arc_result="NONE", dmarc_fail_action="ACCEPT", disposition="ACCEPT",
+        )
+        lossy = ProviderInbound(
+            id="legacy-inbound-lossy", tenant_id="tenant-a", provider_event_id="legacy-provider-lossy",
+            route_id="route-support", message_id_header="<lossy@example.net>", sender="sender@example.net",
+            recipient="support@codestra.co", subject="Lossy", text_body="body", html_body=None,
+            attachments_json='[{"filename":"invoice.pdf","size":42}]', auth_verdict="PASS",
+            spf_result="PASS", dkim_result="PASS", dmarc_result="PASS", arc_result="NONE",
+            dmarc_fail_action="ACCEPT", disposition="ACCEPT",
+        )
+        session.add_all([eligible, local, lossy])
+        session.add_all([
+            ProviderEvent(
+                id="legacy-event-eligible", tenant_id="tenant-a", message_id=eligible.id,
+                kind="inbound.received", payload_json='{"event_id":"legacy-event-eligible"}',
+                state="DEAD_LETTER", attempts=8, last_error="server_a_delivery_failed", created_at=old,
+            ),
+            ProviderEvent(
+                id="legacy-event-local", tenant_id="tenant-a", message_id=local.id,
+                kind="inbound.received", payload_json='{"event_id":"legacy-event-local"}',
+                state="DEAD_LETTER", attempts=8, last_error="server_a_delivery_failed",
+                created_at=old + timedelta(seconds=1),
+            ),
+            ProviderEvent(
+                id="legacy-event-lossy", tenant_id="tenant-a", message_id=lossy.id,
+                kind="inbound.received", payload_json='{"event_id":"legacy-event-lossy"}',
+                state="DEAD_LETTER", attempts=8, last_error="server_a_delivery_failed",
+                created_at=old + timedelta(seconds=2),
+            ),
+        ])
+        session.commit()
+
+        dry_run = reconcile_provider_outbox_dead_letters(
+            session, tenant_id="tenant-a", limit=3, apply=False
+        )
+        assert dry_run["events_requeued"] == 1
+        assert dry_run["events_skipped"] == 1
+        assert dry_run["events_blocked"] == 1
+        assert session.get(ProviderEvent, "legacy-event-eligible").state == "DEAD_LETTER"
+
+        applied = reconcile_provider_outbox_dead_letters(
+            session, tenant_id="tenant-a", limit=3, apply=True
+        )
+        session.commit()
+        assert applied["events_requeued"] == 1
+        assert applied["events_skipped"] == 1
+        assert applied["events_blocked"] == 1
+        requeued = session.get(ProviderEvent, "legacy-event-eligible")
+        assert requeued.state == "RETRY" and requeued.attempts == 0
+        assert json.loads(requeued.payload_json)["event"] == "inbound.received"
+        assert session.get(ProviderEvent, "legacy-event-local").state == "SKIPPED"
+        blocked = session.get(ProviderEvent, "legacy-event-lossy")
+        assert blocked.state == "DEAD_LETTER"
+        assert blocked.last_error == "operator_reconciliation_required"
+
+
+def test_outbox_reconciliation_requires_confirmation_and_service_admin():
+    missing_confirmation = client.post("/v1/internal/email/operations/outbox/reconcile", json={
+        "reason": "repair production outbox", "limit": 1, "apply": True,
+    })
+    assert missing_confirmation.status_code == 422
+    dry_run = client.post("/v1/internal/email/operations/outbox/reconcile", json={
+        "reason": "inspect production outbox", "limit": 1, "apply": False,
+    })
+    assert dry_run.status_code == 200 and dry_run.json()["apply"] is False
+    identity["role"] = "tenant_admin"
+    try:
+        assert client.post("/v1/internal/email/operations/outbox/reconcile", json={
+            "reason": "inspect production outbox", "limit": 1, "apply": False,
+        }).status_code == 403
+    finally:
+        identity["role"] = "platform_admin"
 
 
 def test_spam_policy_accept_quarantine_and_reject():
