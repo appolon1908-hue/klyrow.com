@@ -32,6 +32,21 @@ from .postal_provisioning import (
     router as postal_provisioning_router,
 )
 from .webmail import router as webmail_router
+from .browser_security_fixes import (
+    browser_router as browser_security_router,
+    install_browser_security_fixes,
+    legacy_router as legacy_security_router,
+)
+from .browser_flow_cookie_authority import (
+    install_per_flow_cookie_authority,
+)
+from .browser_step_up_identity import (
+    install_existing_step_up_identity_guard,
+)
+from .browser_step_up_deadline import (
+    install_step_up_deadline_guard,
+)
+
 SHELL_PATHS = {"/app", "/onboarding", "/app/{path:path}"}
 
 # Replace historical account/session/invitation/callback routes before route
@@ -39,6 +54,16 @@ SHELL_PATHS = {"/app", "/onboarding", "/app/{path:path}"}
 install_auth_extensions()
 install_invitation_extensions()
 install_postal_callback_extension()
+install_browser_security_fixes(app)
+# New transactions use one host-only cookie per OIDC state so an older callback
+# response cannot invalidate a newer tab. The installer retains bounded read
+# compatibility for transactions started by the preceding release.
+install_per_flow_cookie_authority(app)
+# Step-up resolves only the initiating account and keeps parent revocation and
+# child creation in one transaction. The deadline guard additionally prevents
+# any rotated child from extending the parent session's absolute lifetime.
+install_existing_step_up_identity_guard(app)
+install_step_up_deadline_guard(app)
 
 # The historical onboarding router contains SPA shell routes before its API
 # routes. Strip those routes from the source router before registration.
@@ -64,6 +89,8 @@ if not getattr(app.state, "klyrow_postal_callback_route_registered", False):
 if not getattr(app.state, "klyrow_browser_api_routes_registered", False):
     auth_bff._identity_context = resolve_identity_context_with_provisioning
     for platform_router in (
+        browser_security_router,
+        legacy_security_router,
         auth_bff_router,
         platform_owner_router,
         browser_auth_actions_router,
