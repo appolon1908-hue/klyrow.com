@@ -75,9 +75,10 @@ def test_postal_runtime_is_patched_from_immutable_os_and_gem_inputs():
     gemfile = (ROOT / "docker/postal-security/Gemfile").read_text(encoding="utf-8")
     lock = (ROOT / "docker/postal-security/Gemfile.lock").read_text(encoding="utf-8")
     assert sources.count("snapshot.debian.org/") == 3
-    assert sources.count("20260901T000000Z") == 3
+    assert sources.count("20260906T000000Z") == 3
     assert "rm -f /etc/apt/sources.list.d/*" in dockerfile
     assert "apt-get dist-upgrade -y" in dockerfile
+    assert "libssh2-1)\" = '1.10.0-3+deb12u1'" in dockerfile
     assert "setcap -r /usr/local/bin/ruby" in dockerfile
     assert 'test -z "$(getcap /usr/local/bin/ruby)"' in dockerfile
     os_patch_layer = dockerfile.split(
