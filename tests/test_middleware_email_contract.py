@@ -11,7 +11,7 @@ os.environ.setdefault("KLYROW_SAFE_MODE", "true")
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import create_engine, event, func, select, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -32,6 +32,9 @@ def gateway(monkeypatch):
         engine = create_engine(postgres, connect_args={"options": f"-csearch_path={schema}"})
     else:
         engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        @event.listens_for(engine, "connect")
+        def enable_foreign_keys(connection, _record):
+            connection.execute("PRAGMA foreign_keys=ON")
     core.Base.metadata.create_all(engine)
     sessions = sessionmaker(bind=engine)
     context = {"tenant": "tenant-a", "sub": "middleware-a", "service": True,
@@ -39,6 +42,8 @@ def gateway(monkeypatch):
     with sessions() as session:
         for tenant in ("tenant-a", "tenant-b"):
             session.add(core.Tenant(id=tenant, name=tenant, quota=100))
+        session.flush()
+        for tenant in ("tenant-a", "tenant-b"):
             session.add(core.Domain(id=tenant, tenant_id=tenant, domain="example.com", token=tenant, verified=True))
             session.add(core.AllowedSender(id=tenant, tenant_id=tenant, address="sender@example.com", role="support"))
         session.commit()
