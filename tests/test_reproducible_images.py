@@ -37,10 +37,17 @@ def test_web_runtime_does_not_retain_nondeterministic_package_log():
     assert checksums == (
         "34fa41e3994d9a844f50a7c01cb40bb2e272fa7f506b96e92a2b4a20b23a81bc  "
         "libexpat-2.8.4-r0.apk\n"
+        "8306e5bb577696c9069fe1dfd9e1dcc39d2d481c6a1b0e707fd03c3e21aa6aa2  "
+        "libuuid-2.42.3-r1.apk\n"
     )
-    assert __import__("hashlib").sha256(
-        (ROOT / "apps/web/vendor/libexpat-2.8.4-r0.apk").read_bytes()
-    ).hexdigest() == checksums.split()[0]
+    for entry in checksums.splitlines():
+        digest, package = entry.split()
+        assert __import__("hashlib").sha256(
+            (ROOT / "apps/web/vendor" / package).read_bytes()
+        ).hexdigest() == digest
+        assert f"apk verify --keys-dir /etc/apk/keys {package}" in dockerfile
+        assert f"./{package}" in dockerfile
+    assert 'test "$(apk info -v libuuid)" = "libuuid-2.42.3-r1"' in dockerfile
     assert "rm -f /var/log/apk.log" in dockerfile
 
 

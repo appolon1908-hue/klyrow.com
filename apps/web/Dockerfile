@@ -16,15 +16,18 @@ LABEL org.opencontainers.image.source="https://github.com/appolon1908-hue/klyrow
       org.opencontainers.image.revision="$SOURCE_COMMIT_SHA" \
       org.opencontainers.image.version="$SOURCE_COMMIT_SHA"
 # Pin an exact published patched Nginx runtime rather than a moving minor tag.
-# Install the independently checksum-pinned Alpine package from the source tree;
+# Install the independently checksum-pinned Alpine packages from the source tree;
 # neither a moving repository index nor network access participates in this layer.
 USER root
 COPY apps/web/vendor/libexpat-2.8.4-r0.apk /opt/klyrow/vendor/libexpat-2.8.4-r0.apk
+COPY apps/web/vendor/libuuid-2.42.3-r1.apk /opt/klyrow/vendor/libuuid-2.42.3-r1.apk
 COPY apps/web/vendor/SHA256SUMS /opt/klyrow/vendor/SHA256SUMS
 RUN cd /opt/klyrow/vendor \
     && sha256sum -c SHA256SUMS \
     && apk verify --keys-dir /etc/apk/keys libexpat-2.8.4-r0.apk \
-    && apk add --no-cache --no-network ./libexpat-2.8.4-r0.apk \
+    && apk verify --keys-dir /etc/apk/keys libuuid-2.42.3-r1.apk \
+    && apk add --no-cache --no-network ./libexpat-2.8.4-r0.apk ./libuuid-2.42.3-r1.apk \
+    && test "$(apk info -v libuuid)" = "libuuid-2.42.3-r1" \
     && rm -f /var/log/apk.log \
     && nginx -v 2>&1 | grep -q 'nginx/1.30.4'
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
