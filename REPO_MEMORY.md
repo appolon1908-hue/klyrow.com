@@ -145,12 +145,18 @@ PYTHONPATH=. pytest -q tests
 pip-audit --requirement apps/gateway/requirements.txt
 ```
 
-CI also runs frontend lint/type/unit/build/Playwright checks, Gitleaks, and
-gateway, SMTP, web, and PostgreSQL image builds and Trivy scans. Image checks
-include SBOM and reproducibility evidence. PostgreSQL migration-twice and
-concurrent command replay run in CI. Owned Middleware adapters are tested
-against an immutable Middleware contract checkout. Source publication and
-deployment readiness use the separately pinned shared infrastructure workflow.
+The main CI workflow also runs frontend lint/type/unit/build/Playwright checks,
+Gitleaks, and builds and scans four candidates: gateway, web, migration, and
+Postal provisioner. Those image checks include SBOM and reproducibility evidence.
+PostgreSQL image validation is separate in
+`.github/workflows/database-runtime-ci.yml`, triggered by its declared pull-request
+paths or manual dispatch. There is no distinct SMTP image: `smtp-relay` reuses
+`KLYROW_GATEWAY_IMAGE` in `docker-compose.yml`.
+
+PostgreSQL migration-twice and concurrent command replay run in gateway CI.
+Owned Middleware adapters are tested against an immutable Middleware contract
+checkout. Source publication and deployment readiness use the separately pinned
+shared infrastructure workflow.
 
 Important focused test modules include:
 
