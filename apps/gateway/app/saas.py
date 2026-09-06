@@ -1,4 +1,4 @@
-import base64, hashlib, hmac, html, json, math, os, re, secrets, socket, struct, time, uuid
+import base64, hashlib, hmac, html, ipaddress, json, math, os, re, secrets, socket, struct, time, uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -174,7 +174,13 @@ def deliverability(did:str,ctx=Depends(auth),s:Session=Depends(db)):
     try:mx=bool(list(dns.resolver.resolve(d.domain,"MX")))
     except Exception:mx=False
     spf=any(v.startswith("v=spf1") for v in txt(d.domain));dkim=any(v.startswith("v=DKIM1") for v in txt("postal._domainkey."+d.domain));dmarc=any(v.startswith("v=DMARC1") for v in txt("_dmarc."+d.domain))
-    try:ptr=any("mail."+d.domain in str(v).lower() for v in dns.resolver.resolve(socket.gethostbyname("mail."+d.domain).split('.')[::-1][0]+".in-addr.arpa","PTR"))
+    try:
+        mail_host = ("mail." + d.domain).rstrip(".").lower()
+        reverse_name = ipaddress.ip_address(socket.gethostbyname(mail_host)).reverse_pointer
+        ptr = any(
+            str(record).rstrip(".").lower() == mail_host
+            for record in dns.resolver.resolve(reverse_name, "PTR")
+        )
     except Exception:ptr=False
     tls=False;details={"mx":mx,"spf":spf,"dkim":dkim,"dmarc":dmarc,"ptr":ptr,"tls":tls};alerts=[{"severity":"critical" if k in {"dkim","ptr","tls"} else "warning","code":k+"_missing"} for k,v in details.items() if not v];snap=DeliverabilitySnapshot(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],domain_id=d.id,spf=spf,dkim=dkim,dmarc=dmarc,mx=mx,ptr=ptr,tls=tls,details_json=json.dumps({**details,"alerts":alerts}));s.add(snap);s.commit();return {**details,"alerts":alerts,"launch_ready":all(details.values()),"checked_at":snap.checked_at}
 @router.get("/deliverability")
