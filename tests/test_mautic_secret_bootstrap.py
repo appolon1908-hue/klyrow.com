@@ -75,3 +75,47 @@ def test_invalid_existing_secret_reference_fails_without_replacing_env(migration
     assert env.read_text() == original_env
     if kind == "symlink":
         assert (root / "original").read_text() == "must-not-change"
+
+
+def test_incomplete_secret_write_never_installs_empty_authority(migration, monkeypatch):
+    module, root, _ = migration
+    directory = root / "secrets"
+    directory.mkdir()
+    target = directory / "mautic-api-client-secret"
+    real_fsync = module.os.fsync
+    def full_disk(_descriptor):
+        raise OSError("synthetic disk full")
+    monkeypatch.setattr(module.os, "fsync", full_disk)
+    with pytest.raises(OSError):
+        module.create_secret_file(target, "synthetic-legacy-credential")
+    assert not target.exists()
+    assert list(directory.iterdir()) == []
+    monkeypatch.setattr(module.os, "fsync", real_fsync)
+    module.create_secret_file(target, "synthetic-legacy-credential")
+    assert target.read_text() == "synthetic-legacy-credential"
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_old_empty_file_cannot_discard_remaining_legacy_credential(migration):
+    module, root, _ = migration
+    directory = root / "secrets"
+    directory.mkdir()
+    target = directory / "mautic-api-client-secret"
+    target.touch()
+    env = root / ".env"
+    original = "KLYROW_MAUTIC_API_CLIENT_SECRET=synthetic-legacy-credential\n"
+    env.write_text(original)
+    with pytest.raises(SystemExit):
+        module.main()
+    assert env.read_text() == original
+    assert target.read_text() == ""
+
+
+def test_atomic_install_does_not_overwrite_a_concurrent_winner(migration):
+    module, root, _ = migration
+    target = root / "winner"
+    target.write_text("approved-existing-credential")
+    with pytest.raises(SystemExit):
+        module.create_secret_file(target, "losing-credential")
+    assert target.read_text() == "approved-existing-credential"
+    assert not list(root.glob(".credential-migrating-*"))

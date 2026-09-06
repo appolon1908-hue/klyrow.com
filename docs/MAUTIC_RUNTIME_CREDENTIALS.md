@@ -6,6 +6,12 @@
 secret mounts. Legacy plaintext values are moved into root-owned 0600 files
 and removed from `.env`. A repeated migration preserves values and references.
 
+New files are written and synced privately before atomic installation. A
+failed write cannot publish an empty final credential. Existing empty files
+that conflict with a remaining legacy value stop migration before `.env` is
+replaced; restore the approved file before retrying. Concurrent creation never
+overwrites a credential installed by another migration.
+
 An existing absolute credential-file reference remains authoritative. Missing,
 relative, directory, or symlink references are rejected without replacing
 `.env`; repair the reference through the approved secret-management process.
