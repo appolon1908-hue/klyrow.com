@@ -160,6 +160,8 @@ async def receive_klyrow_mail(
         raise HTTPException(415, "application_json_required")
     try:
         raw = json.loads(body)
+        if not isinstance(raw, dict) or not isinstance(raw.get("event_type"), str):
+            raise ValueError("event must be an object with a string event_type")
         event_type = raw.get("event_type")
         event: KlyrowInboundEvent | KlyrowDeliveryEvent | KlyrowUsageEvent
         if event_type in {"inbound.received", "klyrow.email.inbound_received"}:

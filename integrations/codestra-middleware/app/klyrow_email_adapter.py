@@ -14,6 +14,7 @@ from pydantic import TypeAdapter, ValidationError
 from pydantic.networks import EmailStr
 
 from .config import ConfigurationError, Settings
+from .klyrow_email_contract import ACCEPTED_STATUSES, matches
 from .temporal_workflows import ActivityResult, CommandExecutionRequest
 
 EMAIL_ADDRESS = TypeAdapter(EmailStr)
@@ -60,9 +61,6 @@ class KlyrowEmailAdapter:
         }
     )
     MAX_RECIPIENTS = 1000
-    ACCEPTED_STATUSES = frozenset(
-        {"accepted", "queued", "sending", "sent", "delivered"}
-    )
     # Mirrors the connector manifest's forbidden_payload_keys.
     FORBIDDEN_PAYLOAD_KEYS = frozenset(
         {
@@ -174,6 +172,8 @@ class KlyrowEmailAdapter:
     ) -> dict[str, Any]:
         self._validate_identity(request)
         payload = request.payload
+        if not isinstance(payload, dict):
+            raise KlyrowEmailAdapterError("Klyrow email payload must be an object")
         leaked = sorted(self.FORBIDDEN_PAYLOAD_KEYS.intersection(payload))
         if leaked:
             raise KlyrowEmailAdapterError(
@@ -207,6 +207,8 @@ class KlyrowEmailAdapter:
             raise KlyrowEmailAdapterError(
                 "Klyrow email command recipients must be unique"
             )
+        if len(recipients) != 1:
+            raise KlyrowEmailAdapterError("Klyrow currently supports exactly one recipient per command")
 
         content = payload.get("content")
         if not isinstance(content, dict):
@@ -215,6 +217,17 @@ class KlyrowEmailAdapter:
             raise KlyrowEmailAdapterError(
                 "Klyrow email content requires text, html, or templateId"
             )
+        if content.get("templateId") or content.get("templateVersion") is not None or content.get("variables") is not None:
+            raise KlyrowEmailAdapterError("Klyrow template commands are not implemented")
+        if payload.get("scheduled_at"):
+            raise KlyrowEmailAdapterError("Klyrow scheduled commands are not implemented")
+        subject = content.get("subject")
+        if not isinstance(subject, str) or not 1 <= len(subject) <= 998:
+            raise KlyrowEmailAdapterError("Klyrow email subject is invalid")
+        for name in ("text", "html"):
+            value = content.get(name)
+            if value is not None and (not isinstance(value, str) or len(value) > 100_000):
+                raise KlyrowEmailAdapterError("Klyrow email content is invalid")
         return payload
 
     @staticmethod
@@ -319,26 +332,7 @@ class KlyrowEmailAdapter:
             "stream": "transactional",
             "metadata": payload.get("metadata") or {},
         }
-        # Template rendering stays on the Klyrow side; Middleware forwards the
-        # reference rather than expanding it.
-        if content.get("templateId"):
-            document["template_id"] = content["templateId"]
-            if content.get("templateVersion") is not None:
-                document["template_version"] = content["templateVersion"]
-            if content.get("variables") is not None:
-                document["variables"] = content["variables"]
-        if payload.get("scheduled_at"):
-            document["scheduled_at"] = payload["scheduled_at"]
         return document
-
-    @staticmethod
-    def _provider_id(value: Any) -> str:
-        if not isinstance(value, dict):
-            return ""
-        candidate = (
-            value.get("message_id") or value.get("operation_id") or value.get("id")
-        )
-        return str(candidate or "")
 
     async def execute(self, request: CommandExecutionRequest) -> ActivityResult:
         payload = self._require_active(request)
@@ -361,6 +355,8 @@ class KlyrowEmailAdapter:
                     json=body,
                     headers=headers,
                 )
+                if 400 <= response.status_code < 500:
+                    raise KlyrowEmailAdapterError("Klyrow rejected the email command")
                 response.raise_for_status()
                 value = response.json()
         except (httpx.HTTPError, ValueError) as exc:
@@ -377,20 +373,20 @@ class KlyrowEmailAdapter:
                         "Klyrow write response was interrupted; "
                         "read-back confirmed acceptance"
                     ),
-                    provider_operation_id=request.command_id,
+                    provider_operation_id=reconciled.provider_operation_id,
                     readback_evidence=reconciled.readback_evidence,
                 )
             raise KlyrowEmailAdapterError(
                 "Klyrow email submission failed"
             ) from exc
-        if self._provider_id(value) != request.command_id:
+        if not matches(request, body, value) or str(value.get("status", "")).lower() not in ACCEPTED_STATUSES:
             raise KlyrowEmailAdapterError(
                 "Klyrow response did not bind the command identity"
             )
         return ActivityResult(
             status="accepted",
             detail="Klyrow accepted the transactional email command",
-            provider_operation_id=request.command_id,
+            provider_operation_id=value["message_id"],
         )
 
     async def readback(self, request: CommandExecutionRequest) -> ActivityResult:
@@ -416,28 +412,19 @@ class KlyrowEmailAdapter:
         if not isinstance(value, dict):
             raise KlyrowEmailAdapterError("Klyrow email read-back is malformed")
 
-        recipients = value.get("recipients") or value.get("to")
-        sender = value.get("sender") or value.get("from")
         status_value = str(value.get("status") or "").lower()
-        if isinstance(recipients, str):
-            recipient_matches = [recipients] == payload["to"]
-        elif isinstance(recipients, list):
-            recipient_matches = recipients == payload["to"]
-        else:
-            recipient_matches = False
         if (
-            self._provider_id(value) == request.command_id
-            and recipient_matches
-            and sender == payload["from"]
-            and status_value in self.ACCEPTED_STATUSES
+            matches(request, self._provider_document(request, payload), value)
+            and status_value in ACCEPTED_STATUSES
         ):
             return ActivityResult(
                 status="matched",
                 detail="Klyrow read-back matched the transactional email intent",
-                provider_operation_id=request.command_id,
+                provider_operation_id=value["message_id"],
                 readback_evidence={
                     "schema_version": "1.0",
-                    "message_id": request.command_id,
+                    "message_id": value["message_id"],
+                    "command_id": request.command_id,
                     "status": status_value,
                     "recipient_count": len(payload["to"]),
                 },
@@ -445,5 +432,5 @@ class KlyrowEmailAdapter:
         return ActivityResult(
             status="mismatch",
             detail="Klyrow read-back did not match the transactional email intent",
-            provider_operation_id=request.command_id,
+            provider_operation_id=None,
         )

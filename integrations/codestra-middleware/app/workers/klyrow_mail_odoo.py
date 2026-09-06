@@ -30,6 +30,17 @@ class DeliveryFailure(RuntimeError):
         self.code, self.permanent = code, permanent
 
 
+def _rpc_object(response: httpx.Response) -> dict[str, Any]:
+    """Count malformed success responses against the bounded retry budget."""
+    try:
+        value = response.json()
+    except ValueError as exc:
+        raise DeliveryFailure("invalid_odoo_response") from exc
+    if not isinstance(value, dict):
+        raise DeliveryFailure("invalid_odoo_response")
+    return value
+
+
 class Transport(Protocol):
     async def deliver(
         self, payload: dict[str, Any], idempotency_key: str
@@ -113,8 +124,8 @@ class RestrictedOdooTransport:
                     },
                 )
                 auth.raise_for_status()
-                uid = auth.json().get("result")
-                if not isinstance(uid, int) or uid < 1:
+                uid = _rpc_object(auth).get("result")
+                if type(uid) is not int or uid < 1:
                     raise DeliveryFailure(
                         "odoo_authentication_rejected", permanent=True
                     )
@@ -138,7 +149,7 @@ class RestrictedOdooTransport:
                 }
                 response = await client.post(url, json=rpc)
                 response.raise_for_status()
-                body = response.json()
+                body = _rpc_object(response)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             raise DeliveryFailure("odoo_unavailable") from exc
         except httpx.HTTPStatusError as exc:
@@ -146,7 +157,11 @@ class RestrictedOdooTransport:
                 "odoo_http_error", permanent=exc.response.status_code in {400, 401, 403}
             ) from exc
         if body.get("error"):
-            name = str(body["error"].get("data", {}).get("name", ""))
+            error = body["error"]
+            data = error.get("data") if isinstance(error, dict) else None
+            if not isinstance(data, dict):
+                raise DeliveryFailure("invalid_odoo_response")
+            name = str(data.get("name", ""))
             raise DeliveryFailure(
                 "odoo_rejected",
                 permanent=any(
@@ -160,7 +175,7 @@ class RestrictedOdooTransport:
             if isinstance(result, int)
             else (result.get("id") if isinstance(result, dict) else None)
         )
-        if not isinstance(record_id, int) or record_id < 1:
+        if type(record_id) is not int or record_id < 1:
             raise DeliveryFailure("invalid_odoo_ack", permanent=True)
         return {"odoo_record_id": record_id}
 

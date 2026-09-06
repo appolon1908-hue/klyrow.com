@@ -13,6 +13,7 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from .config import ConfigurationError, Settings
+from .klyrow_email_contract import ACCEPTED_STATUSES, matches
 from .temporal_workflows import ActivityResult, CommandExecutionRequest
 
 
@@ -150,6 +151,8 @@ class KlyrowAlertAdapter:
     ) -> dict[str, Any]:
         self._validate_identity(request)
         payload = request.payload
+        if not isinstance(payload, dict):
+            raise KlyrowAlertAdapterError("alert payload must be an object")
         expected_keys = {
             "schema_version",
             "message_id",
@@ -190,10 +193,23 @@ class KlyrowAlertAdapter:
             "html",
         }:
             raise KlyrowAlertAdapterError("alert content shape is invalid")
-        if not isinstance(alert, dict) or alert.get("fingerprint") in {None, ""}:
+        if not isinstance(alert, dict):
             raise KlyrowAlertAdapterError("alert evidence is incomplete")
+        for name in ("fingerprint", "state", "severity", "service", "host", "environment"):
+            value = alert.get(name)
+            if not isinstance(value, str) or not value.strip() or len(value) > 256:
+                raise KlyrowAlertAdapterError("alert evidence is incomplete")
+        if alert["state"] not in {"firing", "resolved"}:
+            raise KlyrowAlertAdapterError("alert state is invalid")
+        labels = alert.get("labels")
+        if not isinstance(labels, dict) or len(labels) > 64 or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            or len(key) > 128 or len(value) > 1024
+            for key, value in labels.items()
+        ):
+            raise KlyrowAlertAdapterError("alert labels are invalid")
         for name, maximum in (
-            ("subject", 1_000),
+            ("subject", 998),
             ("text", 32_000),
             ("html", 64_000),
         ):
@@ -351,17 +367,22 @@ class KlyrowAlertAdapter:
     ) -> ActivityResult:
         payload = self._require_active(request)
         body = self._provider_document(request, payload)
+        url = self._base_url() + self.MESSAGE_PATH
+        tls_context = self._tls_context()
+        headers = await self._headers(request)
         try:
             async with httpx.AsyncClient(
-                verify=self._tls_context(),
+                verify=tls_context,
                 timeout=httpx.Timeout(15.0, connect=5.0),
                 follow_redirects=False,
             ) as client:
                 response = await client.post(
-                    self._base_url() + self.MESSAGE_PATH,
+                    url,
                     json=body,
-                    headers=await self._headers(request),
+                    headers=headers,
                 )
+                if 400 <= response.status_code < 500:
+                    raise KlyrowAlertAdapterError("Klyrow rejected the alert command")
                 response.raise_for_status()
                 value = response.json()
         except (httpx.HTTPError, ValueError, ConfigurationError) as exc:
@@ -378,26 +399,20 @@ class KlyrowAlertAdapter:
                         "Klyrow write response was interrupted; "
                         "read-back confirmed acceptance"
                     ),
-                    provider_operation_id=request.command_id,
+                    provider_operation_id=reconciled.provider_operation_id,
+                    readback_evidence=reconciled.readback_evidence,
                 )
             raise KlyrowAlertAdapterError(
                 "Klyrow alert submission failed"
             ) from exc
-        provider_id = None
-        if isinstance(value, dict):
-            provider_id = (
-                value.get("message_id")
-                or value.get("operation_id")
-                or value.get("id")
-            )
-        if str(provider_id or "") != request.command_id:
+        if not matches(request, body, value) or str(value.get("status", "")).lower() not in ACCEPTED_STATUSES:
             raise KlyrowAlertAdapterError(
                 "Klyrow response did not bind the command identity"
             )
         return ActivityResult(
             status="accepted",
             detail="Klyrow accepted the fixed-recipient observability alert",
-            provider_operation_id=request.command_id,
+            provider_operation_id=value["message_id"],
         )
 
     async def readback(
@@ -428,36 +443,21 @@ class KlyrowAlertAdapter:
             raise KlyrowAlertAdapterError(
                 "Klyrow alert read-back is malformed"
             )
-        provider_id = (
-            value.get("message_id")
-            or value.get("operation_id")
-            or value.get("id")
-        )
-        recipient = value.get("recipient") or value.get("to")
-        sender = value.get("sender") or value.get("from")
         status_value = str(value.get("status") or "").lower()
-        if isinstance(recipient, str):
-            recipient_matches = recipient == payload["to"][0]
-        elif isinstance(recipient, list):
-            recipient_matches = recipient == payload["to"]
-        else:
-            recipient_matches = False
         if (
-            str(provider_id or "") == request.command_id
-            and recipient_matches
-            and sender == payload["from"]
-            and status_value
-            in {"accepted", "queued", "sending", "sent", "delivered"}
+            matches(request, self._provider_document(request, payload), value)
+            and status_value in ACCEPTED_STATUSES
         ):
             return ActivityResult(
                 status="matched",
                 detail=(
                     "Klyrow read-back matched the fixed-recipient alert intent"
                 ),
-                provider_operation_id=request.command_id,
+                provider_operation_id=value["message_id"],
                 readback_evidence={
                     "schema_version": "1.0",
-                    "message_id": request.command_id,
+                    "message_id": value["message_id"],
+                    "command_id": request.command_id,
                     "status": status_value,
                     "recipient_policy_id": payload["recipient_policy_id"],
                     "sender_policy_id": payload["sender_policy_id"],
@@ -468,5 +468,5 @@ class KlyrowAlertAdapter:
             detail=(
                 "Klyrow read-back did not match the fixed-recipient alert intent"
             ),
-            provider_operation_id=request.command_id,
+            provider_operation_id=None,
         )

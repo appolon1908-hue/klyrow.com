@@ -7,6 +7,7 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from app.klyrow_email_contract import document_digest
 from app.config import ConfigurationError
 from app.klyrow_email_adapter import KlyrowEmailAdapter, KlyrowEmailAdapterError
 from app.temporal_workflows import CommandExecutionRequest
@@ -116,13 +117,17 @@ def routing_handler(
     return handler
 
 
-def accepted(command_id: str) -> dict[str, Any]:
-    return {"message_id": command_id, "status": "accepted"}
+def accepted(command: CommandExecutionRequest) -> dict[str, Any]:
+    return status_body(command, status="accepted")
 
 
-def status_body(command_id: str, **overrides: Any) -> dict[str, Any]:
+def status_body(command: CommandExecutionRequest, **overrides: Any) -> dict[str, Any]:
     body = {
-        "message_id": command_id,
+        "message_id": "provider-" + command.command_id,
+        "command_id": command.command_id,
+        "tenant_id": command.tenant_id,
+        "correlation_id": command.correlation_id,
+        "request_hash": document_digest(KlyrowEmailAdapter._provider_document(command, command.payload)),
         "status": "delivered",
         "sender": SENDER,
         "recipients": list(RECIPIENTS),
@@ -144,14 +149,14 @@ async def test_execute_posts_the_provider_document_with_bearer_and_mtls_headers(
     command = execution_request()
     set_handler(
         routing_handler(
-            message=httpx.Response(202, json=accepted(command.command_id)),
+            message=httpx.Response(202, json=accepted(command)),
             seen=seen,
         )
     )
     result = await adapter().execute(command)
 
     assert result.status == "accepted"
-    assert result.provider_operation_id == command.command_id
+    assert result.provider_operation_id == "provider-" + command.command_id
     sent = seen["requests"][0]
     assert str(sent.url) == f"{BASE_URL}/v1/email/messages"
     assert sent.headers["authorization"] == "Bearer token-abc"
@@ -163,7 +168,7 @@ async def test_execute_posts_the_provider_document_with_bearer_and_mtls_headers(
 @pytest.mark.asyncio
 async def test_execute_is_refused_while_the_capability_is_closed() -> None:
     command = execution_request()
-    set_handler(routing_handler(message=httpx.Response(202, json=accepted(command.command_id))))
+    set_handler(routing_handler(message=httpx.Response(202, json=accepted(command))))
     with pytest.raises(KlyrowEmailAdapterError, match="email delivery is disabled"):
         await adapter(settings={"email_enabled": False}).execute(command)
 
@@ -229,7 +234,7 @@ async def test_interrupted_write_is_resolved_by_readback_not_a_resend() -> None:
         calls.append(request)
         if request.method == "POST":
             raise httpx.ReadTimeout("timed out", request=request)
-        return httpx.Response(200, json=status_body(command.command_id))
+        return httpx.Response(200, json=status_body(command))
 
     set_handler(handler)
     result = await adapter().execute(command)
@@ -252,7 +257,7 @@ async def test_interrupted_write_stays_failed_when_readback_does_not_match() -> 
         if request.method == "POST":
             raise httpx.ReadTimeout("timed out", request=request)
         return httpx.Response(
-            200, json=status_body(command.command_id, recipients=["other@example.com"])
+            200, json=status_body(command, recipients=["other@example.com"])
         )
 
     set_handler(handler)
@@ -264,14 +269,14 @@ async def test_interrupted_write_stays_failed_when_readback_does_not_match() -> 
 async def test_readback_matches_only_an_accepted_provider_status() -> None:
     command = execution_request()
     set_handler(
-        routing_handler(status=httpx.Response(200, json=status_body(command.command_id)))
+        routing_handler(status=httpx.Response(200, json=status_body(command)))
     )
     assert (await adapter().readback(command)).status == "matched"
 
     set_handler(
         routing_handler(
             status=httpx.Response(
-                200, json=status_body(command.command_id, status="bounced")
+                200, json=status_body(command, status="bounced")
             )
         )
     )
@@ -279,29 +284,17 @@ async def test_readback_matches_only_an_accepted_provider_status() -> None:
 
 
 @pytest.mark.asyncio
-async def test_template_reference_is_forwarded_not_expanded() -> None:
-    seen: dict[str, Any] = {}
-    template_id = str(uuid4())
-    command = execution_request(
-        payload_overrides={
-            "content": {
-                "templateId": template_id,
-                "templateVersion": 3,
-                "variables": {"name": "Ada"},
-            }
-        }
-    )
-    set_handler(
-        routing_handler(
-            message=httpx.Response(202, json=accepted(command.command_id)), seen=seen
-        )
-    )
-    await adapter().execute(command)
-
-    body = seen["requests"][0].read().decode()
-    assert template_id in body
-    assert '"template_version":3' in body.replace(" ", "")
-    assert "Ada" in body
+@pytest.mark.parametrize("changes", [
+    {"content": {"templateId": "unimplemented"}},
+    {"scheduled_at": "2026-12-01T00:00:00Z"},
+    {"to": ["one@example.com", "two@example.com"]},
+])
+async def test_unsupported_provider_features_are_rejected_before_send(changes) -> None:
+    seen = {}
+    set_handler(routing_handler(message=httpx.Response(202, json={}), seen=seen))
+    with pytest.raises(KlyrowEmailAdapterError):
+        await adapter().execute(execution_request(payload_overrides=changes))
+    assert not seen.get("requests")
 
 
 @pytest.mark.asyncio
