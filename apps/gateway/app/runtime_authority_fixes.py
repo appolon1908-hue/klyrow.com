@@ -25,6 +25,7 @@ from . import main as core
 from . import production_api
 from . import tenancy_onboarding
 from . import webmail
+from .durable_results import read_control_response, seal_control_response
 from .provider_reconciliation_fixes import install_provider_reconciliation_fixes
 
 _ORIGINAL_OPERATION_JSON = production_api._operation_json
@@ -33,7 +34,7 @@ _INSTALLED = False
 
 def _legacy_message_shape(record: Any) -> dict[str, Any] | None:
     try:
-        response = json.loads(record.response_json)
+        response = read_control_response(record)
     except (AttributeError, TypeError, ValueError):
         return None
     if not isinstance(response, dict):
@@ -79,10 +80,10 @@ def legacy_message_send_response(
     return response
 
 
-def operation_json_with_correlation(item: Any, session: Any) -> dict[str, Any]:
+def operation_json_with_correlation(item: Any, session: Any, **kwargs: Any) -> dict[str, Any]:
     """Preserve an IntegrationOutbox envelope correlation ID in responses."""
 
-    result = _ORIGINAL_OPERATION_JSON(item, session)
+    result = _ORIGINAL_OPERATION_JSON(item, session, **kwargs)
     payload_json = getattr(item, "payload_json", None)
     if not payload_json:
         return result
@@ -149,7 +150,7 @@ async def send_with_scoped_legacy_compatibility(
     if prior is not None:
         if prior.request_hash != request_hash:
             raise HTTPException(409, "idempotency_key_payload_mismatch")
-        return json.loads(prior.response_json)
+        return read_control_response(prior)
 
     from .operations import enforce_tenant_send_gate
 
@@ -285,7 +286,7 @@ async def send_with_scoped_legacy_compatibility(
             tenant_id=context["tenant"],
             request_hash=request_hash,
             resource_id=message_id,
-            response_json=json.dumps(result),
+            response_json=seal_control_response(result, tenant_id=context["tenant"], storage_key=storage_key, request_hash=request_hash, resource_id=message_id),
         )
     )
     session.add(

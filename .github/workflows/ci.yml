@@ -107,7 +107,7 @@ jobs:
       - name: Verify command replay under concurrent PostgreSQL transactions
         env:
           KLYROW_CONTRACT_POSTGRES_URL: postgresql+psycopg://klyrow:ci-only-password@127.0.0.1:5432/klyrow_ci
-        run: python -m pytest -q tests/test_middleware_email_contract.py
+        run: python -m pytest -q tests/test_middleware_email_contract.py tests/test_durable_operation_results.py
       - name: Checkout immutable Middleware contract dependencies
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:

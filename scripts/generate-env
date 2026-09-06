@@ -13,6 +13,23 @@ cp .env.example .env
 secret() { openssl rand -hex "$1"; }
 install -d -o root -g root -m 0700 "$runtime_secret_dir"
 umask 077
+# Create dedicated result authority before configuring its path in .env.
+# Preserve a valid preinstalled keyring; never silently replace a missing key
+# during a later migrate-runtime-secrets run.
+python3 - "$runtime_secret_dir/durable-result-keyring.json" <<'PY_KEYRING'
+import runpy
+import sys
+from pathlib import Path
+
+helpers = runpy.run_path("scripts/migrate-runtime-secrets")
+path = Path(sys.argv[1])
+if not path.is_absolute():
+    raise SystemExit("Runtime keyring path must be absolute.")
+if path.exists() or path.is_symlink():
+    helpers["load_keyring"](path)
+else:
+    helpers["create_secret_file"](path, helpers["new_keyring_document"]())
+PY_KEYRING
 secret 32 | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/session-secret"
 install -o root -g root -m 0600 /dev/null "$runtime_secret_dir/postal-api-key"
 secret 32 | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/metrics-token"
@@ -26,6 +43,7 @@ printf '%s' "$postgres_password" | install -o root -g root -m 0600 /dev/stdin "$
 secret 24 | install -o root -g root -m 0600 /dev/stdin "$runtime_secret_dir/database-runtime-password"
 sed -i \
   -e "s|KLYROW_SESSION_SECRET_FILE=.*|KLYROW_SESSION_SECRET_FILE=$runtime_secret_dir/session-secret|" \
+  -e "s|KLYROW_DURABLE_RESULT_KEYRING_FILE=.*|KLYROW_DURABLE_RESULT_KEYRING_FILE=$runtime_secret_dir/durable-result-keyring.json|" \
   -e "s|KLYROW_POSTAL_API_KEY_FILE=.*|KLYROW_POSTAL_API_KEY_FILE=$runtime_secret_dir/postal-api-key|" \
   -e "s|KLYROW_METRICS_TOKEN_FILE=.*|KLYROW_METRICS_TOKEN_FILE=$runtime_secret_dir/metrics-token|" \
   -e "s|KLYROW_MIDDLEWARE_API_KEY_FILE=.*|KLYROW_MIDDLEWARE_API_KEY_FILE=$runtime_secret_dir/middleware-api-key|" \

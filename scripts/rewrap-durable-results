@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+"""Offline maintenance entry point; dry-run unless explicitly authorized."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tenant", required=True)
+    parser.add_argument("--table", choices=("control", "integration"), required=True)
+    parser.add_argument("--expected-key-id", required=True)
+    parser.add_argument("--after-id", default="")
+    parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--confirm", default="")
+    parser.add_argument("--backup-file", type=Path)
+    parser.add_argument("--backup-sha256", default="")
+    args = parser.parse_args(argv)
+    if not 1 <= args.limit <= 1000:
+        parser.error("limit must be between 1 and 1000")
+    # Parse authority before importing a module that initializes a database engine.
+    if args.apply:
+        if args.confirm != "REWRAP_DURABLE_RESULTS_V1" or args.backup_file is None or not re.fullmatch(r"[0-9a-f]{64}", args.backup_sha256):
+            parser.error("apply requires fixed confirmation and a checksum-verified encrypted backup")
+        try:
+            fd = os.open(args.backup_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or not info.st_size:
+                    raise ValueError
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if digest != args.backup_sha256:
+                raise ValueError
+        except (OSError, ValueError):
+            parser.error("backup verification failed")
+    try:
+        from apps.gateway.app.durable_maintenance import rewrap_batch
+        from apps.gateway.app.main import DB
+        with DB() as session:
+            try:
+                report = rewrap_batch(session, table=args.table, tenant_id=args.tenant,
+                    expected_key_id=args.expected_key_id, after_id=args.after_id, limit=args.limit, apply=args.apply)
+                if args.apply:
+                    session.commit()
+                else:
+                    session.rollback()
+            except Exception:
+                session.rollback()
+                raise
+        print(json.dumps(report, sort_keys=True))
+        return 0
+    except Exception:
+        # Do not echo database URLs, keys, payloads, or exception details.
+        print("DURABLE_RESULT_REWRAP=BLOCKED", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
