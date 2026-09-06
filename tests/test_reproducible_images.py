@@ -47,7 +47,7 @@ def test_web_runtime_does_not_retain_nondeterministic_package_log():
         ).hexdigest() == digest
         assert f"apk verify --keys-dir /etc/apk/keys {package}" in dockerfile
         assert f"./{package}" in dockerfile
-    assert 'test "$(apk info -v libuuid)" = "libuuid-2.42.3-r1"' in dockerfile
+    assert 'apk info --exists libuuid=2.42.3-r1' in dockerfile
     assert "rm -f /var/log/apk.log" in dockerfile
 
 
