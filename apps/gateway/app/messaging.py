@@ -170,12 +170,14 @@ def campaign_preflight(item_id:str,x:PreflightIn,ctx=Depends(auth),s:Session=Dep
     item=tenant_get(s,CampaignDefinition,item_id,ctx["tenant"])
     if not item.test_sent_at:raise HTTPException(409,"campaign_test_required")
     eligible=max(0,x.estimated_recipients-x.estimated_suppressed-x.estimated_invalid);allowed=eligible<=x.quota_remaining;return {"recipients":x.estimated_recipients,"suppressed":x.estimated_suppressed,"invalid":x.estimated_invalid,"eligible":eligible,"quota_impact":eligible,"estimated_usage_cost":str(x.estimated_unit_cost),"allowed":allowed}
-@router.post("/campaign-definitions/{item_id}/schedule")
+@router.post("/campaign-definitions/{item_id}/schedule", responses={409: {"description": "Campaign dispatcher unavailable; scheduling is not accepted."}})
 def campaign_schedule(item_id:str,x:ScheduleIn,ctx=Depends(auth),s:Session=Depends(db)):
+    from .production_api import _require_permission
+    _require_permission(ctx,"campaign.manage")
     item=tenant_get(s,CampaignDefinition,item_id,ctx["tenant"])
     if not item.test_sent_at:raise HTTPException(409,"campaign_test_required")
     if x.scheduled_at.astimezone(timezone.utc)<=now():raise HTTPException(422,"schedule_must_be_future")
-    item.scheduled_at=x.scheduled_at;item.status="SCHEDULED";audit(s,ctx,"campaign.scheduled");s.commit();return {"status":item.status,"scheduled_at":item.scheduled_at}
+    raise HTTPException(409,"campaign_dispatcher_unavailable")
 @router.post("/campaign-definitions/{item_id}/cancel")
 def campaign_cancel(item_id:str,ctx=Depends(auth),s:Session=Depends(db)):
     item=tenant_get(s,CampaignDefinition,item_id,ctx["tenant"])
