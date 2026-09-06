@@ -6,6 +6,8 @@ to enable email delivery.
 
 For the dated API review and current Git snapshot, see
 [`docs/audits/API_AUDIT_2026-08-27.md`](docs/audits/API_AUDIT_2026-08-27.md).
+For the September 6 issue reconciliation and remaining release prerequisites,
+see [`docs/audits/ISSUE_RECONCILIATION_2026-09-06.md`](docs/audits/ISSUE_RECONCILIATION_2026-09-06.md).
 
 ## Repository purpose
 
@@ -31,10 +33,10 @@ or refresh token.
 
 ## API implementation map
 
-The current default-branch FastAPI application is assembled in:
+The production FastAPI composition root is:
 
 ```text
-apps/gateway/app/main.py
+apps/gateway/app/platform.py
 ```
 
 It owns or mounts the following implementation areas:
@@ -117,15 +119,15 @@ apps/gateway/app/service_worker.py
   background worker selection and delivery-mode wiring
 ```
 
-Browser BFF, onboarding UI, invitation-selection, and tenant Postal-provisioning
-work currently exists on open feature branches/PRs rather than the default
-branch. Always inspect the exact PR head before relying on those modules.
+Browser BFF, onboarding UI, invitation selection, tenant Postal provisioning,
+and browser security corrections are now on the default branch. `platform.py`
+composes them with the core `main.py` application and installs the current
+runtime authority extensions. Inspect the actual composed routes before
+changing captured helpers or adding a duplicate route.
 
 ## Test entry points
 
-The current repository has no root `pytest.ini`, `pyproject.toml`, `setup.cfg`,
-or `tox.ini`. Pytest behavior is therefore primarily controlled by the command
-line and test modules.
+The root `pytest.ini` sets `pythonpath = .` and `testpaths = tests`.
 
 The default CI entry point is:
 
@@ -143,8 +145,18 @@ PYTHONPATH=. pytest -q tests
 pip-audit --requirement apps/gateway/requirements.txt
 ```
 
-CI also runs Gitleaks, builds the gateway image, scans it with Trivy, and creates
-a CycloneDX SBOM.
+The main CI workflow also runs frontend lint/type/unit/build/Playwright checks,
+Gitleaks, and builds and scans four candidates: gateway, web, migration, and
+Postal provisioner. Those image checks include SBOM and reproducibility evidence.
+PostgreSQL image validation is separate in
+`.github/workflows/database-runtime-ci.yml`, triggered by its declared pull-request
+paths or manual dispatch. There is no distinct SMTP image: `smtp-relay` reuses
+`KLYROW_GATEWAY_IMAGE` in `docker-compose.yml`.
+
+PostgreSQL migration-twice and concurrent command replay run in gateway CI.
+Owned Middleware adapters are tested against an immutable Middleware contract
+checkout. Source publication and deployment readiness use the separately pinned
+shared infrastructure workflow.
 
 Important focused test modules include:
 
