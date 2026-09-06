@@ -73,7 +73,12 @@ async def health(reader, writer):
 def billing_tick(max_attempts=8):
     with DB() as session:
         for event in session.scalars(
-            select(BillingEvent).order_by(BillingEvent.created_at).limit(200)
+            select(BillingEvent)
+            .where(~select(BillingWorkItem.id).where(
+                BillingWorkItem.billing_event_id == BillingEvent.id,
+            ).exists())
+            .order_by(BillingEvent.created_at, BillingEvent.id)
+            .limit(200)
         ).all():
             if not session.scalar(
                 select(BillingWorkItem).where(
