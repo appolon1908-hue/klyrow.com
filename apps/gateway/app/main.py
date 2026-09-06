@@ -212,6 +212,7 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
             if request.url.path=="/v1/commands":permission="klyrow.middleware.command.write"
             elif request.url.path=="/v1/integrations/results":permission="klyrow.integration.result.write"
             elif request.url.path.startswith("/v1/operations/"):permission="klyrow.middleware.operation.read" if request.method in {"GET","HEAD","OPTIONS"} else "klyrow.middleware.operation.write"
+            elif request.method=="POST" and re.fullmatch(r"/v1/(?:campaigns|campaign-definitions)/[^/]+/schedule",request.url.path):permission="campaign.manage"
             elif required_mutation_permission:=mutation_permission(request.method,request.url.path):permission=required_mutation_permission
             else:permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send" if request.method not in {"GET","HEAD","OPTIONS"} else "klyrow.read"
             headers={"Authorization":"Bearer "+raw,"X-Codestra-Required-Permission":permission}
