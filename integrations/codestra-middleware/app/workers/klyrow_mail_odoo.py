@@ -34,11 +34,40 @@ def _rpc_object(response: httpx.Response) -> dict[str, Any]:
     """Count malformed success responses against the bounded retry budget."""
     try:
         value = response.json()
-    except ValueError as exc:
+    except (ValueError, RecursionError) as exc:
         raise DeliveryFailure("invalid_odoo_response") from exc
     if not isinstance(value, dict):
         raise DeliveryFailure("invalid_odoo_response")
     return value
+
+
+def _rpc_result(response: httpx.Response, expected_id: str) -> Any:
+    """Bind both authentication and ingestion replies to their exact request.
+
+    Invalid acknowledgments are retryable only within the existing bounded
+    worker budget. Never include remote response bodies in persisted errors.
+    """
+    body = _rpc_object(response)
+    if (
+        body.get("jsonrpc") != "2.0"
+        or body.get("id") != expected_id
+        or ("result" in body) == ("error" in body)
+    ):
+        raise DeliveryFailure("invalid_odoo_response")
+    if "error" in body:
+        error = body["error"]
+        data = error.get("data", {}) if isinstance(error, dict) else None
+        if not isinstance(data, dict) or not isinstance(data.get("name", ""), str):
+            raise DeliveryFailure("invalid_odoo_response")
+        name = data.get("name", "")
+        raise DeliveryFailure(
+            "odoo_rejected",
+            permanent=any(
+                value in name
+                for value in ("AccessDenied", "AccessError", "ValidationError")
+            ),
+        )
+    return body["result"]
 
 
 class Transport(Protocol):
@@ -91,7 +120,7 @@ class RestrictedOdooTransport:
     ) -> dict[str, Any]:
         try:
             key = Path(settings.klyrow_mail_odoo_api_key_file).read_text().strip()
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             raise DeliveryFailure("credential_unavailable", permanent=True) from exc
         if not all(
             (
@@ -124,7 +153,7 @@ class RestrictedOdooTransport:
                     },
                 )
                 auth.raise_for_status()
-                uid = _rpc_object(auth).get("result")
+                uid = _rpc_result(auth, idempotency_key + ":auth")
                 if type(uid) is not int or uid < 1:
                     raise DeliveryFailure(
                         "odoo_authentication_rejected", permanent=True
@@ -149,27 +178,13 @@ class RestrictedOdooTransport:
                 }
                 response = await client.post(url, json=rpc)
                 response.raise_for_status()
-                body = _rpc_object(response)
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                result = _rpc_result(response, idempotency_key)
+        except httpx.RequestError as exc:
             raise DeliveryFailure("odoo_unavailable") from exc
         except httpx.HTTPStatusError as exc:
             raise DeliveryFailure(
                 "odoo_http_error", permanent=exc.response.status_code in {400, 401, 403}
             ) from exc
-        if body.get("error"):
-            error = body["error"]
-            data = error.get("data") if isinstance(error, dict) else None
-            if not isinstance(data, dict):
-                raise DeliveryFailure("invalid_odoo_response")
-            name = str(data.get("name", ""))
-            raise DeliveryFailure(
-                "odoo_rejected",
-                permanent=any(
-                    x in name
-                    for x in ("AccessDenied", "AccessError", "ValidationError")
-                ),
-            )
-        result = body.get("result")
         record_id = (
             result
             if isinstance(result, int)

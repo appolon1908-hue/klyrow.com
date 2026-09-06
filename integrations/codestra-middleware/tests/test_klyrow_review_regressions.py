@@ -53,7 +53,17 @@ def odoo_transport(monkeypatch, tmp_path):
     original = httpx.AsyncClient
     def install(auth, result):
         def handle(request):
-            response = auth if json.loads(request.content)["params"]["service"] == "common" else result
+            document = json.loads(request.content)
+            response = auth if document["params"]["service"] == "common" else result
+            # Preserve malformed JSON/scalars, but give object fixtures a real
+            # correlated envelope so ingest tests reach the intended phase.
+            try:
+                value = json.loads(response)
+            except ValueError:
+                pass
+            else:
+                if isinstance(value, dict):
+                    response = json.dumps({"jsonrpc": "2.0", "id": document["id"], **value}).encode()
             return httpx.Response(200, content=response, request=request)
         monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: original(transport=httpx.MockTransport(handle), **kwargs))
         return RestrictedOdooTransport()
