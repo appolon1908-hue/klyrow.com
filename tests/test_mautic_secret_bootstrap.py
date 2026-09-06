@@ -148,3 +148,52 @@ def test_invalid_durable_keyring_cannot_be_silently_replaced(migration):
     with pytest.raises(SystemExit): module.main()
     assert env.read_text() == original
     assert path.read_text() == "corrupt-authority"
+
+
+def test_generate_env_bootstrap_then_configured_migration_preserves_key(migration, monkeypatch):
+    import sys
+    from apps.gateway.app.durable_keys import KEYRING_ENV, load_keyring
+    module, root, _ = migration
+    path = root / "secrets/durable-result-keyring.json"
+    path.parent.mkdir()
+    repository = Path(__file__).resolve().parents[1]
+    text = (repository / "scripts/generate-env").read_text()
+    snippet = text.split("<<'PY_KEYRING'\n", 1)[1].split("\nPY_KEYRING", 1)[0]
+    monkeypatch.chdir(repository)
+    monkeypatch.setattr(sys, "argv", ["-", str(path)])
+    assert not path.exists()
+    exec(compile(snippet, "generate-env-keyring", "exec"), {})
+    first = path.read_bytes()
+    assert load_keyring(path).active_key_id
+    exec(compile(snippet, "generate-env-keyring", "exec"), {})
+    assert path.read_bytes() == first
+    (root / ".env").write_text(f"{KEYRING_ENV}={path}\n")
+    module.main()
+    module.main()
+    assert path.read_bytes() == first
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_missing_configured_default_keyring_is_not_silently_replaced(migration):
+    module, root, _ = migration
+    path = root / "secrets/durable-result-keyring.json"
+    original = f"KLYROW_DURABLE_RESULT_KEYRING_FILE={path}\n"
+    (root / ".env").write_text(original)
+    with pytest.raises(SystemExit): module.main()
+    assert not path.exists()
+    assert (root / ".env").read_text() == original
+
+
+def test_missing_custom_keyring_does_not_invent_authority(migration):
+    module, root, _ = migration
+    path = root / "approved-but-missing-keyring"
+    original = f"KLYROW_DURABLE_RESULT_KEYRING_FILE={path}\n"
+    (root / ".env").write_text(original)
+    with pytest.raises(SystemExit): module.main()
+    assert not path.exists()
+    assert (root / ".env").read_text() == original
+
+
+def test_generate_env_rewrites_the_keyring_to_the_selected_secret_directory():
+    text = (Path(__file__).resolve().parents[1] / "scripts/generate-env").read_text()
+    assert "s|KLYROW_DURABLE_RESULT_KEYRING_FILE=.*|KLYROW_DURABLE_RESULT_KEYRING_FILE=$runtime_secret_dir/durable-result-keyring.json|" in text

@@ -65,7 +65,7 @@ def redact_result(value: dict[str, Any]) -> dict[str, Any]:
             output = {}
             for name, child in item.items():
                 normalized = re.sub(r"[^a-z0-9]", "", name.lower())
-                output[name] = "[REDACTED]" if normalized in _CONTENT or any(word in normalized for word in _SENSITIVE) else visit(child, depth + 1)
+                output[name] = "[REDACTED]" if any(word in normalized for word in (*_CONTENT, *_SENSITIVE)) else visit(child, depth + 1)
             return output
         if isinstance(item, list):
             if len(item) > 1000:

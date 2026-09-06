@@ -345,3 +345,63 @@ def test_rewrap_corrupt_batch_changes_no_row(operation_db):
             rewrap_batch(session, table="control", tenant_id="tenant-a", expected_key_id=load_keyring().active_key_id, apply=True)
         session.rollback()
         assert session.get(Idempotency, "a").response_json == '{"ok":true}'
+
+
+@pytest.mark.parametrize("field", ["email_address", "phoneNumber", "avatar_url", "signed_url", "html_content", "rawResponse"])
+def test_common_composite_provider_fields_are_redacted(field):
+    payload = {"nested": {field: "synthetic-private-value", "count": 7}}
+    row = result_row(payload)
+    value, metadata = result_readback(row)
+    assert metadata["availability"] == "AVAILABLE"
+    assert value == {"nested": {field: "[REDACTED]", "count": 7}}
+    assert result_matches(row, payload)
+
+
+@pytest.mark.parametrize("surface,max_queries", [("operations", 4), ("mautic_operations", 3)])
+@pytest.mark.parametrize("size", [4, 40])
+def test_operation_lists_bulk_load_results_and_keep_tenant_and_correlation_guards(operation_db, monkeypatch, surface, max_queries, size):
+    from sqlalchemy import event
+    from apps.gateway.app import production_api as api
+    from apps.gateway.app.runtime_authority_fixes import operation_json_with_correlation
+    monkeypatch.setattr(api, "_operation_json", operation_json_with_correlation)
+    with operation_db() as session:
+        session.add(Tenant(id="tenant-b", name="Foreign", quota=100))
+        current = datetime.now(timezone.utc)
+        for index in range(size):
+            identity = f"batch-{index}"
+            item = operation("COMPLETED" if index % 2 == 0 else "PENDING", id=identity,
+                             idempotency_key=f"batch-key-{index}")
+            session.add(item)
+            if index % 2 == 0:
+                for version in (0, 1):
+                    key = f"result-{index}-{version}"
+                    session.add(IntegrationResult(id=key, tenant_id="tenant-a", outbox_id=identity,
+                        source="MAUTIC", result_key=key, created_at=current + timedelta(seconds=version),
+                        payload_json=seal_integration_result({"version": version}, tenant_id="tenant-a",
+                            outbox_id=identity, source="MAUTIC", result_key=key)))
+        session.add(IntegrationResult(id="late-batch", tenant_id="tenant-a", outbox_id="batch-1",
+            source="MAUTIC_LATE", result_key="late-batch", payload_json="{}"))
+        session.add(IntegrationResult(id="foreign-late", tenant_id="tenant-b", outbox_id="batch-0",
+            source="MAUTIC_LATE", result_key="foreign-late", payload_json="{}"))
+        session.add(IntegrationResult(id="wrong-source", tenant_id="tenant-a", outbox_id="batch-0",
+            source="ODOO", result_key="wrong-source", payload_json="{}", created_at=current + timedelta(days=1)))
+        session.commit()
+        statements = []
+        def observe(conn, cursor, statement, parameters, context, executemany):
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
+        event.listen(session.bind, "before_cursor_execute", observe)
+        try:
+            if surface == "operations":
+                document = api.operations(CTX, session, limit=200)
+            else:
+                document = api.mautic_operations(CTX, session)
+        finally:
+            event.remove(session.bind, "before_cursor_execute", observe)
+        assert len(statements) <= max_queries, len(statements)
+        rows = {row["operation_id"]: row for row in document["items"]}
+        assert len(rows) == size
+        assert rows["batch-0"]["result"] == {"version": 1}
+        assert rows["batch-0"]["reconciliation_required"] is False
+        assert rows["batch-1"]["reconciliation_required"] is True
+        assert all(row["correlation_id"] == "original-correlation" for row in rows.values())
