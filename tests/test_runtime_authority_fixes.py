@@ -78,6 +78,7 @@ def legacy_record(
     tenant_id="tenant-a",
 ):
     return SimpleNamespace(
+        key="shared-key",
         tenant_id=tenant_id,
         resource_id=response.get("id"),
         response_json=json.dumps(response),

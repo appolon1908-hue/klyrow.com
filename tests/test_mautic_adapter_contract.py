@@ -192,7 +192,7 @@ def test_generic_operation_route_returns_integration_result():
 
         def scalar(self, _statement):
             self.calls += 1
-            return {1: None, 2: outbox, 3: result}[self.calls]
+            return {1: None, 2: outbox, 3: result, 4: None}[self.calls]
 
     response = middleware_operation(
         outbox.id,
@@ -332,31 +332,24 @@ def test_processing_mautic_operation_cannot_report_successful_cancellation():
 
 
 def test_provider_completion_after_state_change_requires_reconciliation():
-    item = IntegrationOutbox(
-        id="operation-raced",
-        tenant_id="tenant-a",
-        target="MAUTIC",
-        event_type="campaign.publish.v1",
-        aggregate_id="campaign-1",
-        payload_json="{}",
-        idempotency_key="request-1",
-        state="CANCELLED",
-        attempts=1,
-        created_at=datetime.now(timezone.utc),
-        updated_at=datetime.now(timezone.utc),
-    )
-
-    class ChangedSession:
-        committed = False
-
-        def scalar(self, _statement):
-            return item
-
-        def commit(self):
-            self.committed = True
-
-    session = ChangedSession()
-    _success(session, item.id, {"id": "provider-result"})
-    assert session.committed is True
-    assert item.state == "DEAD_LETTER"
-    assert item.last_error == "provider_completed_after_operation_state_changed"
+    from apps.gateway.app.durable_results import integration_document
+    from sqlalchemy import select
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from apps.gateway.app.main import Base
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(engine)
+    with sessions() as session:
+        item = IntegrationOutbox(
+            id="operation-raced", tenant_id="tenant-a", target="MAUTIC",
+            event_type="campaign.publish.v1", aggregate_id="campaign-1", payload_json="{}",
+            idempotency_key="request-1", state="CANCELLED", attempts=1,
+        )
+        session.add(item)
+        session.commit()
+        assert _success(session, item.id, {"id": "provider-result"}, expected_attempt=1) is False
+        session.refresh(item)
+        assert item.state == "CANCELLED"
+        result = session.scalar(select(IntegrationResult).where(IntegrationResult.source == "MAUTIC_LATE"))
+        assert integration_document(result)[0]["status"] == "RECONCILIATION_REQUIRED"

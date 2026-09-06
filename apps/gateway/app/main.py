@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .delivery_safety import safe_mode_enabled
+from .durable_results import read_control_response, seal_control_response
+from .durable_keys import keyring_ready
 from .capabilities import mutation_permission
 from typing import Optional
 
@@ -735,6 +737,7 @@ def dependencies(s:Session=Depends(db)):
     return {
         "status":"ok",
         "database":"configured",
+        "durable_result_keys":"configured" if keyring_ready() else "unavailable",
         "postal_api":"configured" if os.getenv("KLYROW_POSTAL_API_URL") and os.getenv("KLYROW_POSTAL_API_KEY_FILE") else "unconfigured",
         "middleware_callback":"configured" if os.getenv("KLYROW_MIDDLEWARE_CALLBACK_URL") else "unconfigured",
         "secrets":"file_only" if os.getenv("KLYROW_ENV","development").lower()=="production" else "development",
@@ -897,10 +900,10 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
         legacy=s.scalar(select(Idempotency).where(Idempotency.key==idempotency_key,Idempotency.tenant_id==ctx["tenant"]))
         if legacy:
             if legacy.request_hash!=sha(x.model_dump_json()):raise HTTPException(409,"idempotency_key_payload_mismatch")
-            return json.loads(legacy.response_json)
+            return read_control_response(legacy)
     if prior:
         if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
-        return json.loads(prior.response_json)
+        return read_control_response(prior)
     from .operations import enforce_tenant_send_gate
     enforce_tenant_send_gate(s,ctx["tenant"])
     from .agent_mailboxes import authorize_agent_sender
@@ -924,7 +927,7 @@ async def _send(x:MailIn,ctx,s,idempotency_key):
     subscription_id,price_id=billing_identity(s,ctx["tenant"],sandbox=SAFE_MODE)
     mid=str(uuid.uuid4()); status="accepted" if SAFE_MODE else "queued"
     operation_id=str(x.callback_metadata.get("operation_id") or mid);correlation_id=str(x.callback_metadata.get("correlation_id") or mid)
-    result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=authorization["recipient"],sender=authorization["sender"],subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.accepted",payload=json.dumps({"stream":x.stream})));queue_email_lifecycle_event(s,kind="email.accepted",tenant_id=ctx["tenant"],message_id=mid,operation_id=operation_id,correlation_id=correlation_id,recipient=x.to.lower());s.add(Idempotency(key=storage_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=json.dumps(result)));s.add(UsageEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],subscription_id=subscription_id,message_id=mid,event_key="accepted:api:"+storage_key,unit="accepted_message",quantity=1,price_id=price_id))
+    result={"id":mid,"provider_message_id":mid,"status":status,"safe_mode":SAFE_MODE,"stream":x.stream}; s.add(Message(id=mid,tenant_id=ctx["tenant"],recipient=authorization["recipient"],sender=authorization["sender"],subject=x.subject,status=status)); s.add(Event(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],message_id=mid,kind="klyrow.email.accepted",payload=json.dumps({"stream":x.stream})));queue_email_lifecycle_event(s,kind="email.accepted",tenant_id=ctx["tenant"],message_id=mid,operation_id=operation_id,correlation_id=correlation_id,recipient=x.to.lower());s.add(Idempotency(key=storage_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=mid,response_json=seal_control_response(result,tenant_id=ctx["tenant"],storage_key=storage_key,request_hash=request_hash,resource_id=mid)));s.add(UsageEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],subscription_id=subscription_id,message_id=mid,event_key="accepted:api:"+storage_key,unit="accepted_message",quantity=1,price_id=price_id))
     if not SAFE_MODE:
         from .preferences import one_click_unsubscribe_headers
         delivery_payload={"to":[str(x.to)],"from":str(x.sender),"subject":x.subject,"html_body":x.html,"plain_body":x.text,"campaign_id":x.campaign_id,"stream":x.stream}
@@ -1157,8 +1160,8 @@ async def campaign_create(x:CampaignIn,ctx=Depends(require("platform_admin","ten
     prior=s.scalar(select(Idempotency).where(Idempotency.key==idempotency_key,Idempotency.tenant_id==ctx["tenant"]));
     if prior:
         if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
-        return json.loads(prior.response_json)
-    c=Campaign(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],name=x.name,subject=x.subject); result={"id":c.id,"name":c.name,"status":c.status}; s.add(c); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=c.id,response_json=json.dumps(result))); audit(s,ctx,"campaign.created"); s.commit(); return result
+        return read_control_response(prior)
+    c=Campaign(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],name=x.name,subject=x.subject); result={"id":c.id,"name":c.name,"status":c.status}; s.add(c); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=c.id,response_json=seal_control_response(result,tenant_id=ctx["tenant"],storage_key=idempotency_key,request_hash=request_hash,resource_id=c.id))); audit(s,ctx,"campaign.created"); s.commit(); return result
 @app.get("/v1/campaigns/{cid}")
 def campaign_get(cid:str,ctx=Depends(auth),s:Session=Depends(db)):
     c=s.scalar(select(Campaign).where(Campaign.id==cid,Campaign.tenant_id==ctx["tenant"]));

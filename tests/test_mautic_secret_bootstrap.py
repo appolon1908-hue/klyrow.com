@@ -119,3 +119,32 @@ def test_atomic_install_does_not_overwrite_a_concurrent_winner(migration):
         module.create_secret_file(target, "losing-credential")
     assert target.read_text() == "approved-existing-credential"
     assert not list(root.glob(".credential-migrating-*"))
+
+
+def test_durable_keyring_bootstrap_is_private_and_never_rotates_on_repeat(migration):
+    from apps.gateway.app.durable_keys import KEYRING_ENV, load_keyring
+    module, root, ownership = migration
+    env = root / ".env"
+    env.write_text("")
+    module.main()
+    path = root / "secrets/durable-result-keyring.json"
+    before = path.read_bytes()
+    keyring = load_keyring(path)
+    module.main()
+    assert path.read_bytes() == before
+    assert keyring == load_keyring(path)
+    assert f"{KEYRING_ENV}={path}" in env.read_text()
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert (path, 0, 0) in ownership
+
+
+def test_invalid_durable_keyring_cannot_be_silently_replaced(migration):
+    module, root, _ = migration
+    path = root / "approved-keyring"
+    path.write_text("corrupt-authority")
+    env = root / ".env"
+    original = f"KLYROW_DURABLE_RESULT_KEYRING_FILE={path}\n"
+    env.write_text(original)
+    with pytest.raises(SystemExit): module.main()
+    assert env.read_text() == original
+    assert path.read_text() == "corrupt-authority"
