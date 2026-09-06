@@ -17,6 +17,7 @@ LABEL org.opencontainers.image.source="https://github.com/appolon1908-hue/klyrow
       org.opencontainers.image.version="$SOURCE_COMMIT_SHA"
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 KLYROW_SOURCE_SHA=$SOURCE_COMMIT_SHA
 RUN apk add --no-cache --upgrade \
+    libuuid=2.41.6-r1 \
     libcrypto3=3.5.8-r0 \
     libssl3=3.5.8-r0 \
     && rm -f /var/log/apk.log
