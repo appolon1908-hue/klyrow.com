@@ -80,3 +80,37 @@ def test_schedule_retains_tenant_isolation(gateway, kind):
         "scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
     }, headers={"Idempotency-Key": "schedule-test-key"})
     assert response.status_code == 404
+
+
+@pytest.mark.parametrize("kind", ["campaigns", "campaign-definitions"])
+def test_resolver_authorizes_the_campaign_capability_before_schedule_refusal(gateway, monkeypatch, kind):
+    import httpx
+    client, sessions, _ = gateway
+    core.app.dependency_overrides.pop(core.auth)
+    monkeypatch.setenv("KLYROW_TENANT_RESOLVER_URL", "https://resolver.invalid/resolve")
+    with sessions() as session:
+        if kind == "campaigns":
+            item = core.Campaign(id="campaign-a", tenant_id="tenant-a", name="Test", status="draft")
+        else:
+            item = CampaignDefinition(id="campaign-a", tenant_id="tenant-a", name="Test",
+                sender_id="sender-a", template_id="template-a", status="TESTING",
+                test_sent_at=datetime.now(timezone.utc))
+        session.add(item)
+        session.commit()
+    permissions = []
+    def resolve(url, *, headers, **kwargs):
+        permission = headers["X-Codestra-Required-Permission"]
+        permissions.append(permission)
+        assert headers["X-Klyrow-Tenant-Id"] == "tenant-a"
+        return httpx.Response(200, json={"authorized": True, "permission": permission,
+            "identity_id": "campaign-service", "tenant_id": "tenant-a", "role": "service"})
+    monkeypatch.setattr(core.httpx, "get", resolve)
+    headers = {"Authorization": "Bearer synthetic-campaign-token", "X-Tenant-ID": "tenant-a",
+               "Idempotency-Key": "schedule-test-key"}
+    payload = {"scheduled_at": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()}
+    response = client.post(f"/v1/{kind}/campaign-a/schedule", headers=headers, json=payload)
+    assert permissions == ["campaign.manage"]
+    assert response.status_code == 409
+    assert response.json()["detail"] == "campaign_dispatcher_unavailable"
+    monkeypatch.setattr(core.httpx, "get", lambda *a, **k: httpx.Response(403))
+    assert client.post(f"/v1/{kind}/campaign-a/schedule", headers=headers, json=payload).status_code == 403
