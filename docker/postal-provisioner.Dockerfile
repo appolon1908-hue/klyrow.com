@@ -17,6 +17,7 @@ RUN rm -f /etc/apt/sources.list.d/* \
     && DEBIAN_FRONTEND=noninteractive apt-get \
         -o Acquire::Check-Valid-Until=false update \
     && DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y \
+    && test "$(dpkg-query --show --showformat='${Version}' libssh2-1)" = '1.10.0-3+deb12u1' \
     && setcap -r /usr/local/bin/ruby \
     && test -z "$(getcap /usr/local/bin/ruby)" \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
