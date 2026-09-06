@@ -27,7 +27,11 @@ to another tenant's resources. The internal provider API receives these guards
 as well as the product API.
 
 READ_ONLY, ANALYST, BILLING, and unprivileged service identities are denied
-when the required capability is absent. A service with an explicit exact grant
+when the required capability is absent. The external tenant resolver is asked
+for that exact mutation capability; an unrelated successful `klyrow.send`
+resolution cannot authorize the write. Resolver denial remains fail closed.
+
+A service with an explicit exact grant
 can perform the corresponding operation. Contact-list responses are encoded
 after refreshing the committed row, so authorized create/update/read operations
 return usable JSON instead of an ORM serialization error.

@@ -63,3 +63,35 @@ def test_domain_http_creation_requires_domain_capability(gateway, path):
     context["permissions"] = ["domain.manage"]
     response = client.post(path, json={"domain": "scope.example"})
     assert response.status_code == 201, response.text
+
+
+@pytest.mark.parametrize("method,path,payload,permission,expected", [
+    ("POST", "/v1/lists", {"name": "Resolver contacts"}, "contact.manage", 201),
+    ("POST", "/v1/domains/claims", {"domain": "resolver.example"}, "domain.manage", 201),
+    ("POST", "/v1/internal/email/domains/register", {"domain": "resolver.example"}, "domain.manage", 201),
+    ("DELETE", "/v1/templates/foreign", None, "template.manage", 404),
+    ("POST", "/v1/campaign-definitions/foreign/cancel", None, "campaign.manage", 404),
+    ("POST", "/v1/internal/email/senders/foreign/suspend", None, "sender.manage", 404),
+    ("POST", "/v1/internal/email/smtp/credentials/foreign/revoke", None, "credential.manage", 404),
+])
+def test_real_resolver_requests_exact_mutation_authority(gateway, monkeypatch, method, path, payload, permission, expected):
+    import httpx
+    from apps.gateway.app import main as core
+    client, _, _ = gateway
+    core.app.dependency_overrides.pop(core.auth)
+    monkeypatch.setenv("KLYROW_TENANT_RESOLVER_URL", "https://resolver.invalid/resolve")
+    requested = []
+    def resolve(url, *, headers, **kwargs):
+        requested.append(headers["X-Codestra-Required-Permission"])
+        assert headers["X-Klyrow-Tenant-Id"] == "tenant-a"
+        return httpx.Response(200, json={"authorized": True, "permission": permission,
+            "identity_id": "scoped-service", "tenant_id": "tenant-a", "role": "service"})
+    monkeypatch.setattr(core.httpx, "get", resolve)
+    headers = {"Authorization": "Bearer synthetic-scoped-token", "X-Tenant-ID": "tenant-a"}
+    response = client.request(method, path, json=payload, headers=headers)
+    assert response.status_code == expected, response.text
+    assert requested == [permission]
+    monkeypatch.setattr(core.httpx, "get", lambda *a, **k: httpx.Response(200, json={
+        "authorized": True, "permission": "klyrow.send", "identity_id": "scoped-service",
+        "tenant_id": "tenant-a", "role": "service"}))
+    assert client.request(method, path, json=payload, headers=headers).status_code == 403

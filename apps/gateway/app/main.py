@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .delivery_safety import safe_mode_enabled
+from .capabilities import mutation_permission
 from typing import Optional
 
 import httpx, jwt
@@ -211,6 +212,7 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
             if request.url.path=="/v1/commands":permission="klyrow.middleware.command.write"
             elif request.url.path=="/v1/integrations/results":permission="klyrow.integration.result.write"
             elif request.url.path.startswith("/v1/operations/"):permission="klyrow.middleware.operation.read" if request.method in {"GET","HEAD","OPTIONS"} else "klyrow.middleware.operation.write"
+            elif required_mutation_permission:=mutation_permission(request.method,request.url.path):permission=required_mutation_permission
             else:permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send" if request.method not in {"GET","HEAD","OPTIONS"} else "klyrow.read"
             headers={"Authorization":"Bearer "+raw,"X-Codestra-Required-Permission":permission}
             if requested_tenant:headers["X-Klyrow-Tenant-Id"]=requested_tenant
