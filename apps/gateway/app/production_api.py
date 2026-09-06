@@ -728,7 +728,8 @@ def campaign_patch(
     return item
 
 
-@router.post("/v1/campaigns/{campaign_id}/schedule", status_code=202)
+@router.post("/v1/campaigns/{campaign_id}/schedule", status_code=202,
+             responses={409: {"description": "Campaign dispatcher unavailable; scheduling is not accepted."}})
 def campaign_schedule(
     campaign_id: str,
     body: CampaignSchedule,
@@ -739,30 +740,12 @@ def campaign_schedule(
     from .main import Campaign
 
     _require_permission(ctx, "campaign.manage")
-    item = _tenant_item_for_update(s, Campaign, campaign_id, ctx["tenant"])
-    prior, storage_key, request_hash = _idempotency_begin(
-        s,
-        ctx,
-        idempotency_key,
-        action="campaign.schedule",
-        resource=campaign_id,
-        semantic_payload=body.model_dump(mode="json"),
-    )
-    if prior is not None:
-        return prior
+    _tenant_item_for_update(s, Campaign, campaign_id, ctx["tenant"])
     if body.scheduled_at.astimezone(timezone.utc) <= now():
         raise HTTPException(422, "schedule_must_be_future")
-    item.status = "scheduled"
-    item.scheduled_at = body.scheduled_at.astimezone(timezone.utc)
-    audit(s, ctx, "campaign.scheduled")
-    result = jsonable_encoder(
-        {"id": item.id, "status": item.status, "scheduled_at": item.scheduled_at}
-    )
-    _idempotency_complete(
-        s, ctx, storage_key=storage_key, request_hash=request_hash, resource=campaign_id, response=result
-    )
-    s.commit()
-    return result
+    # No worker consumes this schedule. Do not create a promise or replay an
+    # older promise that the current runtime cannot execute.
+    raise HTTPException(409, "campaign_dispatcher_unavailable")
 
 
 @router.post("/v1/campaigns/{campaign_id}/cancel")

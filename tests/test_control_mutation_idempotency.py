@@ -48,28 +48,20 @@ def test_message_cancel_replays_the_original_durable_result():
     assert first == second == {"id": "message-a", "status": "cancelled"}
 
 
-def test_campaign_schedule_conflicts_when_semantics_change():
+def test_campaign_schedule_never_accepts_retries_or_changed_semantics_without_dispatcher():
     s = session()
     s.add(Campaign(id="campaign-a", tenant_id="tenant-a", name="Campaign", status="draft"))
     s.commit()
     first_time = datetime.now(timezone.utc) + timedelta(hours=2)
-    first = campaign_schedule(
-        "campaign-a", CampaignSchedule(scheduled_at=first_time), context(), s, "schedule-campaign-key"
-    )
-    replay = campaign_schedule(
-        "campaign-a", CampaignSchedule(scheduled_at=first_time), context(), s, "schedule-campaign-key"
-    )
-    assert replay == first
-    with pytest.raises(HTTPException) as conflict:
-        campaign_schedule(
-            "campaign-a",
-            CampaignSchedule(scheduled_at=first_time + timedelta(hours=1)),
-            context(),
-            s,
-            "schedule-campaign-key",
-        )
-    assert conflict.value.status_code == 409
-    assert conflict.value.detail == "idempotency_key_payload_mismatch"
+    for scheduled_at in (first_time, first_time, first_time + timedelta(hours=1)):
+        with pytest.raises(HTTPException) as refused:
+            campaign_schedule(
+                "campaign-a", CampaignSchedule(scheduled_at=scheduled_at),
+                context(), s, "schedule-campaign-key",
+            )
+        assert refused.value.status_code == 409
+        assert refused.value.detail == "campaign_dispatcher_unavailable"
+    assert s.get(Campaign, "campaign-a").status == "draft"
 
 
 def test_idempotency_identity_is_caller_bound():
