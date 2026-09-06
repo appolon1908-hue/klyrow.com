@@ -26,6 +26,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from .guards import authorize_send, enforce_consent, suppression_record
 from .guards import enforce_suppression
+from .capabilities import require_permission
 from .main import AllowedSender, Audit, Base, Domain, InboundRouteConfig, Message, Tenant, auth, db, verify_postal_signature
 
 router = APIRouter(prefix="/v1/internal/email", tags=["Klyrow provider"])
@@ -1192,6 +1193,7 @@ def canonical_reputation(ctx=Depends(auth), s: Session = Depends(db)):
 
 @router.post("/domains/register", status_code=201)
 def domain_register(payload: DomainRegisterIn, ctx=Depends(auth), s: Session = Depends(db)):
+    require_permission(ctx, "domain.manage")
     name = payload.domain.lower()
     existing = s.scalar(select(ProviderDomain).where(ProviderDomain.domain == name))
     if existing:
@@ -1208,6 +1210,7 @@ def domain_register(payload: DomainRegisterIn, ctx=Depends(auth), s: Session = D
 
 @router.post("/domains/verify")
 def domain_verify(domain_id: str, ctx=Depends(auth), s: Session = Depends(db)):
+    require_permission(ctx, "domain.manage")
     item = s.scalar(select(ProviderDomain).where(ProviderDomain.id == domain_id, ProviderDomain.tenant_id == ctx["tenant"]))
     if not item:
         raise HTTPException(404, "domain_not_found")
@@ -1224,6 +1227,7 @@ def domain_verify(domain_id: str, ctx=Depends(auth), s: Session = Depends(db)):
 
 @router.post("/domains/{domain_id}/dns-check")
 def domain_dns_check(domain_id: str, ctx=Depends(auth), s: Session = Depends(db)):
+    require_permission(ctx, "domain.manage")
     domain = s.scalar(select(ProviderDomain).where(ProviderDomain.id == domain_id,
         ProviderDomain.tenant_id == ctx["tenant"]))
     if not domain:
@@ -1281,6 +1285,7 @@ def canonical_domains(ctx=Depends(auth), s: Session = Depends(db)):
 
 @router.post("/senders", status_code=201)
 def sender_create(payload: SenderIn, ctx=Depends(auth), s: Session = Depends(db)):
+    require_permission(ctx, "sender.manage")
     domain = s.scalar(select(ProviderDomain).where(ProviderDomain.id == payload.domain_id, ProviderDomain.tenant_id == ctx["tenant"]))
     if not domain or domain.status not in {"VERIFIED", "SENDING_ENABLED"}:
         raise HTTPException(422, "sender_domain_not_verified")
@@ -1359,6 +1364,7 @@ def smtp_credential_create(payload: SmtpCredentialIn, ctx=Depends(auth), s: Sess
 
 @router.post("/smtp/credentials/{credential_id}/rotate")
 def smtp_credential_rotate(credential_id: str, ctx=Depends(auth), s: Session = Depends(db)):
+    require_permission(ctx, "credential.manage")
     item = s.scalar(select(SmtpCredential).where(SmtpCredential.id == credential_id,
         SmtpCredential.tenant_id == ctx["tenant"], SmtpCredential.status == "ACTIVE"))
     if not item:
@@ -1373,6 +1379,7 @@ def smtp_credential_rotate(credential_id: str, ctx=Depends(auth), s: Session = D
 
 @router.post("/smtp/credentials/{credential_id}/revoke", status_code=204)
 def smtp_credential_revoke(credential_id: str, ctx=Depends(auth), s: Session = Depends(db)):
+    require_permission(ctx, "credential.manage")
     item = s.scalar(select(SmtpCredential).where(SmtpCredential.id == credential_id,
         SmtpCredential.tenant_id == ctx["tenant"]))
     if not item:
@@ -1396,6 +1403,7 @@ def smtp_preflight(payload: SmtpPreflightIn, ctx=Depends(auth), s: Session = Dep
 
 @router.post("/domains/{domain_id}/suspend")
 def domain_suspend(domain_id: str, ctx=Depends(auth), s: Session = Depends(db)):
+    require_permission(ctx, "domain.manage")
     item = s.scalar(select(ProviderDomain).where(ProviderDomain.id == domain_id, ProviderDomain.tenant_id == ctx["tenant"]))
     if not item:
         raise HTTPException(404, "domain_not_found")
@@ -1429,6 +1437,7 @@ def dkim_rotate(domain_id: str, ctx=Depends(auth), s: Session = Depends(db)):
 
 @router.post("/domains/{domain_id}/dkim/{key_id}/verify")
 def dkim_verify(domain_id: str, key_id: str, ctx=Depends(auth), s: Session = Depends(db)):
+    require_permission(ctx, "domain.manage")
     domain = s.scalar(select(ProviderDomain).where(ProviderDomain.id == domain_id,
         ProviderDomain.tenant_id == ctx["tenant"]))
     key = s.scalar(select(DkimKey).where(DkimKey.id == key_id, DkimKey.domain_id == domain_id,
@@ -1459,6 +1468,7 @@ def dkim_verify(domain_id: str, key_id: str, ctx=Depends(auth), s: Session = Dep
 
 @router.post("/senders/{sender_id}/suspend")
 def sender_suspend(sender_id: str, ctx=Depends(auth), s: Session = Depends(db)):
+    require_permission(ctx, "sender.manage")
     item = s.scalar(select(SenderIdentity).where(SenderIdentity.id == sender_id, SenderIdentity.tenant_id == ctx["tenant"]))
     if not item:
         raise HTTPException(404, "sender_not_found")
