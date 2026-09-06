@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .billing import BillingPlan, BillingPrice, BillingSubscription, Wallet
+from .capabilities import has_permission as _has_permission, require_permission as _require_permission
 from .main import (
     Base,
     Contact,
@@ -301,22 +302,6 @@ def _find_operation_for_update(s: Session, operation_id: str, tenant_id: str) ->
     if item is None:
         raise HTTPException(404, "not_found")
     return item
-
-
-def _has_permission(ctx: dict[str, Any], permission: str) -> bool:
-    role = str(ctx.get("role") or "").upper()
-    if role in {"OWNER", "ADMIN", "PLATFORM_ADMIN", "TENANT_ADMIN"}:
-        return True
-    granted = set(ROLE_PERMISSIONS.get(role, set()))
-    for field in ("permissions", "scopes"):
-        values = ctx.get(field) or []
-        granted.update(values.split() if isinstance(values, str) else values)
-    return "*" in granted or permission in granted
-
-
-def _require_permission(ctx: dict[str, Any], permission: str) -> None:
-    if not _has_permission(ctx, permission):
-        raise HTTPException(403, "permission_denied")
 
 
 def _mautic_permission(command: str) -> str:
@@ -630,6 +615,7 @@ def template_patch(
 def template_delete(
     template_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
 ) -> Response:
+    _require_permission(ctx, "template.manage")
     item = _tenant_item(s, Template, template_id, ctx["tenant"])
     if item.status == "PUBLISHED":
         raise HTTPException(409, "published_template_cannot_be_deleted")
@@ -678,38 +664,43 @@ def contact_delete(
 
 @router.get("/v1/lists")
 def lists(ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
-    return {"items": s.scalars(select(ContactList).where(ContactList.tenant_id == ctx["tenant"]).order_by(ContactList.created_at.desc())).all()}
+    return {"items": jsonable_encoder(s.scalars(select(ContactList).where(ContactList.tenant_id == ctx["tenant"]).order_by(ContactList.created_at.desc())).all())}
 
 
 @router.post("/v1/lists", status_code=201)
 def list_create(body: ListIn, ctx: dict = Depends(auth), s: Session = Depends(db)) -> Any:
+    _require_permission(ctx, "contact.manage")
     item = ContactList(id=str(uuid.uuid4()), tenant_id=ctx["tenant"], name=body.name, description=body.description)
     s.add(item)
     audit(s, ctx, "contact_list.created")
     s.commit()
-    return item
+    s.refresh(item)
+    return jsonable_encoder(item)
 
 
 @router.get("/v1/lists/{list_id}")
 def list_detail(list_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> Any:
-    return _tenant_item(s, ContactList, list_id, ctx["tenant"])
+    return jsonable_encoder(_tenant_item(s, ContactList, list_id, ctx["tenant"]))
 
 
 @router.patch("/v1/lists/{list_id}")
 def list_patch(
     list_id: str, body: ListPatch, ctx: dict = Depends(auth), s: Session = Depends(db)
 ) -> Any:
+    _require_permission(ctx, "contact.manage")
     item = _tenant_item(s, ContactList, list_id, ctx["tenant"])
     for key, value in body.model_dump(exclude_unset=True).items():
         setattr(item, key, value)
     item.updated_at = now()
     audit(s, ctx, "contact_list.updated")
     s.commit()
-    return item
+    s.refresh(item)
+    return jsonable_encoder(item)
 
 
 @router.delete("/v1/lists/{list_id}", status_code=204)
 def list_delete(list_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)) -> Response:
+    _require_permission(ctx, "contact.manage")
     item = _tenant_item(s, ContactList, list_id, ctx["tenant"])
     s.delete(item)
     audit(s, ctx, "contact_list.deleted")
