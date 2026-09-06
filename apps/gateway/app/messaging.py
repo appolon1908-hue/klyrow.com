@@ -10,6 +10,7 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, Uni
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .main import AllowedSender, Base, Domain, Event, Message, Suppression, Tenant, audit, auth, db, safe_webhook_url, sha
+from .capabilities import require_permission
 
 router=APIRouter(prefix="/v1",tags=["Email SaaS"])
 now=lambda:datetime.now(timezone.utc)
@@ -82,11 +83,13 @@ def domain_claims(ctx=Depends(auth),s:Session=Depends(db)):
 
 @router.post("/domains/claims",status_code=201)
 def domain_claim(x:DomainClaimIn,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx, "domain.manage")
     name=x.domain.lower().rstrip(".")
     if s.scalar(select(DomainClaim).where(DomainClaim.domain==name)):raise HTTPException(409,"domain_already_claimed")
     challenge=secrets.token_urlsafe(24);selector="kly"+secrets.token_hex(4);item=DomainClaim(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],domain=name,challenge_hash=sha(challenge),dkim_selector=selector,return_path="bounce."+name,tracking_domain="track."+name);s.add(item);audit(s,ctx,"domain.claimed");s.commit();return {"id":item.id,"state":item.state,"dns":{"ownership":{"type":"TXT","name":"_klyrow-verification."+name,"value":"klyrow="+challenge},"spf":{"type":"TXT","name":name,"recommended":"v=spf1 include:spf.klyrow.com -all"},"dkim":{"selector":selector},"dmarc":{"type":"TXT","name":"_dmarc."+name,"recommended":"v=DMARC1; p=none; rua=mailto:dmarc@klyrow.com"},"return_path":item.return_path,"tracking":item.tracking_domain,"mx":"mail.klyrow.com"}}
 @router.post("/domains/claims/{item_id}/verify")
 def domain_verify(item_id:str,x:dict,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx, "domain.manage")
     item=tenant_get(s,DomainClaim,item_id,ctx["tenant"])
     try:records=resolve_txt("_klyrow-verification."+item.domain)
     except Exception:records=[]
@@ -99,6 +102,7 @@ def domain_verify(item_id:str,x:dict,ctx=Depends(auth),s:Session=Depends(db)):
     audit(s,ctx,"domain.verified");s.commit();return {"id":item.id,"state":item.state}
 @router.post("/domains/claims/{item_id}/dkim/rotate",status_code=201)
 def dkim_rotate(item_id:str,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx, "domain.manage")
     item=tenant_get(s,DomainClaim,item_id,ctx["tenant"])
     if item.state not in {"VERIFIED","SENDING_ENABLED"}:raise HTTPException(409,"domain_not_verified")
     for key in s.scalars(select(DkimKeyVersion).where(DkimKeyVersion.domain_claim_id==item.id,DkimKeyVersion.active==True)).all():key.active=False;key.retired_at=now()
@@ -110,6 +114,7 @@ def dkim_rotate(item_id:str,ctx=Depends(auth),s:Session=Depends(db)):
     s.add(key);audit(s,ctx,"domain.dkim_rotated");s.commit();return {"selector":key.selector,"version":key.version,"public_record":key.public_key,"private_key_exported":False}
 @router.post("/senders",status_code=201)
 def sender_create(x:SenderIn,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx, "sender.manage")
     claim=tenant_get(s,DomainClaim,x.domain_claim_id,ctx["tenant"]);kind=x.stream.upper()
     if claim.state not in {"VERIFIED","SENDING_ENABLED"}:raise HTTPException(409,"verified_domain_required")
     if x.email.lower().rsplit("@",1)[1]!=claim.domain:raise HTTPException(403,"sender_spoofing_denied")
@@ -137,15 +142,19 @@ def templates(ctx=Depends(auth),s:Session=Depends(db)):
     return s.scalars(select(Template).where(Template.tenant_id==ctx["tenant"]).order_by(Template.created_at.desc())).all()
 @router.post("/templates",status_code=201)
 def template_create(x:TemplateIn,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx, "template.manage")
     validate_html(x.html_body);item=Template(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],slug=x.slug,name=x.name,locale=x.locale);version=TemplateVersion(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],template_id=item.id,version=1,subject=x.subject,html_body=x.html_body,text_body=x.text_body,variables_json=json.dumps(sorted(set(x.variables))),created_by=ctx["sub"]);s.add_all([item,version]);audit(s,ctx,"template.created");s.commit();return {"id":item.id,"version":1,"status":item.status}
 @router.put("/templates/{item_id}")
 def template_update(item_id:str,x:TemplateUpdate,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx, "template.manage")
     item=tenant_get(s,Template,item_id,ctx["tenant"]);validate_html(x.html_body);item.current_version+=1;item.status="DRAFT";version=TemplateVersion(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],template_id=item.id,version=item.current_version,subject=x.subject,html_body=x.html_body,text_body=x.text_body,variables_json=json.dumps(sorted(set(x.variables))),created_by=ctx["sub"]);s.add(version);audit(s,ctx,"template.version_created");s.commit();return {"id":item.id,"version":item.current_version,"status":item.status}
 @router.post("/templates/{item_id}/publish")
 def template_publish(item_id:str,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx, "template.manage")
     item=tenant_get(s,Template,item_id,ctx["tenant"]);item.status="PUBLISHED";audit(s,ctx,"template.published");s.commit();return {"status":item.status,"version":item.current_version}
 @router.post("/templates/{item_id}/rollback/{version}")
 def template_rollback(item_id:str,version:int,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx, "template.manage")
     item=tenant_get(s,Template,item_id,ctx["tenant"]);source=s.scalar(select(TemplateVersion).where(TemplateVersion.template_id==item.id,TemplateVersion.version==version,TemplateVersion.tenant_id==ctx["tenant"]));
     if not source:raise HTTPException(404,"template_version_not_found")
     item.current_version+=1;copy=TemplateVersion(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],template_id=item.id,version=item.current_version,subject=source.subject,html_body=source.html_body,text_body=source.text_body,variables_json=source.variables_json,created_by=ctx["sub"]);item.status="DRAFT";s.add(copy);audit(s,ctx,"template.rolled_back");s.commit();return {"version":item.current_version,"source_version":version,"status":item.status}
@@ -155,6 +164,7 @@ def template_render(item_id:str,x:RenderIn,ctx=Depends(auth),s:Session=Depends(d
 
 @router.post("/campaign-definitions",status_code=201)
 def campaign_create(x:CampaignIn,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx, "campaign.manage")
     sender=tenant_get(s,SenderIdentity,x.sender_id,ctx["tenant"]);template=tenant_get(s,Template,x.template_id,ctx["tenant"])
     if not sender.verified or sender.stream!="MARKETING":raise HTTPException(409,"marketing_sender_required")
     if template.status!="PUBLISHED":raise HTTPException(409,"published_template_required")
@@ -164,6 +174,7 @@ def campaign_definitions(ctx=Depends(auth),s:Session=Depends(db)):
     return s.scalars(select(CampaignDefinition).where(CampaignDefinition.tenant_id==ctx["tenant"]).order_by(CampaignDefinition.created_at.desc())).all()
 @router.post("/campaign-definitions/{item_id}/test")
 def campaign_test(item_id:str,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx, "campaign.manage")
     item=tenant_get(s,CampaignDefinition,item_id,ctx["tenant"]);item.status="TESTING";item.test_sent_at=now();audit(s,ctx,"campaign.test_fixture_completed");s.commit();return {"status":item.status,"provider_submission":False,"internal_sink":True}
 @router.post("/campaign-definitions/{item_id}/preflight")
 def campaign_preflight(item_id:str,x:PreflightIn,ctx=Depends(auth),s:Session=Depends(db)):
@@ -172,12 +183,14 @@ def campaign_preflight(item_id:str,x:PreflightIn,ctx=Depends(auth),s:Session=Dep
     eligible=max(0,x.estimated_recipients-x.estimated_suppressed-x.estimated_invalid);allowed=eligible<=x.quota_remaining;return {"recipients":x.estimated_recipients,"suppressed":x.estimated_suppressed,"invalid":x.estimated_invalid,"eligible":eligible,"quota_impact":eligible,"estimated_usage_cost":str(x.estimated_unit_cost),"allowed":allowed}
 @router.post("/campaign-definitions/{item_id}/schedule")
 def campaign_schedule(item_id:str,x:ScheduleIn,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx, "campaign.manage")
     item=tenant_get(s,CampaignDefinition,item_id,ctx["tenant"])
     if not item.test_sent_at:raise HTTPException(409,"campaign_test_required")
     if x.scheduled_at.astimezone(timezone.utc)<=now():raise HTTPException(422,"schedule_must_be_future")
     item.scheduled_at=x.scheduled_at;item.status="SCHEDULED";audit(s,ctx,"campaign.scheduled");s.commit();return {"status":item.status,"scheduled_at":item.scheduled_at}
 @router.post("/campaign-definitions/{item_id}/cancel")
 def campaign_cancel(item_id:str,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx, "campaign.manage")
     item=tenant_get(s,CampaignDefinition,item_id,ctx["tenant"])
     if item.status not in {"DRAFT","TESTING","SCHEDULED","PAUSED"}:raise HTTPException(409,"campaign_cannot_be_cancelled")
     item.status="CANCELLED";audit(s,ctx,"campaign.cancelled");s.commit();return {"status":item.status}
