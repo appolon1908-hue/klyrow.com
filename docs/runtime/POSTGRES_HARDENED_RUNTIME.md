@@ -108,3 +108,13 @@ Before this candidate can leave draft:
 Merging source alone authorizes no image publication, database mutation,
 volume migration, Mautic cutover, provider activation, customer email, or
 runtime deployment.
+
+
+### Fresh-volume readiness
+
+The upstream PostgreSQL entrypoint starts a temporary server over Unix sockets
+during initialization. A socket-only readiness probe can succeed before the
+entrypoint becomes the final PostgreSQL PID 1. The CI rehearsal waits for TCP
+on `127.0.0.1` on both initial startup and restart, then checks non-root process
+identity, data ownership, signal exit status, and persistence. No port is
+published outside the throwaway container.

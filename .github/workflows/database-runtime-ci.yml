@@ -110,9 +110,11 @@ jobs:
             --env POSTGRES_PASSWORD_FILE=/run/secrets/postgres_password \
             "$IMAGE" >/dev/null
 
+          # The entrypoint bootstrap server accepts only Unix-socket connections.
+          # Wait for the final TCP listener before checking PID 1 or writing data.
           ready=false
           for attempt in $(seq 1 60); do
-            if docker exec "$CONTAINER" pg_isready -U klyrow -d klyrow >/dev/null 2>&1; then
+            if docker exec "$CONTAINER" pg_isready -h 127.0.0.1 -U klyrow -d klyrow >/dev/null 2>&1; then
               ready=true
               break
             fi
@@ -133,7 +135,7 @@ jobs:
           docker start "$CONTAINER" >/dev/null
           ready=false
           for attempt in $(seq 1 60); do
-            if docker exec "$CONTAINER" pg_isready -U klyrow -d klyrow >/dev/null 2>&1; then
+            if docker exec "$CONTAINER" pg_isready -h 127.0.0.1 -U klyrow -d klyrow >/dev/null 2>&1; then
               ready=true
               break
             fi
