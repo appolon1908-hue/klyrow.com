@@ -1,0 +1,8 @@
+{
+  "source_repository": "appolon1908-hue/Middleware-",
+  "source_ref": "migration/canonicalize-appolon-middleware-20260906",
+  "source_sha": "8336a9de25fe7cf6c6af720ac1f79e98ed345f02",
+  "scope": "klyrow-delivery-events-and-adapters",
+  "production_changed": false,
+  "local_patch_contract": "docs/integrations/codestra-fabric/MIDDLEWARE_EMAIL_COMMANDS.md"
+}

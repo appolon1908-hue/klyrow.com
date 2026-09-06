@@ -1227,6 +1227,8 @@ from .operations import router as operations_router
 app.include_router(operations_router)
 from .production_api import router as production_api_router
 app.include_router(production_api_router)
+from .middleware_email import router as middleware_email_router
+app.include_router(middleware_email_router)
 from .reseller import router as reseller_router
 app.include_router(reseller_router)
 from .delivery_controls import router as delivery_controls_router

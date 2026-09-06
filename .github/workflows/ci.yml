@@ -104,6 +104,21 @@ jobs:
         run: |
           python -m compileall -q apps/gateway
           pytest -q tests
+      - name: Verify command replay under concurrent PostgreSQL transactions
+        env:
+          KLYROW_CONTRACT_POSTGRES_URL: postgresql+psycopg://klyrow:ci-only-password@127.0.0.1:5432/klyrow_ci
+        run: python -m pytest -q tests/test_middleware_email_contract.py
+      - name: Checkout immutable Middleware contract dependencies
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: appolon1908-hue/Middleware-
+          ref: 8336a9de25fe7cf6c6af720ac1f79e98ed345f02
+          path: .ci-middleware
+          persist-credentials: false
+      - name: Verify owned Middleware adapters against the gateway
+        run: |
+          pip install temporalio==1.32.0 asyncpg==0.30.0 pydantic-settings==2.15.0 pytest-asyncio==1.4.0
+          python scripts/verify_middleware_contract.py .ci-middleware
 
   secrets:
     runs-on: ubuntu-latest

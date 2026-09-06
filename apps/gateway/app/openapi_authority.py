@@ -62,6 +62,7 @@ DEDICATED_SERVICE_PATHS = {
 # is intentionally omitted from generated OpenAPI clients.
 DURABLE_IDEMPOTENCY = {
     ("post", "/v1/messages"),
+    ("post", "/v1/email/messages"),
     ("post", "/v1/email/send"),
     ("post", "/v1/internal/email/send"),
     ("post", "/v1/internal/email/communications/messages"),
@@ -96,6 +97,8 @@ RECOGNIZED_AUTH_DEPENDENCIES = {
 
 
 def operation_audience(path: str) -> str:
+    if path == "/v1/email/messages" or path.startswith("/v1/email/messages/"):
+        return "INTERNAL"
     if path.startswith(("/auth/", "/app/")):
         return "BROWSER_BFF"
     if path == "/metrics" or path.startswith(("/v1/internal/", "/v1/system/")):

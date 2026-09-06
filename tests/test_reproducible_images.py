@@ -181,9 +181,26 @@ def test_cosign_attestation_verification_normalizes_jsonl_and_legacy_arrays():
 def test_pull_request_images_and_evidence_bind_to_exact_head_sha():
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "KLYROW_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}" in workflow
-    assert workflow.count("uses: actions/checkout@") == workflow.count(
-        "ref: ${{ env.KLYROW_SOURCE_SHA }}"
-    )
+    # The sole foreign checkout supplies immutable test dependencies; every
+    # Klyrow checkout must still bind images and evidence to the PR head.
+    import json
+    import yaml
+    source = json.loads((ROOT / "integrations/codestra-middleware/SOURCE.json").read_text())
+    foreign = 0
+    for job in yaml.safe_load(workflow)["jobs"].values():
+        for step in job.get("steps", []):
+            if not step.get("uses", "").startswith("actions/checkout@"):
+                continue
+            options = step.get("with", {})
+            if "repository" in options:
+                foreign += 1
+                assert options["repository"] == source["source_repository"]
+                assert options["ref"] == source["source_sha"]
+                assert options["path"] == ".ci-middleware"
+                assert options["persist-credentials"] is False
+            else:
+                assert options["ref"] == "${{ env.KLYROW_SOURCE_SHA }}"
+    assert foreign == 1
     assert workflow.count("github.sha") == 1
     assert "${{ github.sha }}" not in workflow
     assert "klyrow-gateway:${{ env.KLYROW_SOURCE_SHA }}" in workflow
