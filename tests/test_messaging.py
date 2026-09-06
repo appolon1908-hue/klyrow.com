@@ -53,7 +53,8 @@ def test_stream_separation_template_version_render_rollback_and_campaign_safety(
     assert client.post(f"/v1/campaign-definitions/{cid}/preflight",headers=h,json={"estimated_recipients":10,"estimated_suppressed":1,"estimated_invalid":1,"quota_remaining":100}).status_code==409
     test=client.post(f"/v1/campaign-definitions/{cid}/test",headers=h);assert test.json()["provider_submission"] is False
     preflight=client.post(f"/v1/campaign-definitions/{cid}/preflight",headers=h,json={"estimated_recipients":10,"estimated_suppressed":1,"estimated_invalid":1,"quota_remaining":100,"estimated_unit_cost":"0.001"});assert preflight.json()["eligible"]==8 and preflight.json()["allowed"] is True
-    scheduled=client.post(f"/v1/campaign-definitions/{cid}/schedule",headers=h,json={"scheduled_at":(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()});assert scheduled.json()["status"]=="SCHEDULED"
+    scheduled=client.post(f"/v1/campaign-definitions/{cid}/schedule",headers=h,json={"scheduled_at":(datetime.now(timezone.utc)+timedelta(hours=1)).isoformat()})
+    assert scheduled.status_code==409 and scheduled.json()["detail"]=="campaign_dispatcher_unavailable"
     assert client.post(f"/v1/campaign-definitions/{cid}/cancel",headers=h).json()["status"]=="CANCELLED"
     assert len(client.get("/v1/templates",headers=h).json())==1
     assert len(client.get("/v1/streams",headers=h).json())==1
