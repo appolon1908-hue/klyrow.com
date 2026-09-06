@@ -27,7 +27,7 @@ RUN cd /opt/klyrow/vendor \
     && apk verify --keys-dir /etc/apk/keys libexpat-2.8.4-r0.apk \
     && apk verify --keys-dir /etc/apk/keys libuuid-2.42.3-r1.apk \
     && apk add --no-cache --no-network ./libexpat-2.8.4-r0.apk ./libuuid-2.42.3-r1.apk \
-    && test "$(apk info -v libuuid)" = "libuuid-2.42.3-r1" \
+    && apk info --exists libuuid=2.42.3-r1 \
     && rm -f /var/log/apk.log \
     && nginx -v 2>&1 | grep -q 'nginx/1.30.4'
 COPY apps/web/nginx.conf /etc/nginx/conf.d/default.conf
