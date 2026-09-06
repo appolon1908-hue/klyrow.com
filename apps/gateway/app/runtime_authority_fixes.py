@@ -80,10 +80,10 @@ def legacy_message_send_response(
     return response
 
 
-def operation_json_with_correlation(item: Any, session: Any) -> dict[str, Any]:
+def operation_json_with_correlation(item: Any, session: Any, **kwargs: Any) -> dict[str, Any]:
     """Preserve an IntegrationOutbox envelope correlation ID in responses."""
 
-    result = _ORIGINAL_OPERATION_JSON(item, session)
+    result = _ORIGINAL_OPERATION_JSON(item, session, **kwargs)
     payload_json = getattr(item, "payload_json", None)
     if not payload_json:
         return result

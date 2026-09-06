@@ -201,7 +201,7 @@ def _idempotency_complete(
 
 
 def _operation_json(
-    item: MiddlewareCommandOperation | IntegrationOutbox, s: Session
+    item: MiddlewareCommandOperation | IntegrationOutbox, s: Session, *, results: dict | None = None
 ) -> dict[str, Any]:
     if isinstance(item, MiddlewareCommandOperation):
         state = {
@@ -229,22 +229,25 @@ def _operation_json(
         "DEAD_LETTER": "RECONCILIATION_REQUIRED",
         "CANCELLED": "CANCELLED",
     }.get(item.state, item.state)
-    persisted_result = None
-    if item.state == "COMPLETED":
-        persisted_result = s.scalar(
-            select(IntegrationResult)
-            .where(
-                IntegrationResult.outbox_id == item.id,
-                IntegrationResult.tenant_id == item.tenant_id,
-                IntegrationResult.source == item.target,
+    if results is not None:
+        persisted_result, late_observation = results[(item.tenant_id, item.id)]
+    else:
+        persisted_result = None
+        if item.state == "COMPLETED":
+            persisted_result = s.scalar(
+                select(IntegrationResult)
+                .where(
+                    IntegrationResult.outbox_id == item.id,
+                    IntegrationResult.tenant_id == item.tenant_id,
+                    IntegrationResult.source == item.target,
+                )
+                .order_by(IntegrationResult.created_at.desc(), IntegrationResult.id.desc())
             )
-            .order_by(IntegrationResult.created_at.desc(), IntegrationResult.id.desc())
-        )
-    late_observation = s.scalar(select(IntegrationResult.id).where(
-        IntegrationResult.outbox_id == item.id,
-        IntegrationResult.tenant_id == item.tenant_id,
-        IntegrationResult.source == "MAUTIC_LATE",
-    ).limit(1)) is not None
+        late_observation = item.target == "MAUTIC" and s.scalar(select(IntegrationResult.id).where(
+            IntegrationResult.outbox_id == item.id,
+            IntegrationResult.tenant_id == item.tenant_id,
+            IntegrationResult.source == "MAUTIC_LATE",
+        ).limit(1)) is not None
     result, result_metadata = result_readback(persisted_result)
     missing_result = item.state == "COMPLETED" and result_metadata["availability"] != "AVAILABLE"
     return {
@@ -260,6 +263,51 @@ def _operation_json(
         "correlation_id": None,
         "resource_version": item.updated_at.isoformat(),
     }
+
+
+def _operations_json(items: list, s: Session) -> list[dict[str, Any]]:
+    """At most two result queries per tenant, regardless of page size."""
+    groups: dict[str, list[IntegrationOutbox]] = {}
+    snapshots: dict[tuple[str, str], tuple[IntegrationResult | None, bool]] = {}
+    for item in items:
+        if isinstance(item, IntegrationOutbox):
+            groups.setdefault(item.tenant_id, []).append(item)
+            snapshots[(item.tenant_id, item.id)] = (None, False)
+    for tenant_id, rows in groups.items():
+        mautic_ids = [row.id for row in rows if row.target == "MAUTIC"]
+        if mautic_ids:
+            late_ids = s.scalars(select(IntegrationResult.outbox_id).where(
+                IntegrationResult.tenant_id == tenant_id,
+                IntegrationResult.outbox_id.in_(mautic_ids),
+                IntegrationResult.source == "MAUTIC_LATE",
+            ).distinct()).all()
+            for outbox_id in late_ids:
+                snapshots[(tenant_id, outbox_id)] = (None, True)
+        completed_ids = [row.id for row in rows if row.state == "COMPLETED"]
+        if completed_ids:
+            # Bound the fetched rows to one latest, correctly attributed result
+            # per operation rather than loading an unbounded history per page.
+            ranked = select(
+                IntegrationResult.id.label("result_id"),
+                func.row_number().over(
+                    partition_by=(IntegrationResult.tenant_id, IntegrationResult.outbox_id),
+                    order_by=(IntegrationResult.created_at.desc(), IntegrationResult.id.desc()),
+                ).label("position"),
+            ).join(IntegrationOutbox, (
+                (IntegrationResult.outbox_id == IntegrationOutbox.id)
+                & (IntegrationResult.tenant_id == IntegrationOutbox.tenant_id)
+                & (IntegrationResult.source == IntegrationOutbox.target)
+            )).where(
+                IntegrationResult.tenant_id == tenant_id,
+                IntegrationResult.outbox_id.in_(completed_ids),
+            ).subquery()
+            latest = s.scalars(select(IntegrationResult).join(
+                ranked, IntegrationResult.id == ranked.c.result_id,
+            ).where(ranked.c.position == 1)).all()
+            for result in latest:
+                identity = (result.tenant_id, result.outbox_id)
+                snapshots[identity] = (result, snapshots[identity][1])
+    return [_operation_json(item, s, results=snapshots) for item in items]
 
 
 def _find_operation(s: Session, operation_id: str, tenant_id: str) -> Any:
@@ -879,7 +927,7 @@ def operations(ctx: dict = Depends(auth), s: Session = Depends(db), limit: int =
         or item.target != "MAUTIC"
         or _has_permission(ctx, _mautic_permission(item.event_type))
     ]
-    items = [_operation_json(item, s) for item in visible_rows]
+    items = _operations_json(visible_rows, s)
     items.sort(key=lambda value: value["resource_version"], reverse=True)
     return {"items": items[:limit]}
 
@@ -1079,7 +1127,7 @@ def mautic_command(
 def mautic_operations(ctx: dict = Depends(auth), s: Session = Depends(db)) -> dict[str, Any]:
     rows = s.scalars(select(IntegrationOutbox).where(IntegrationOutbox.tenant_id == ctx["tenant"], IntegrationOutbox.target == "MAUTIC").order_by(IntegrationOutbox.created_at.desc()).limit(200)).all()
     visible = [item for item in rows if _has_permission(ctx, _mautic_permission(item.event_type))]
-    return {"items": [_operation_json(item, s) for item in visible]}
+    return {"items": _operations_json(visible, s)}
 
 
 @router.get("/v1/integrations/mautic/operations/{operation_id}")

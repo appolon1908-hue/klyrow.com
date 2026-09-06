@@ -1,12 +1,14 @@
 """Run the imported adapters against Klyrow's real HTTP and database boundary."""
 
 from dataclasses import replace
+import json
 
 import httpx
 import pytest
 from sqlalchemy import func, select
 
 from apps.gateway.app import main as core
+from apps.gateway.app.durable_results import FORMAT, read_control_response
 from app.klyrow_alert_adapter import KlyrowAlertAdapter
 from app.klyrow_email_adapter import KlyrowEmailAdapter
 from test_klyrow_alert_adapter import request as alert_request, settings
@@ -56,3 +58,21 @@ async def test_real_gateway_acceptance_replay_and_interrupted_write(gateway, mon
     with sessions() as session:
         assert session.scalar(select(func.count()).select_from(core.Message)) == 1
         assert session.scalar(select(func.count()).select_from(core.EmailOutbox)) == 0
+
+        replay = session.scalar(select(core.Idempotency))
+        assert json.loads(replay.response_json)["format"] == FORMAT
+        assert replay.resource_id == result.provider_operation_id
+        assert read_control_response(replay)["id"] == replay.resource_id
+
+
+def test_gateway_missing_result_keyring_refuses_without_committing(gateway, monkeypatch):
+    from apps.gateway.app.durable_keys import KEYRING_ENV
+    from test_middleware_email_contract import HEADERS, document
+    client, sessions, _ = gateway
+    monkeypatch.delenv(KEYRING_ENV, raising=False)
+    response = client.post("/v1/email/messages", json=document(), headers=HEADERS)
+    assert response.status_code == 503
+    assert response.json()["detail"] == "durable_result_unavailable"
+    with sessions() as session:
+        for model in (core.Message, core.EmailOutbox, core.Idempotency):
+            assert session.scalar(select(func.count()).select_from(model)) == 0

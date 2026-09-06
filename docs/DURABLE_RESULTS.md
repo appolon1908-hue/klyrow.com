@@ -105,3 +105,12 @@ preservation using only isolated synthetic files. Required PostgreSQL contract C
 also runs the row-lock/cancel/claim test. Full repository, OpenAPI, browser, image,
 security, signature, backup/restore and independent final-head review gates remain
 required; source tests do not certify runtime bindings or delivery.
+
+## Fresh installs and list-query bounds
+
+`generate-env` creates the private dedicated keyring before writing its configured
+path, including a custom runtime secret directory. Subsequent migrations refuse
+a missing configured keyring; they do not replace lost authority with a new key.
+Operation list serializers bulk-load the latest attributed result and late
+observations in at most two additional queries per tenant, preserving the same
+visibility, correlation, and reconciliation rules as detail reads.
