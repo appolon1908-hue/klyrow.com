@@ -1,0 +1,126 @@
+name: Bounded PR92 conflict validation
+on:
+  push:
+    branches: [repair/pr92-conflict-validation-20260906]
+permissions:
+  contents: read
+concurrency:
+  group: klyrow-pr92-conflict-validation-20260906
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: github.repository == 'appolon1908-hue/klyrow.com' && github.actor == 'appolon1908-hue'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      OLD_HEAD: 6a0c988918f8b6526cb105e469ab8b4f5c7e365e
+      BASE_MAIN: 72993681b8fa2ac87a998d3c23014fae562ed1e4
+      PR_BRANCH: fix/issue82-mutation-capabilities-20260906
+      RESULT_BRANCH: repair/pr92-conflict-result-20260906
+      KLYROW_SAFE_MODE: 'true'
+      KLYROW_PRODUCTION_GATE_PASSED: 'false'
+      LIVE_EMAIL_DELIVERY: 'false'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: 6a0c988918f8b6526cb105e469ab8b4f5c7e365e
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require unchanged source identities and prepare bounded merge
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$OLD_HEAD"
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$BASE_MAIN"
+          test "$(git ls-remote origin "refs/heads/$PR_BRANCH" | cut -f1)" = "$OLD_HEAD"
+          test -z "$(git ls-remote origin "refs/heads/$RESULT_BRANCH")"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          result=0
+          git merge --no-commit --no-ff "$BASE_MAIN" || result=$?
+          test "$result" -le 1
+          python3 - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True)
+          old = os.environ['OLD_HEAD']
+          main = os.environ['BASE_MAIN']
+          base = git('merge-base', old, main).strip()
+          assert base == 'd205073596a76e41d656d97c3622a7081e032324'
+          paths = {'apps/gateway/app/main.py', 'apps/gateway/app/messaging.py'}
+          conflicts = set(git('diff', '--name-only', '--diff-filter=U').splitlines())
+          assert conflicts and conflicts <= paths, conflicts
+          path = 'apps/gateway/app/main.py'
+          original = git('show', f'{base}:{path}')
+          incoming = git('show', f'{main}:{path}')
+          ours = git('show', f'{old}:{path}')
+          fallback = '            else:permission="klyrow.webhook" if "webhook" in request.url.path else "klyrow.send" if request.method not in {"GET","HEAD","OPTIONS"} else "klyrow.read"\n'
+          scheduling = '            elif request.method=="POST" and re.fullmatch(r"/v1/(?:campaigns|campaign-definitions)/[^/]+/schedule",request.url.path):permission="campaign.manage"\n'
+          capability = '            elif required_mutation_permission:=mutation_permission(request.method,request.url.path):permission=required_mutation_permission\n'
+          assert original.count(fallback) == ours.count(capability) == 1
+          assert incoming == original.replace(fallback, scheduling + fallback, 1)
+          assert scheduling not in ours
+          Path(path).write_text(ours.replace(capability, scheduling + capability, 1))
+          path = 'apps/gateway/app/messaging.py'
+          original = git('show', f'{base}:{path}')
+          incoming = git('show', f'{main}:{path}')
+          ours = git('show', f'{old}:{path}')
+          decorator = '@router.post("/campaign-definitions/{item_id}/schedule")\n'
+          guarded = '@router.post("/campaign-definitions/{item_id}/schedule", responses={409: {"description": "Campaign dispatcher unavailable; scheduling is not accepted."}})\n'
+          definition = 'def campaign_schedule(item_id:str,x:ScheduleIn,ctx=Depends(auth),s:Session=Depends(db)):\n'
+          permission = '    from .production_api import _require_permission\n    _require_permission(ctx,"campaign.manage")\n'
+          accepted = '    item.scheduled_at=x.scheduled_at;item.status="SCHEDULED";audit(s,ctx,"campaign.scheduled");s.commit();return {"status":item.status,"scheduled_at":item.scheduled_at}\n'
+          refused = '    raise HTTPException(409,"campaign_dispatcher_unavailable")\n'
+          assert original.count(decorator) == original.count(definition) == original.count(accepted) == 1
+          assert incoming == original.replace(decorator, guarded, 1).replace(definition, definition + permission, 1).replace(accepted, refused, 1)
+          assert ours.count(decorator) == ours.count(accepted) == 1
+          assert definition + '    require_permission(ctx, "campaign.manage")\n' in ours
+          Path(path).write_text(ours.replace(decorator, guarded, 1).replace(accepted, refused, 1))
+          subprocess.run(['git', 'add', *sorted(paths)], check=True)
+          assert not git('diff', '--name-only', '--diff-filter=U').strip()
+          changed = set(git('diff', '--cached', '--name-only').splitlines())
+          expected = paths | {'apps/gateway/app/production_api.py', 'docs/CAMPAIGN_SCHEDULING.md', 'tests/test_campaign_scheduling_truth.py', 'tests/test_control_mutation_idempotency.py', 'tests/test_messaging.py'}
+          assert changed == expected, changed
+          print('BOUNDED_CONFLICT_RESOLUTION=PASS')
+          PY
+          git diff --cached --check
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Validate combined permission and scheduling behavior without live credentials
+        shell: bash
+        env:
+          PYTHONPATH: .
+        run: |
+          set -Eeuo pipefail
+          python -m pip install -r apps/gateway/requirements.txt pytest openapi-spec-validator
+          python -m compileall -q apps/gateway
+          python -m pytest -q tests/test_mutation_capabilities.py tests/test_campaign_scheduling_truth.py tests/test_messaging.py tests/test_control_mutation_idempotency.py
+          git diff --quiet
+          git diff --cached --check
+      - name: Publish only a new non-production result branch
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$BASE_MAIN"
+          test "$(git ls-remote origin "refs/heads/$PR_BRANCH" | cut -f1)" = "$OLD_HEAD"
+          test -z "$(git ls-remote origin "refs/heads/$RESULT_BRANCH")"
+          git commit -m 'Merge current main into PR92, retaining capability and scheduling guards'
+          test "$(git rev-parse HEAD^1)" = "$OLD_HEAD"
+          test "$(git rev-parse HEAD^2)" = "$BASE_MAIN"
+          authorization="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::$authorization"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $authorization"
+          git push origin "HEAD:refs/heads/$RESULT_BRANCH"
+          printf 'RESULT_SHA=%s\nRESULT_TREE=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+          echo 'PROTECTED_MAIN_CHANGED=NO'
+          echo 'PRODUCTION_CHANGED=NO'
+          echo 'EXTERNAL_DELIVERY_ENABLED=NO'
