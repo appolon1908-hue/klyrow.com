@@ -2,7 +2,6 @@
 """Exercise a candidate on disposable Docker resources with no external network."""
 import argparse
 import json
-import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -114,7 +113,17 @@ $parameters = [
                                'as $parameter=>$file) {if (!hash_equals(file_get_contents("/run/secrets/".$file),'
                                '$parameters[$parameter])) {exit(1);}} echo "file authority verified";')
             assert effective.stdout == 'file authority verified'
+            for name, data in {'empty': b'', 'multiline': b'ci-only-sensitive-value\nsecond',
+                               'oversized': b'x' * 65537}.items():
+                (base / 'secrets' / name).write_bytes(data)
+                (base / 'secrets' / name).chmod(0o444)
+            (base / 'secrets' / 'linked').symlink_to('db')
             for bad_env in ('MAUTIC_DB_PASSWORD_FILE=/run/secrets/missing',
+                            'MAUTIC_DB_PASSWORD_FILE=/run/secrets/empty',
+                            'MAUTIC_DB_PASSWORD_FILE=/run/secrets/multiline',
+                            'MAUTIC_DB_PASSWORD_FILE=/run/secrets/oversized',
+                            'MAUTIC_DB_PASSWORD_FILE=/run/secrets/linked',
+                            'MAUTIC_DB_PASSWORD_FILE=/run/secrets/../escape',
                             'MAUTIC_DB_PASSWORD=ci-only-sensitive-value'):
                 failed = docker('run', '--rm', '--network', 'none', *mounts, *env, '--env', bad_env,
                                 '--entrypoint', 'php', args.image, '-r',
@@ -125,7 +134,7 @@ $parameters = [
             for role in ('mautic_web', 'mautic_cron', 'mautic_worker'):
                 name = prefix + '-' + role
                 containers.append(name)
-                docker('run', '--detach', '--name', name, '--network', network,
+                restricted = ['--network', network,
                        '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
                        '--pids-limit', '128', '--memory', '1g', *mounts, *env,
                        '--tmpfs', '/tmp:rw,nosuid,nodev,uid=33,gid=33,mode=1770',
@@ -135,9 +144,23 @@ $parameters = [
                        '--mount', f'type=bind,src={base}/files,dst=/var/www/html/docroot/media/files',
                        '--mount', f'type=bind,src={base}/images,dst=/var/www/html/docroot/media/images',
                        '--env', 'DOCKER_MAUTIC_ROLE=' + role,
-                       '--env', 'KLYROW_MAUTIC_JOBS_ENABLED=true', args.image)
-                wait_ready(lambda: docker('exec', name, '/usr/local/bin/klyrow-mautic',
-                                          'healthcheck', check=False))
+                       '--env', 'KLYROW_MAUTIC_JOBS_ENABLED=true']
+                # Read-only bootstrap diagnostics use the same restrictions and
+                # synthetic data, with errors redacted by docker().
+                docker('run', '--rm', *restricted, '--entrypoint', 'php', args.image,
+                       'bin/console', '--no-interaction', '--no-debug', 'doctrine:query:sql', 'SELECT 1')
+                docker('run', '--detach', '--name', name, *restricted, args.image)
+                try:
+                    wait_ready(lambda: docker('exec', name, '/usr/local/bin/klyrow-mautic',
+                                              'healthcheck', check=False))
+                except RuntimeError:
+                    # This is a disposable synthetic fixture, never live logs.
+                    print(docker('logs', '--tail', '20', name, check=False).stdout)
+                    result = docker('exec', name, 'curl', '--max-time', '10', '--silent',
+                                    '--output', '/dev/null', '--write-out', '%{http_code}',
+                                    'http://127.0.0.1:8080/s/login', check=False)
+                    print('Local HTTP status:', result.stdout)
+                    raise
                 inspected = json.loads(docker('inspect', name).stdout)[0]
                 assert inspected['Image'] == image_info['Id']
                 assert inspected['HostConfig']['ReadonlyRootfs']
@@ -146,6 +169,13 @@ $parameters = [
                        'test ! -w /var/www/html/config/local.php; '
                        'test "$(awk \'/^CapEff:/ {print $2}\' /proc/1/status)" = 0000000000000000')
                 print(role + ': same image, non-root, read-only, healthy', flush=True)
+                if role == 'mautic_web':
+                    (base / 'images/probe.php').write_text('<?php echo "must-not-execute";')
+                    (base / 'images/.htaccess').write_text('Require all granted\n')
+                    for path in ('/media/images/probe.php', '/media/files/probe.php'):
+                        result = docker('exec', name, 'curl', '--silent', '--output', '/dev/null',
+                                        '--write-out', '%{http_code}', 'http://127.0.0.1:8080' + path)
+                        assert result.stdout == '403'
 
             for name in containers[1:]:
                 docker('stop', '--time', '35', name)
@@ -165,8 +195,14 @@ $parameters = [
                 docker('restart', '--time', '35', name)
                 wait_ready(lambda: docker('exec', name, '/usr/local/bin/klyrow-mautic',
                                           'healthcheck', check=False))
-            docker('exec', containers[1], 'php', 'bin/console', 'doctrine:query:sql',
-                   'SELECT id FROM klyrow_runtime_rehearsal WHERE id=1')
+            result = docker('exec', containers[1], 'php', '-r',
+                   'require "config/local.php"; '
+                   '$dsn=sprintf("mysql:host=%s;port=%s;dbname=%s", $parameters["db_host"], '
+                   '$parameters["db_port"], $parameters["db_name"]); '
+                   '$db=new PDO($dsn,$parameters["db_user"],$parameters["db_password"]); '
+                   'if ($db->query("SELECT COUNT(*) FROM klyrow_runtime_rehearsal WHERE id=1")'
+                   '->fetchColumn() != 1) {exit(1);} echo "persistent fixture verified";')
+            assert result.stdout == 'persistent fixture verified'
             print('Database failure, role restart, and persistent fixture readback passed.', flush=True)
     finally:
         for name in reversed(containers):

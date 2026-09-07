@@ -121,6 +121,11 @@ builds. It retains candidate evidence and has no registry publication permission
 Only the workflow's completed results establish those gates; this document is
 not a claim that an unexecuted or failed gate passed.
 
+For the eventual protected Compose change, the gateway's private
+`KLYROW_MAUTIC_API_URL` must be `http://mautic:8080`; its existing hostname and
+canonical-origin checks already support that port. That source configuration
+change is not selected in the current production Compose.
+
 ## Release and rollback boundary
 
 Production still uses its current approved digest and legacy volume. This change

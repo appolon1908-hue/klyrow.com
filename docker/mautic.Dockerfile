@@ -37,6 +37,7 @@ RUN echo '59ec10ac76c91171d4139dad05f70c1817022ce4ca068e9f9243e2189a5da9f4  comp
     && printf '\ndisplay_errors=Off\nlog_errors=On\nexpose_php=Off\n' > /usr/local/etc/php/conf.d/klyrow.ini
 
 COPY --chmod=0644 docker/mautic-runtime/local.php /var/www/html/config/local.php
+COPY --chmod=0644 docker/mautic-runtime/apache.conf /etc/apache2/conf-enabled/klyrow-media.conf
 COPY --chmod=0755 docker/mautic-runtime/runtime.py /usr/local/bin/klyrow-mautic
 
 # Flatten the sanitized filesystem so upstream generated cache/key fixtures and

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Non-root Mautic roles. No installer, migrations, fixture loading, or failed replay."""
 import datetime as dt
+import http.client
 import json
 import os
 from pathlib import Path
@@ -8,7 +9,6 @@ import signal
 import subprocess
 import sys
 import time
-import urllib.request
 
 APP = Path('/var/www/html')
 STATE = Path('/tmp/klyrow-mautic')
@@ -87,7 +87,7 @@ def run_jobs(role, counts):
                          for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGWINCH)}
     children = []
     last_slot = None
-    started = None
+    started = {}
     try:
         if role == 'mautic_worker':
             for queue, count in counts.items():
@@ -100,21 +100,22 @@ def run_jobs(role, counts):
             if role == 'mautic_worker' and any(child.poll() is not None for child in children):
                 raise RuntimeError('worker exited; container restart required')
             if role == 'mautic_cron':
-                if children:
-                    code = children[0].poll()
+                for child in children[:]:
+                    code = child.poll()
                     if code is not None:
-                        children.clear()
+                        children.remove(child)
+                        started.pop(child.pid)
                         if code != 0:
                             raise RuntimeError('scheduled command failed')
-                    elif time.monotonic() - started > 600:
+                    elif time.monotonic() - started[child.pid] > 600:
                         raise RuntimeError('scheduled command exceeded deadline')
                 slot = cron_slot(dt.datetime.now(dt.timezone.utc))
-                if not children and slot is not None and slot[0] != last_slot:
+                if slot is not None and (last_slot is None or slot[0] > last_slot):
                     last_slot, command = slot
                     children.append(subprocess.Popen(console(command), start_new_session=True,
                                                      stdout=subprocess.DEVNULL,
                                                      stderr=subprocess.DEVNULL))
-                    started = time.monotonic()
+                    started[children[-1].pid] = time.monotonic()
             write_health(role, children)
             time.sleep(0.25)
         return 0
@@ -127,9 +128,13 @@ def run_jobs(role, counts):
 
 def healthcheck(role):
     if role == 'mautic_web':
-        with urllib.request.urlopen('http://127.0.0.1:8080/s/login', timeout=5) as response:
-            if response.status != 200:
+        connection = http.client.HTTPConnection('127.0.0.1', 8080, timeout=5)
+        try:
+            connection.request('GET', '/s/login')
+            if connection.getresponse().status != 200:
                 return 1
+        finally:
+            connection.close()
     else:
         path = STATE / 'health.json'
         state = json.loads(path.read_text())
@@ -160,7 +165,8 @@ def main():
             Path('/tmp/apache2').mkdir(mode=0o700, exist_ok=True)
             os.execvp('apache2-foreground', ['apache2-foreground'])
         return run_jobs(role, counts)
-    except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, RuntimeError, http.client.HTTPException,
+            subprocess.SubprocessError):
         print('Klyrow Mautic runtime unavailable; inspect approved private diagnostics.', file=sys.stderr)
         return 1
 
