@@ -4,23 +4,104 @@ on:
     branches: [workbench/klyrow-issues-20260907]
     paths: [.github/workflows/klyrow-issue-workbench.yml]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  source:
+  validate-and-publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: source
+    services:
+      postgres:
+        image: postgres:17.6-bookworm
+        env:
+          POSTGRES_DB: klyrow_ci
+          POSTGRES_USER: klyrow
+          POSTGRES_PASSWORD: ci-only-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U klyrow -d klyrow_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           ref: 215adf292397f5f2872d36fbb50d88f7551eaeac
+          path: transport
           persist-credentials: false
-      - name: Export transport for exact-byte verification
-        run: |
-          mkdir -p "$RUNNER_TEMP/transport"
-          cp .workbench/integration-authority.patch.gz.b64 "$RUNNER_TEMP/transport/patch.b64"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          name: patch-transport-verification
-          path: ${{ runner.temp }}/transport/
-          retention-days: 1
-          if-no-files-found: error
+          ref: 6da623eea278ee7ccb9d7c4d2eaa96c5194cf594
+          path: source
+      - name: Apply only the checksum-bound local patch
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 6da623eea278ee7ccb9d7c4d2eaa96c5194cf594
+          python - <<'PY'
+          import base64, gzip, hashlib, subprocess
+          from pathlib import Path
+          encoded = Path('../transport/.workbench/integration-authority.patch.gz.b64').read_text()
+          assert hashlib.sha256(encoded.encode()).hexdigest() == 'caa4e31373d642b41781450679e56ab875c4dfbcde457068a2d7e557d882799b'
+          # Repair transport transcription only; the final patch/tree hashes are authoritative.
+          corrections = [
+              (447, 447, '', 'wKlz4FAwLcZcFSeFhr7Cqq9ngXxKuJsFE5q4YzybwSJbGMqfnH6M4HAZZyE/BNWgSqaUbwubTLCrmHld3ljwEcRTC3ORp/CCzjWEcRBMxTOMYWoHx5GIURLEYxmkO/c0C6H0mijE'),
+              (752, 753, 'Z', ''),
+              (4002, 4005, 'Mol', ''),
+              (11392, 11393, 'u', ''),
+          ]
+          for start, end, old, new in reversed(corrections):
+              assert encoded[start:end] == old
+              encoded = encoded[:start] + new + encoded[end:]
+          patch = gzip.decompress(base64.b64decode(encoded.strip(), validate=True))
+          assert hashlib.sha256(patch).hexdigest() == '3a69d0cd881e21cdf1228b83685d441d268723ab30d882fb02b610f6fc53ece4'
+          subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
+          subprocess.run(['git', 'apply', '-'], input=patch, check=True)
+          PY
+          git add apps/gateway/app/capabilities.py apps/gateway/app/main.py apps/gateway/app/operations.py apps/gateway/app/production_api.py tests/test_api.py tests/test_durable_operation_results.py tests/test_integration_authority.py docs/DURABLE_RESULTS.md docs/INTEGRATION_AUTHORITY.md docs/KLYROW_ISSUE_DISPOSITION_20260907.md
+          git diff --cached --check
+          test "$(git write-tree)" = 92c92f68e3cae415feb1f3607cae36b85878c916
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: source/apps/gateway/requirements.txt
+      - name: Install pinned application dependencies
+        run: pip install -r apps/gateway/requirements.txt pytest pip-audit openapi-spec-validator
+      - name: Apply disposable migrations twice
+        env:
+          KLYROW_DATABASE_URL: postgresql+psycopg://klyrow@127.0.0.1:5432/klyrow_ci
+          KLYROW_DATABASE_OWNER_PASSWORD_FILE: ${{ runner.temp }}/klyrow-db-owner-password
+          KLYROW_DATABASE_RUNTIME_PASSWORD_FILE: ${{ runner.temp }}/klyrow-db-runtime-password
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' 'ci-only-password' > "$KLYROW_DATABASE_OWNER_PASSWORD_FILE"
+          printf '%s' 'ci-runtime-only-password' > "$KLYROW_DATABASE_RUNTIME_PASSWORD_FILE"
+          trap 'shred -u "$KLYROW_DATABASE_OWNER_PASSWORD_FILE" "$KLYROW_DATABASE_RUNTIME_PASSWORD_FILE"' EXIT
+          python scripts/migrate
+          python scripts/migrate
+      - name: Complete repository regression suite
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m compileall -q apps/gateway
+          python -m pytest -q tests
+      - name: Real PostgreSQL command result and recovery races
+        env:
+          KLYROW_CONTRACT_POSTGRES_URL: postgresql+psycopg://klyrow:ci-only-password@127.0.0.1:5432/klyrow_ci
+        run: python -m pytest -q tests/test_middleware_email_contract.py tests/test_durable_operation_results.py
+      - name: Publish tested source only to the dedicated PR branch
+        run: |
+          set -euo pipefail
+          test "$(git write-tree)" = 92c92f68e3cae415feb1f3607cae36b85878c916
+          git diff --exit-code
+          target=fix/integration-authority-recovery-20260907
+          test "$(git ls-remote origin "refs/heads/$target" | cut -f1)" = 6da623eea278ee7ccb9d7c4d2eaa96c5194cf594
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(integrations): bind tenant grants and fence legacy recovery' -m 'Require exact typed service capabilities, validate resolver tenant responses, and share locked Mautic ambiguity guards. Related: #82, #85, #31, #21. No production activation.'
+          git push origin "HEAD:refs/heads/$target"
+          git rev-parse HEAD
+          git rev-parse HEAD^{tree}
