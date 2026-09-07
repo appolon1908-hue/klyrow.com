@@ -43,7 +43,7 @@ from .main import (
 )
 from .messaging import Template, TemplateUpdate, TemplateVersion, template_update, validate_html
 from .mautic_contract import SUPPORTED_MAUTIC_COMMANDS
-from .operations import IntegrationOutbox, IntegrationResult
+from .operations import IntegrationOutbox, IntegrationResult, require_safe_integration_recovery
 from .durable_results import read_control_response, seal_control_response, result_readback
 from .tenancy import (
     Organization,
@@ -1010,11 +1010,7 @@ def operation_reconcile(
             item.updated_at = now()
             changed = True
     else:
-        if item.target == "MAUTIC" and (item.state == "DEAD_LETTER" or s.scalar(
-            select(IntegrationResult.id).where(IntegrationResult.outbox_id == item.id,
-                IntegrationResult.tenant_id == item.tenant_id, IntegrationResult.source == "MAUTIC_LATE").limit(1)
-        ) is not None):
-            raise HTTPException(409, "operation_requires_provider_readback")
+        require_safe_integration_recovery(s, item)
         if item.state in {"RETRY", "DEAD_LETTER"}:
             item.state = "PENDING"
             item.last_error = None

@@ -405,3 +405,83 @@ def test_operation_lists_bulk_load_results_and_keep_tenant_and_correlation_guard
         assert rows["batch-0"]["reconciliation_required"] is False
         assert rows["batch-1"]["reconciliation_required"] is True
         assert all(row["correlation_id"] == "original-correlation" for row in rows.values())
+
+
+@pytest.mark.parametrize("surface", ["canonical", "legacy-admin"])
+@pytest.mark.parametrize("state,late", [("DEAD_LETTER", False), ("DEAD_LETTER", True), ("RETRY", True)])
+def test_every_recovery_surface_rejects_ambiguous_mautic(operation_db, surface, state, late):
+    from apps.gateway.app.operations import RecoverIn, recover_integration
+    with operation_db() as session:
+        item = operation(state, last_error="worker_lease_expired_ambiguous")
+        session.add(item)
+        if late:
+            session.add(result_row({"status": "RECONCILIATION_REQUIRED"}, source="MAUTIC_LATE"))
+        session.commit()
+        session.refresh(item)
+        before = (item.state, item.attempts, item.last_error, item.updated_at)
+        with pytest.raises(HTTPException) as denied:
+            if surface == "canonical":
+                operation_reconcile(item.id, CTX, session, "recovery-ambiguity-key")
+            else:
+                recover_integration(item.id, RecoverIn(reason="Synthetic recovery"),
+                                    {**CTX, "role": "platform_admin"}, session)
+        assert (denied.value.status_code, denied.value.detail) == (409, "operation_requires_provider_readback")
+        session.rollback()
+        session.refresh(item)
+        assert (item.state, item.attempts, item.last_error, item.updated_at) == before
+        assert session.scalar(select(func.count()).select_from(Idempotency)) == 0
+        assert _claim(session) is None
+
+
+@pytest.mark.parametrize("target,state", [("MAUTIC", "RETRY"), ("N8N", "RETRY"), ("ODOO", "DEAD_LETTER")])
+def test_safe_legacy_recovery_still_works_without_cross_tenant_observations(operation_db, target, state):
+    from apps.gateway.app.operations import RecoverIn, recover_integration
+    with operation_db() as session:
+        item = operation(state, target=target, last_error="connection_not_established")
+        session.add(item)
+        # A foreign tenant's observation must not change this tenant's authority.
+        session.add(result_row({"ok": True}, tenant_id="tenant-b", source="MAUTIC_LATE"))
+        session.commit()
+        response = recover_integration(item.id, RecoverIn(reason="Connection restored"),
+                                       {**CTX, "role": "platform_admin"}, session)
+        assert response["state"] == "PENDING" and response["attempts"] == 1
+        assert item.last_error is None
+
+
+@pytest.mark.skipif(not os.getenv("KLYROW_CONTRACT_POSTGRES_URL"), reason="Required CI supplies disposable PostgreSQL")
+@pytest.mark.parametrize("surface", ["canonical", "legacy-admin"])
+def test_recovery_rechecks_observation_after_competing_writer_commits(operation_db, surface):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from apps.gateway.app.operations import RecoverIn, locked_integration_outbox, recover_integration
+    with operation_db() as initial:
+        initial.add(operation("RETRY", last_error="connection_not_established"))
+        initial.commit()
+    started = Event()
+    def recover():
+        with operation_db() as recovery:
+            recovery.execute(text("SET LOCAL statement_timeout = '5s'"))
+            started.set()
+            try:
+                if surface == "canonical":
+                    operation_reconcile("operation-a", CTX, recovery, "competing-recovery-key")
+                else:
+                    recover_integration("operation-a", RecoverIn(reason="Synthetic retry"),
+                                        {**CTX, "role": "platform_admin"}, recovery)
+            except HTTPException as denied:
+                recovery.rollback()
+                return denied.status_code, denied.detail
+            return 200, "unexpected_requeue"
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with operation_db() as writer:
+            assert locked_integration_outbox(writer, "operation-a") is not None
+            writer.add(result_row({"status": "RECONCILIATION_REQUIRED"}, source="MAUTIC_LATE"))
+            writer.flush()
+            pending = pool.submit(recover)
+            assert started.wait(timeout=5)
+            writer.commit()
+        assert pending.result(timeout=10) == (409, "operation_requires_provider_readback")
+    with operation_db() as verify:
+        assert verify.get(IntegrationOutbox, "operation-a").state == "RETRY"
+        assert verify.scalar(select(func.count()).select_from(Idempotency)) == 0
+        assert _claim(verify) is None
