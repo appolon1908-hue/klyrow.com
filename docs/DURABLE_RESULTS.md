@@ -114,3 +114,11 @@ a missing configured keyring; they do not replace lost authority with a new key.
 Operation list serializers bulk-load the latest attributed result and late
 observations in at most two additional queries per tenant, preserving the same
 visibility, correlation, and reconciliation rules as detail reads.
+
+## Recovery API parity
+
+The canonical reconcile endpoint and legacy administrator integration-recovery
+endpoint share the same locked Mautic ambiguity guard. Neither can requeue a
+Mautic dead letter or an operation with a matching late observation without
+provider readback. See `INTEGRATION_AUTHORITY.md` for service-grant, tenant
+binding and competing-transaction regression coverage.

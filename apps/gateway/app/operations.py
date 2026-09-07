@@ -12,6 +12,7 @@ from sqlalchemy.orm import Mapped,Session,mapped_column
 from .main import Audit,Base,EmailOutbox,Event,Message,PostalEvent,Tenant,audit,auth,db,require
 from .messaging import DeliveryJob,WebhookAttempt
 from .durable_results import canonical, result_matches, seal_integration_result
+from .capabilities import has_service_permission
 
 router=APIRouter(prefix="/v1",tags=["Operations and integrations"]);now=lambda:datetime.now(timezone.utc)
 
@@ -54,10 +55,9 @@ def enqueue(s,ctx,target,event_type,aggregate_id,payload,key):
     item=IntegrationOutbox(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],target=target,event_type=event_type,aggregate_id=aggregate_id,payload_json=json.dumps(payload,separators=(",",":"),sort_keys=True),idempotency_key=key);s.add(item);return item,False
 
 def trusted_result_auth(ctx=Depends(auth)):
-    permissions=set(ctx.get("permissions") or [])|set(ctx.get("scopes") or [])
-    if ctx.get("sub")=="middleware-service":return ctx
-    if ctx.get("service") and str(ctx.get("identity_type") or "").upper() in {"SERVICE","SERVICE_ACCOUNT"} and "klyrow.integration.result.write" in permissions:return ctx
-    raise HTTPException(403,"trusted_integration_service_required")
+    if not has_service_permission(ctx,"klyrow.integration.result.write"):
+        raise HTTPException(403,"trusted_integration_service_required")
+    return ctx
 
 def integration_result_by_key(s:Session,tenant_id:str,source:str,result_key:str):
     return s.scalar(select(IntegrationResult).where(IntegrationResult.tenant_id==tenant_id,IntegrationResult.source==source,IntegrationResult.result_key==result_key))
@@ -66,6 +66,20 @@ def locked_integration_outbox(s:Session,item_id:str,tenant_id:Optional[str]=None
     query=select(IntegrationOutbox).where(IntegrationOutbox.id==item_id)
     if tenant_id is not None:query=query.where(IntegrationOutbox.tenant_id==tenant_id)
     return s.scalar(query.with_for_update().execution_options(populate_existing=True))
+
+def require_safe_integration_recovery(s:Session,item:IntegrationOutbox)->None:
+    """Call under the outbox row lock, shared with worker completion.
+
+    Ambiguous Mautic attempts require provider readback, never a blind resend.
+    Observations from other tenants or operations confer no authority here.
+    """
+    if item.target!="MAUTIC":return
+    if item.state=="DEAD_LETTER" or s.scalar(select(IntegrationResult.id).where(
+        IntegrationResult.tenant_id==item.tenant_id,
+        IntegrationResult.outbox_id==item.id,
+        IntegrationResult.source=="MAUTIC_LATE",
+    ).limit(1)) is not None:
+        raise HTTPException(409,"operation_requires_provider_readback")
 
 @router.post("/support/tickets",status_code=201)
 def support(x:SupportIn,ctx=Depends(auth),s:Session=Depends(db)):
@@ -142,6 +156,7 @@ def fail_integration(item_id:str,x:RecoverIn,ctx=Depends(require("platform_admin
 def recover_integration(item_id:str,x:RecoverIn,ctx=Depends(require("platform_admin")),s:Session=Depends(db)):
     item=locked_integration_outbox(s,item_id)
     if not item or item.state not in {"RETRY","DEAD_LETTER"}:raise HTTPException(404,"recoverable_integration_not_found")
+    require_safe_integration_recovery(s,item)
     item.state="PENDING";item.next_attempt_at=now();item.last_error=None;item.updated_at=now();audit(s,{**ctx,"tenant":item.tenant_id},"integration.delivery_recovered:"+item.target+":"+x.reason);s.commit();return {"state":item.state,"attempts":item.attempts,"target":item.target}
 @router.post("/admin/reconciliation",status_code=201)
 def reconcile(ctx=Depends(require("platform_admin")),s:Session=Depends(db)):

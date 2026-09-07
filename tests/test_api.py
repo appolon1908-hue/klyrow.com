@@ -131,7 +131,7 @@ def test_concurrent_middleware_command_insert_returns_durable_winner():
         def rollback(self):self.rolled_back=True
     session=ConcurrentSession()
     payload=MiddlewareCommandIn(command="email.reputation.snapshot.request.v1",payload={})
-    response=asyncio.run(middleware_command(payload,{"tenant":"a","sub":"middleware-service","service":True},session,"concurrent-command-key","a","concurrent-correlation"))
+    response=asyncio.run(middleware_command(payload,{"tenant":"a","sub":"middleware-service","service":True,"identity_type":"SERVICE","permissions":["klyrow.middleware.command.write"]},session,"concurrent-command-key","a","concurrent-correlation"))
     assert response["command_id"]==session.winner.command_id and response["state"]=="accepted"
     assert session.rolled_back is True
 

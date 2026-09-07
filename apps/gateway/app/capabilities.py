@@ -43,3 +43,29 @@ def has_permission(ctx: dict[str, Any], permission: str) -> bool:
 def require_permission(ctx: dict[str, Any], permission: str) -> None:
     if not has_permission(ctx, permission):
         raise HTTPException(403, "permission_denied")
+
+
+def has_service_permission(ctx: dict[str, Any], permission: str) -> bool:
+    """Require authenticated service type and an explicit, exact grant.
+
+    Subject names, human roles and wildcard grants are not service authority.
+    Invalid resolver/claim collections fail closed rather than raising a 500.
+    """
+    identity_type = ctx.get("identity_type")
+    if (ctx.get("service") is not True or not isinstance(identity_type, str)
+            or identity_type.upper() not in {"SERVICE", "SERVICE_ACCOUNT"}):
+        return False
+    granted: set[str] = set()
+    for field in ("permissions", "scopes"):
+        values = ctx.get(field)
+        if values is None:
+            continue
+        if isinstance(values, str):
+            granted.update(values.split())
+        elif isinstance(values, (list, tuple, set, frozenset)) and all(
+            isinstance(value, str) for value in values
+        ):
+            granted.update(values)
+        else:
+            return False
+    return permission in granted

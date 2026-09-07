@@ -6,7 +6,7 @@ from pathlib import Path
 from .delivery_safety import safe_mode_enabled
 from .durable_results import read_control_response, seal_control_response
 from .durable_keys import keyring_ready
-from .capabilities import mutation_permission
+from .capabilities import has_service_permission, mutation_permission
 from typing import Optional
 
 import httpx, jwt
@@ -229,8 +229,11 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
             if response.status_code!=200:raise HTTPException(403,"not_found")
             try:resolved=response.json()
             except (TypeError,ValueError):raise HTTPException(503,"authorization_unavailable")
-            if not resolved.get("authorized") or resolved.get("permission")!=permission:raise HTTPException(403,"not_found")
-            if not resolved.get("identity_id") or not resolved.get("tenant_id"):raise HTTPException(503,"authorization_unavailable")
+            if not isinstance(resolved,dict):raise HTTPException(503,"authorization_unavailable")
+            if resolved.get("authorized") is not True or resolved.get("permission")!=permission:raise HTTPException(403,"not_found")
+            if any(not isinstance(resolved.get(field),str) or not resolved[field].strip() for field in ("identity_id","tenant_id")):
+                raise HTTPException(503,"authorization_unavailable")
+            if requested_tenant and resolved["tenant_id"]!=requested_tenant:raise HTTPException(403,"not_found")
             ctx={"sub":resolved["identity_id"],"tenant":resolved["tenant_id"],"role":resolved.get("role","tenant_user"),"identity_type":resolved.get("identity_type"),"service":True,"permissions":[permission]}
             tenant=s.get(Tenant,ctx["tenant"])
             if not tenant or not tenant.enabled:raise HTTPException(403,"tenant_suspended")
@@ -239,7 +242,8 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
             if middleware_key and hmac.compare_digest(raw.encode(),middleware_key.encode()):
                 tenant=s.get(Tenant,requested_tenant) if requested_tenant else None
                 if not tenant or not tenant.enabled:raise HTTPException(403,"valid_tenant_required")
-                ctx={"sub":"middleware-service","tenant":tenant.id,"role":"tenant_admin","service":True}
+                ctx={"sub":"middleware-service","tenant":tenant.id,"role":"tenant_admin","service":True,
+                     "identity_type":"SERVICE","permissions":["klyrow.middleware.command.write","klyrow.integration.result.write"]}
             elif raw.startswith("kly_"):
                 key=s.scalar(select(ApiKey).where(ApiKey.key_hash==sha(raw),ApiKey.revoked==False))
                 if not key: raise ValueError()
@@ -267,7 +271,7 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
                     tenant_id=requested_tenant or identity.default_tenant_id
                     membership=s.scalar(select(TenantMember).where(TenantMember.tenant_id==tenant_id,TenantMember.user_id==identity.user_id,TenantMember.active==True)) if tenant_id else None
                     if not membership:raise HTTPException(403,"tenant_membership_required")
-                    ctx={"sub":identity.user_id,"oidc_sub":claims["sub"],"tenant":tenant_id,"role":membership.role,"identity_type":identity.identity_type,"scopes":set(str(claims.get("scope","")).split())}
+                    ctx={"sub":identity.user_id,"oidc_sub":claims["sub"],"tenant":tenant_id,"role":membership.role,"identity_type":identity.identity_type,"service":str(identity.identity_type).upper() in {"SERVICE","SERVICE_ACCOUNT"},"scopes":set(str(claims.get("scope","")).split())}
                 tenant=s.get(Tenant,ctx["tenant"])
                 if not tenant or not tenant.enabled:raise HTTPException(403,"account_suspended")
     except HTTPException: raise
@@ -297,9 +301,8 @@ def require(*roles):
     return inner
 
 def require_middleware_command_scope(ctx:dict):
-    scopes=set(ctx.get("scopes") or [])|set(ctx.get("permissions") or [])
-    if ctx.get("sub")=="middleware-service" or "klyrow.middleware.command.write" in scopes:return
-    raise HTTPException(403,"middleware_command_scope_required")
+    if not has_service_permission(ctx,"klyrow.middleware.command.write"):
+        raise HTTPException(403,"middleware_command_scope_required")
 
 def canary_configuration()->tuple[str,str,str,int]:
     try:maximum=int(os.getenv("KLYROW_CANARY_MAX_DELIVERIES","0"))
