@@ -1,0 +1,27 @@
+name: Isolated review source export
+on:
+  push:
+    branches: [workbench/klyrow-issues-20260907]
+    paths: [.github/workflows/klyrow-review-source.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: 415aac98d7fec9ecdf5c618d85a8043c86c28ab5
+          persist-credentials: false
+      - name: Export tracked source
+        run: |
+          mkdir -p "$RUNNER_TEMP/export"
+          git archive --format=tar.gz --prefix=klyrow/ HEAD > "$RUNNER_TEMP/export/source.tar.gz"
+          git rev-parse HEAD > "$RUNNER_TEMP/export/SOURCE_SHA.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: exact-pr100-review-source
+          path: ${{ runner.temp }}/export/
+          retention-days: 1
+          if-no-files-found: error
