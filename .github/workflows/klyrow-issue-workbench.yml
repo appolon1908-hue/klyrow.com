@@ -1,0 +1,28 @@
+name: Isolated Klyrow issue workbench
+on:
+  push:
+    branches: [workbench/klyrow-issues-20260907]
+    paths: [.github/workflows/klyrow-issue-workbench.yml]
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: 6da623eea278ee7ccb9d7c4d2eaa96c5194cf594
+          persist-credentials: false
+      - name: Export tracked source only
+        run: |
+          mkdir -p "$RUNNER_TEMP/source"
+          git archive --format=tar.gz --prefix=klyrow/ HEAD > "$RUNNER_TEMP/source/klyrow-source.tar.gz"
+          git rev-parse HEAD > "$RUNNER_TEMP/source/SOURCE_SHA.txt"
+          sha256sum "$RUNNER_TEMP/source/klyrow-source.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: exact-klyrow-source
+          path: ${{ runner.temp }}/source/
+          retention-days: 1
+          if-no-files-found: error
