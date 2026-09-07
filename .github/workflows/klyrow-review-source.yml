@@ -21,7 +21,7 @@ jobs:
           POSTGRES_PASSWORD: ci-only-password
         ports: ['5432:5432']
         options: >-
-          --health-cmd 'pg_isready -U klyrow -d klyrow_ci'
+          --health-cmd "pg_isready -U klyrow -d klyrow_ci"
           --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -31,7 +31,7 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          ref: 194f3bf34c4f0ee29c6557f7a9abd35cdad78312
+          ref: aa9c486738381499fcd7a6a0e92a1f77da9474d8
           path: source
       - name: Verify bounded patch bytes and source tree
         run: |
@@ -47,7 +47,7 @@ jobs:
           PY
           git add apps/gateway/app/durable_results.py apps/gateway/app/durable_retention.py apps/gateway/app/operations.py apps/gateway/app/production_api.py migrations/2026090701_durable_result_retention_holds.sql scripts/retain-durable-results tests/test_durable_operation_results.py tests/test_durable_retention_cli.py docs/DURABLE_RESULTS.md docs/DURABLE_RESULT_RETENTION.md
           git diff --cached --check
-          test "$(git write-tree)" = 0cc1c0cd5937c44890c3743aede5c3e0a77686d4
+          test "$(git write-tree)" = 0a610c3838e62be4d79c9d4f56a7bf2bd0f1953b
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
@@ -81,7 +81,7 @@ jobs:
       - name: Publish only the tested source to isolated transfer branch
         run: |
           set -euo pipefail
-          test "$(git write-tree)" = 0cc1c0cd5937c44890c3743aede5c3e0a77686d4
+          test "$(git write-tree)" = 0a610c3838e62be4d79c9d4f56a7bf2bd0f1953b
           git diff --exit-code
           target=workbench/verified-result-retention-20260907
           test -z "$(git ls-remote origin "refs/heads/$target")"
