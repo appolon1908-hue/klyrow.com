@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Offline result-payload retention and holds. Dry-run is the default."""
+from __future__ import annotations
+
+import argparse
+from datetime import datetime
+import hashlib
+import hmac
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+CONFIRM = "RETAIN_DURABLE_RESULTS_V1"
+MAX_BACKUP_BYTES = 1024**4
+
+
+def verify_backup(path: Path | None, expected: str) -> None:
+    """Verify bounded file bytes, not encryption, signatures or restore quality."""
+    if path is None or not path.is_absolute() or not re.fullmatch(r"[0-9a-f]{64}", expected):
+        raise ValueError("backup_required")
+    if any(part.is_symlink() for part in [path, *path.parents]):
+        raise ValueError("backup_path")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "rb", buffering=0) as stream:
+        before = os.fstat(stream.fileno())
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                or before.st_mode & 0o077 or before.st_nlink != 1
+                or not 0 < before.st_size <= MAX_BACKUP_BYTES):
+            raise ValueError("backup_file")
+        remaining, checksum = before.st_size, hashlib.sha256()
+        while remaining:
+            chunk = stream.read(min(1024**2, remaining))
+            if not chunk:
+                raise ValueError("backup_changed")
+            checksum.update(chunk)
+            remaining -= len(chunk)
+        if stream.read(1):
+            raise ValueError("backup_changed")
+        after = os.fstat(stream.fileno())
+        fields = ("st_dev", "st_ino", "st_size", "st_mode", "st_uid", "st_gid", "st_nlink", "st_mtime_ns", "st_ctime_ns")
+        if any(getattr(before, key) != getattr(after, key) for key in fields):
+            raise ValueError("backup_changed")
+        if not hmac.compare_digest(checksum.hexdigest(), expected):
+            raise ValueError("backup_mismatch")
+
+
+def execute(args) -> dict:
+    # Import database modules only after the CLI's root/confirmation/file guards.
+    from sqlalchemy import text
+    from apps.gateway.app.durable_retention import purge_result_batch, result_hold
+    from apps.gateway.app.main import DB
+    with DB() as session:
+        try:
+            if session.get_bind().dialect.name != "postgresql":
+                raise ValueError("postgresql_required")
+            session.execute(text("SET LOCAL lock_timeout = '2s'"))
+            session.execute(text("SET LOCAL statement_timeout = '30s'"))
+            if args.operation == "purge":
+                report = purge_result_batch(session, tenant_id=args.tenant, before=datetime.fromisoformat(args.before),
+                    after_id=args.after_id, limit=args.limit, apply=args.apply, expected_plan_sha256=args.expected_plan_sha256)
+            else:
+                report = result_hold(session, tenant_id=args.tenant, outbox_id=args.outbox_id,
+                    hold_id=args.hold_id, change_sha256=args.change_sha256,
+                    release=args.operation == "release-hold", apply=args.apply)
+            if args.apply:
+                session.commit()
+            else:
+                session.rollback()
+            return report
+        except Exception:
+            session.rollback()
+            raise
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="operation", required=True)
+    purge = sub.add_parser("purge")
+    purge.add_argument("--before", required=True, help="Fixed UTC-aware cutoff, not a relative duration")
+    purge.add_argument("--after-id", default="")
+    purge.add_argument("--limit", type=int, default=100)
+    purge.add_argument("--expected-plan-sha256", default="")
+    purge.add_argument("--backup-file", type=Path)
+    purge.add_argument("--backup-sha256", default="")
+    hold, release = sub.add_parser("hold"), sub.add_parser("release-hold")
+    for command in (hold, release):
+        command.add_argument("--outbox-id", required=True)
+        command.add_argument("--hold-id", required=True)
+        command.add_argument("--change-sha256", required=True, help="Hash of the separately approved change record")
+    for command in (purge, hold, release):
+        command.add_argument("--tenant", required=True)
+        command.add_argument("--apply", action="store_true")
+        command.add_argument("--confirm", default="")
+    args = parser.parse_args(argv)
+    try:
+        if os.geteuid() != 0:
+            raise ValueError("root_required")
+        if args.apply and args.confirm != CONFIRM:
+            raise ValueError("confirmation_required")
+        if args.operation == "purge" and args.apply:
+            if not re.fullmatch(r"[0-9a-f]{64}", args.expected_plan_sha256):
+                raise ValueError("plan_required")
+            verify_backup(args.backup_file, args.backup_sha256)
+        print(json.dumps(execute(args), sort_keys=True))
+        return 0
+    except Exception:
+        # Never expose database URLs, file paths, plaintext results or key IDs.
+        print("DURABLE_RESULT_RETENTION=BLOCKED", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

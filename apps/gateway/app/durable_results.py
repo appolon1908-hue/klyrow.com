@@ -137,16 +137,59 @@ def seal_integration_result(value, *, tenant_id, outbox_id, source, result_key):
     return seal(document, _binding("integration-result", tenant_id, outbox_id, source, result_key))
 
 
-def integration_document(row):
+def integration_record(row):
+    """Authenticate a payload or a retention tombstone in the same context."""
     value = unseal(row.payload_json, _binding("integration-result", row.tenant_id, row.outbox_id, row.source, row.result_key))
     envelope = _loads(row.payload_json)
-    if envelope.get("format") == FORMAT:
-        if set(value) != {"schema_version", "request_hash", "result"} or type(value["schema_version"]) is not int or value["schema_version"] != 1:
-            raise _unavailable()
-        if not isinstance(value["request_hash"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["request_hash"]):
-            raise _unavailable()
-        return redact_result(value["result"]), value["request_hash"]
-    return redact_result(value), hashlib.sha256(canonical(value)).hexdigest()
+    if envelope.get("format") != FORMAT:
+        return {"schema_version": 1, "request_hash": hashlib.sha256(canonical(value)).hexdigest(),
+                "result": redact_result(value)}
+    version = value.get("schema_version")
+    if type(version) is not int or version not in (1, 2):
+        raise _unavailable()
+    expected = {"schema_version", "request_hash", "result"} if version == 1 else {
+        "schema_version", "request_hash", "purged_at", "policy_sha256"}
+    if set(value) != expected or not isinstance(value.get("request_hash"), str) or not re.fullmatch(r"[0-9a-f]{64}", value["request_hash"]):
+        raise _unavailable()
+    if version == 1:
+        value["result"] = redact_result(value["result"])
+    else:
+        try:
+            stamp = value["purged_at"]
+            if not isinstance(stamp, str) or len(stamp) > 40:
+                raise ValueError
+            parsed = datetime.fromisoformat(stamp)
+            if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+                raise ValueError
+            if not isinstance(value["policy_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", value["policy_sha256"]):
+                raise ValueError
+        except (ValueError, TypeError):
+            raise _unavailable() from None
+    return value
+
+
+def integration_document(row):
+    value = integration_record(row)
+    return value.get("result", {}), value["request_hash"]
+
+
+def seal_result_tombstone(row, *, current: datetime, policy_sha256: str) -> str:
+    value = integration_record(row)
+    if value["schema_version"] == 2:
+        return row.payload_json
+    if (not isinstance(current, datetime) or current.tzinfo is None
+            or not isinstance(policy_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", policy_sha256)):
+        raise ValueError("invalid_retention_authority")
+    return seal({"schema_version": 2, "request_hash": value["request_hash"],
+                 "purged_at": current.astimezone(timezone.utc).isoformat(), "policy_sha256": policy_sha256},
+                _binding("integration-result", row.tenant_id, row.outbox_id, row.source, row.result_key))
+
+
+def result_retention_seconds() -> int:
+    retention = int(os.getenv("KLYROW_RESULT_RETENTION_SECONDS", "2592000"))
+    if not 3600 <= retention <= 7776000:
+        raise ValueError("invalid_result_retention")
+    return retention
 
 
 def result_matches(row, value):
@@ -159,20 +202,21 @@ def result_readback(row, *, current: datetime | None = None):
     if row is None:
         return {}, metadata
     try:
-        retention = int(os.getenv("KLYROW_RESULT_RETENTION_SECONDS", "2592000"))
-        if not 3600 <= retention <= 7776000:
-            raise ValueError
+        retention = result_retention_seconds()
         created = row.created_at
         if created.tzinfo is None:
             created = created.replace(tzinfo=timezone.utc)
         expires = created + timedelta(seconds=retention)
         metadata["expires_at"] = expires.isoformat()
+        value = integration_record(row)
+        if value["schema_version"] == 2:
+            metadata.update(availability="PURGED", purged_at=value["purged_at"])
+            return {}, metadata
         if expires <= (current or datetime.now(timezone.utc)):
             metadata["availability"] = "EXPIRED"
             return {}, metadata
-        payload, _ = integration_document(row)
         metadata["availability"] = "AVAILABLE"
-        return payload, metadata
+        return value["result"], metadata
     except (HTTPException, ValueError, TypeError, AttributeError, OverflowError, RecursionError):
         metadata["availability"] = "INVALID"
         return {}, metadata
@@ -180,6 +224,5 @@ def result_readback(row, *, current: datetime | None = None):
 
 def rewrap_integration_result(row):
     """Preserve the original semantic digest, including fields removed by redaction."""
-    payload, digest = integration_document(row)
-    return seal({"schema_version": 1, "request_hash": digest, "result": payload},
+    return seal(integration_record(row),
                 _binding("integration-result", row.tenant_id, row.outbox_id, row.source, row.result_key))

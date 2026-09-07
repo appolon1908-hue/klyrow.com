@@ -249,7 +249,7 @@ def _operation_json(
             IntegrationResult.source == "MAUTIC_LATE",
         ).limit(1)) is not None
     result, result_metadata = result_readback(persisted_result)
-    missing_result = item.state == "COMPLETED" and result_metadata["availability"] != "AVAILABLE"
+    missing_result = item.state == "COMPLETED" and result_metadata["availability"] not in {"AVAILABLE", "PURGED"}
     return {
         "operation_id": item.id,
         "status": state,
