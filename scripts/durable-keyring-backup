@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""Root-only keyring backup guards; never invoke Docker or generate new keys."""
+import argparse
+import os
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from apps.gateway.app.durable_backup import (
+    capture_keyring, check_archive, check_restore_coverage, check_source_unchanged,
+)
+
+
+def require_root() -> None:
+    if os.geteuid() != 0:
+        raise PermissionError("root_required")
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("operation", choices=("capture", "check-source", "check-archive", "check-restore"))
+    parser.add_argument("--env-file", type=Path)
+    parser.add_argument("--stage", type=Path, required=True)
+    args = parser.parse_args(argv)
+    try:
+        require_root()
+        if args.operation == "check-archive":
+            check_archive(args.stage)
+        else:
+            if args.env_file is None:
+                raise ValueError
+            functions = {"capture": capture_keyring, "check-source": check_source_unchanged,
+                         "check-restore": check_restore_coverage}
+            functions[args.operation](args.env_file, args.stage)
+        print("DURABLE_KEYRING_BACKUP=PASS")
+        return 0
+    except Exception:
+        print("DURABLE_KEYRING_BACKUP=BLOCKED", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
