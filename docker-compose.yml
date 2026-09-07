@@ -12,6 +12,7 @@ services:
       KLYROW_DATABASE_URL: postgresql+psycopg://klyrow_runtime@postgres:5432/klyrow
       KLYROW_DATABASE_PASSWORD_FILE: /run/secrets/klyrow_database_runtime_password
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
+      KLYROW_DURABLE_RESULT_KEYRING_FILE: /run/secrets/klyrow_durable_result_keyring
       KLYROW_POSTAL_API_KEY_FILE: /run/secrets/klyrow_postal_api_key
       KLYROW_METRICS_TOKEN_FILE: /run/secrets/klyrow_metrics_token
       KLYROW_MIDDLEWARE_API_KEY_FILE: /run/secrets/klyrow_middleware_api_key
@@ -41,7 +42,7 @@ services:
       EXTERNAL_EMAIL_DELIVERY: "false"
       PRODUCTION_PROVIDER_ROUTING: "false"
       MARKETING_DELIVERY: "false"
-    secrets: [klyrow_session_secret, klyrow_postal_api_key, klyrow_metrics_token, klyrow_middleware_api_key, klyrow_webhook_secret, klyrow_database_runtime_password]
+    secrets: [klyrow_durable_result_keyring, klyrow_session_secret, klyrow_postal_api_key, klyrow_metrics_token, klyrow_middleware_api_key, klyrow_webhook_secret, klyrow_database_runtime_password]
     volumes:
       - ./secrets/postal/webhook-signing-public.pem:/run/klyrow/postal-webhook-signing-public.pem:ro
       - /etc/codestra/mtls/server-a-event-client:/run/codestra-mtls/server-a:ro
@@ -118,11 +119,12 @@ services:
       KLYROW_DATABASE_URL: postgresql+psycopg://klyrow_runtime@postgres:5432/klyrow
       KLYROW_DATABASE_PASSWORD_FILE: /run/secrets/klyrow_database_runtime_password
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
+      KLYROW_DURABLE_RESULT_KEYRING_FILE: /run/secrets/klyrow_durable_result_keyring
       KLYROW_MAUTIC_API_URL: http://mautic
       KLYROW_MAUTIC_API_CLIENT_ID_FILE: /run/secrets/klyrow_mautic_api_client_id
       KLYROW_MAUTIC_API_CLIENT_SECRET_FILE: /run/secrets/klyrow_mautic_api_client_secret
     command: ["python", "-m", "app.service_worker"]
-    secrets: [klyrow_session_secret, klyrow_mautic_api_client_id, klyrow_mautic_api_client_secret, klyrow_database_runtime_password]
+    secrets: [klyrow_durable_result_keyring, klyrow_session_secret, klyrow_mautic_api_client_id, klyrow_mautic_api_client_secret, klyrow_database_runtime_password]
     depends_on:
       postgres: {condition: service_healthy}
       gateway-migrate: {condition: service_completed_successfully}
@@ -146,11 +148,12 @@ services:
       KLYROW_DATABASE_URL: postgresql+psycopg://klyrow_runtime@postgres:5432/klyrow
       KLYROW_DATABASE_PASSWORD_FILE: /run/secrets/klyrow_database_runtime_password
       KLYROW_SESSION_SECRET_FILE: /run/secrets/klyrow_session_secret
+      KLYROW_DURABLE_RESULT_KEYRING_FILE: /run/secrets/klyrow_durable_result_keyring
       KLYROW_METRICS_TOKEN_FILE: /run/secrets/klyrow_metrics_token
       KLYROW_SAFE_MODE: "true"
       KLYROW_EMBEDDED_WORKERS: "false"
     command: ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-    secrets: [klyrow_session_secret, klyrow_metrics_token, klyrow_database_runtime_password]
+    secrets: [klyrow_durable_result_keyring, klyrow_session_secret, klyrow_metrics_token, klyrow_database_runtime_password]
     depends_on:
       postgres: {condition: service_healthy}
       gateway-migrate: {condition: service_completed_successfully}
@@ -450,6 +453,8 @@ volumes:
   grafana_data: {}
   dkim_keys: {}
 secrets:
+  klyrow_durable_result_keyring:
+    file: '${KLYROW_DURABLE_RESULT_KEYRING_FILE:?set the root-owned durable-result keyring path}'
   klyrow_database_owner_password:
     file: '${KLYROW_DATABASE_OWNER_PASSWORD_FILE:?set the root-owned database owner password path}'
   klyrow_database_runtime_password:

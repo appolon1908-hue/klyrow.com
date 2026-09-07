@@ -11,6 +11,7 @@ from sqlalchemy.orm import Mapped,Session,mapped_column
 
 from .main import Audit,Base,EmailOutbox,Event,Message,PostalEvent,Tenant,audit,auth,db,require
 from .messaging import DeliveryJob,WebhookAttempt
+from .durable_results import canonical, result_matches, seal_integration_result
 
 router=APIRouter(prefix="/v1",tags=["Operations and integrations"]);now=lambda:datetime.now(timezone.utc)
 
@@ -64,7 +65,7 @@ def integration_result_by_key(s:Session,tenant_id:str,source:str,result_key:str)
 def locked_integration_outbox(s:Session,item_id:str,tenant_id:Optional[str]=None):
     query=select(IntegrationOutbox).where(IntegrationOutbox.id==item_id)
     if tenant_id is not None:query=query.where(IntegrationOutbox.tenant_id==tenant_id)
-    return s.scalar(query.with_for_update())
+    return s.scalar(query.with_for_update().execution_options(populate_existing=True))
 
 @router.post("/support/tickets",status_code=201)
 def support(x:SupportIn,ctx=Depends(auth),s:Session=Depends(db)):
@@ -82,18 +83,20 @@ def result(x:ResultIn,ctx=Depends(trusted_result_auth),s:Session=Depends(db)):
     outbox=locked_integration_outbox(s,x.outbox_id,ctx["tenant"])
     if not outbox:raise HTTPException(404,"not_found")
     if outbox.target not in {"N8N","ODOO"} or x.source!=outbox.target:raise HTTPException(403,"integration_result_source_mismatch")
-    payload_json=json.dumps(x.payload,separators=(",",":"),sort_keys=True)
+    try:canonical(x.payload)
+    except (ValueError,TypeError,RecursionError):raise HTTPException(422,"integration_result_invalid") from None
     prior=integration_result_by_key(s,ctx["tenant"],x.source,x.result_key)
     if prior:
-        if prior.outbox_id!=outbox.id or prior.payload_json!=payload_json:raise HTTPException(409,"integration_result_idempotency_conflict")
+        if prior.outbox_id!=outbox.id or not result_matches(prior,x.payload):raise HTTPException(409,"integration_result_idempotency_conflict")
         return {"id":prior.id,"duplicate":True}
     if outbox.state not in {"PENDING","PROCESSING","RETRY"}:raise HTTPException(409,"integration_operation_not_resultable")
+    payload_json=seal_integration_result(x.payload,tenant_id=ctx["tenant"],outbox_id=outbox.id,source=x.source,result_key=x.result_key)
     item=IntegrationResult(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],outbox_id=outbox.id,source=x.source,result_key=x.result_key,payload_json=payload_json);outbox.state="COMPLETED";outbox.lease_expires_at=None;outbox.last_error=None;outbox.updated_at=now();s.add(item);audit(s,ctx,"integration.result.accepted:"+x.source)
     try:s.commit()
     except IntegrityError:
         s.rollback();prior=integration_result_by_key(s,ctx["tenant"],x.source,x.result_key)
         if prior:
-            if prior.outbox_id!=x.outbox_id or prior.payload_json!=payload_json:raise HTTPException(409,"integration_result_idempotency_conflict")
+            if prior.outbox_id!=x.outbox_id or not result_matches(prior,x.payload):raise HTTPException(409,"integration_result_idempotency_conflict")
             return {"id":prior.id,"duplicate":True}
         raise
     return {"id":item.id,"duplicate":False}
