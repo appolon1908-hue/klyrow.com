@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          ref: 0c485374d084860677c000fa15d13f17b3ab00eb
+          ref: 4c9d3462ecf0ab6a293597035e2878e38771bd66
           path: transport
           persist-credentials: false
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -44,10 +44,14 @@ jobs:
           assert hashlib.sha256(patch).hexdigest() == 'c1ebe1abe49aadbf6d73a1f04752c5db183947c10a8e97cb17e852480480a596'
           subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
           subprocess.run(['git', 'apply', '-'], input=patch, check=True)
+          fixture = Path('../transport/.workbench/retention-fixture.patch').read_bytes()
+          assert hashlib.sha256(fixture).hexdigest() == 'c92630d7e2fee4ce2ccc490f141090cf3560e8a0535951e6bf73eb5125418938'
+          subprocess.run(['git', 'apply', '--check', '-'], input=fixture, check=True)
+          subprocess.run(['git', 'apply', '-'], input=fixture, check=True)
           PY
           git add apps/gateway/app/durable_results.py apps/gateway/app/durable_retention.py apps/gateway/app/operations.py apps/gateway/app/production_api.py migrations/2026090701_durable_result_retention_holds.sql scripts/retain-durable-results tests/test_durable_operation_results.py tests/test_durable_retention_cli.py docs/DURABLE_RESULTS.md docs/DURABLE_RESULT_RETENTION.md
           git diff --cached --check
-          test "$(git write-tree)" = 0a610c3838e62be4d79c9d4f56a7bf2bd0f1953b
+          test "$(git write-tree)" = 86ccb21f80dbaab58a3dac9a632c683543215868
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
@@ -81,7 +85,7 @@ jobs:
       - name: Publish only the tested source to isolated transfer branch
         run: |
           set -euo pipefail
-          test "$(git write-tree)" = 0a610c3838e62be4d79c9d4f56a7bf2bd0f1953b
+          test "$(git write-tree)" = 86ccb21f80dbaab58a3dac9a632c683543215868
           git diff --exit-code
           target=workbench/verified-result-retention-20260907
           test -z "$(git ls-remote origin "refs/heads/$target")"
