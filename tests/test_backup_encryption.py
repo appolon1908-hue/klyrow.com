@@ -1,4 +1,7 @@
 import os
+import io
+import tarfile
+import hashlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -11,7 +14,7 @@ def run(*args, cwd=None, env=None):
     return subprocess.run(args, cwd=cwd, env=env, check=True, text=True, capture_output=True)
 
 
-def test_encrypted_backup_restore_round_trip(tmp_path):
+def test_encrypted_backup_restore_round_trip(tmp_path, isolated_durable_result_keyring):
     if shutil.which("gpg") is None:
         raise AssertionError("gpg is required for backup certification")
 
@@ -20,7 +23,23 @@ def test_encrypted_backup_restore_round_trip(tmp_path):
         (fixture / directory).mkdir(parents=True, exist_ok=True)
     for name in ("backup", "archive-offhost", "restore", "lib.sh"):
         shutil.copy2(ROOT / "scripts" / name, fixture / "scripts" / name)
-    (fixture / ".env").write_text("KLYROW_ENV=test\n")
+    # Exercise the real backup guards as the test account; the production CLI's
+    # root-only boundary is independently covered in test_durable_backup_contract.
+    for name in ("durable_backup.py", "durable_keys.py"):
+        target = fixture / "apps/gateway/app" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / "apps/gateway/app" / name, target)
+    shutil.copy2(ROOT / "scripts/durable-keyring-backup", fixture / "scripts/actual-durable-keyring-backup")
+    (fixture / "scripts/durable-keyring-backup").write_text(
+        "import runpy\nfrom pathlib import Path\n"
+        "module=runpy.run_path(str(Path(__file__).with_name('actual-durable-keyring-backup')))\n"
+        "module['main'].__globals__['require_root']=lambda:None\n"
+        "raise SystemExit(module['main']())\n"
+    )
+    (fixture / ".env").write_text(
+        f"KLYROW_ENV=test\nKLYROW_DURABLE_RESULT_KEYRING_FILE={isolated_durable_result_keyring}\n"
+    )
+    (fixture / ".env").chmod(0o600)
     (fixture / "docker-compose.yml").write_text("services: {}\n")
     (fixture / "docker-compose.postal-provisioning.yml").write_text("services: {}\n")
     (fixture / "docker-compose.web.yml").write_text("services: {}\n")
@@ -88,6 +107,19 @@ esac
     for marker in (b"postgres-dump-fixture", b"mautic-dump-fixture", b"postal-dump-fixture", b"encrypted-only fixture"):
         assert marker not in ciphertext
 
+    decrypted = subprocess.run(
+        ["gpg", "--batch", "--homedir", str(gpg_home), "--decrypt", str(archive)],
+        check=True, capture_output=True,
+    ).stdout
+    with tarfile.open(fileobj=io.BytesIO(decrypted), mode="r:gz") as bundle:
+        archived_key = bundle.extractfile("durable-result-keyring.json").read()
+        assert archived_key == isolated_durable_result_keyring.read_bytes()
+        assert bundle.getmember("durable-result-keyring.json").mode == 0o600
+        key_line = hashlib.sha256(archived_key).hexdigest().encode() + b"  durable-result-keyring.json"
+        assert key_line in bundle.extractfile("MANIFEST.sha256").read().splitlines()
+    assert archived_key not in ciphertext
+    assert "DURABLE_KEYRING_BACKUP=PASS" not in result.stdout
+
     env.update(
         KLYROW_BACKUP_PRIVATE_KEY_FILE=str(private_key),
         CONFIRM_RESTORE="RESTORE_KLYROW",
@@ -101,6 +133,17 @@ esac
     assert "import_definitions -" not in calls
     assert calls.index("mautic sh -lc") < calls.rindex("mautic tar -xz")
     assert "import_definitions -" not in (ROOT / "scripts" / "restore-verify").read_text()
+    # A lost or replaced key must stop the same shell restore before Docker.
+    from apps.gateway.app.durable_keys import new_keyring_document
+    isolated_durable_result_keyring.write_text(new_keyring_document())
+    docker_log.write_text("")
+    blocked = subprocess.run(
+        [str(fixture / "scripts/restore"), str(archive)], cwd=fixture, env=env,
+        text=True, capture_output=True,
+    )
+    assert blocked.returncode != 0
+    assert "DURABLE_KEYRING_BACKUP=BLOCKED" in blocked.stderr
+    assert docker_log.read_text() == ""
 
 
 def test_backup_scripts_fail_closed_contract():

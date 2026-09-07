@@ -722,7 +722,10 @@ def health_alias(s:Session=Depends(db)):
 @app.get("/healthz")
 def healthz(s:Session=Depends(db)):s.execute(select(1));return {"status":"ok"}
 @app.get("/readyz")
-def readyz(s:Session=Depends(db)):s.execute(select(1));return {"status":"ready","safe_mode":SAFE_MODE}
+def readyz(s:Session=Depends(db)):
+    s.execute(select(1))
+    if not keyring_ready():raise HTTPException(503,"durable_result_keys_unavailable")
+    return {"status":"ready","safe_mode":SAFE_MODE}
 @app.get("/readiness")
 def readiness_alias(s:Session=Depends(db)):
     result=readyz(s)

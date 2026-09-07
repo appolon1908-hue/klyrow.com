@@ -23,6 +23,7 @@ if [[ "$gpg_home" == "$stage/gnupg" ]]; then
 fi
 gpg --batch --homedir "$gpg_home" --decrypt "$archive" | tar -xz -C "$stage"
 (cd "$stage" && sha256sum -c MANIFEST.sha256)
+python3 scripts/durable-keyring-backup check-restore --env-file "$ROOT/.env" --stage "$stage" >&2
 
 docker compose exec -T postgres pg_restore -U klyrow --clean --if-exists -d klyrow <"$stage/klyrow.dump"
 gzip -dc "$stage/mautic.sql.gz" | docker compose exec -T mautic-db sh -lc 'MYSQL_PWD="$MARIADB_ROOT_PASSWORD" exec mariadb -uroot "$MARIADB_DATABASE"'

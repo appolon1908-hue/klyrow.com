@@ -36,8 +36,13 @@ if [[ "$gpg_home" == "$stage/gnupg" ]]; then
 fi
 gpg --batch --homedir "$gpg_home" --decrypt "$archive" | tar -xz -C "$stage"
 (cd "$stage" && sha256sum -c MANIFEST.sha256)
+python3 scripts/durable-keyring-backup check-archive --stage "$stage" >&2
+# A private, container-readable projection of the archived keys, not fresh keys.
+install -m 0400 -o 10001 -g 10001 "$stage/durable-result-keyring.json" "$stage/durable-result-keyring.runtime.json"
 printf '%s\n' 'restore-verification-session-secret-not-for-production' >"$stage/session-secret"
 printf '%s\n' 'restore-runtime-verification-password' >"$stage/database-runtime-password"
+chown 10001:10001 "$stage/session-secret" "$stage/database-runtime-password"
+chmod 0400 "$stage/session-secret" "$stage/database-runtime-password"
 
 docker run --detach --name "$pg_name" --network none --tmpfs /var/lib/postgresql/data:rw,noexec,nosuid \
   -e POSTGRES_DB=klyrow -e POSTGRES_USER=klyrow -e POSTGRES_PASSWORD=restore-verification \
@@ -79,6 +84,8 @@ docker exec "$rabbit_name" rabbitmqctl -q list_queues name messages --formatter 
 
 docker run --detach --name "$gateway_name" --network "container:$pg_name" --read-only --tmpfs /tmp:rw,noexec,nosuid \
   -v "$stage/session-secret:/run/secrets/session-secret:ro" \
+  -v "$stage/durable-result-keyring.runtime.json:/run/secrets/durable-result-keyring.json:ro" \
+  -e KLYROW_DURABLE_RESULT_KEYRING_FILE=/run/secrets/durable-result-keyring.json \
   -v "$stage/database-runtime-password:/run/secrets/database-runtime-password:ro" \
   -e KLYROW_ENV=production -e KLYROW_SAFE_MODE=true -e LIVE_EMAIL_DELIVERY=false \
   -e EXTERNAL_EMAIL_DELIVERY=false -e PRODUCTION_PROVIDER_ROUTING=false \
@@ -91,5 +98,7 @@ ready 45 docker exec "$gateway_name" python -c \
   "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readiness',timeout=2).read()"
 docker exec "$gateway_name" python -c \
   "import json,urllib.request; p=json.load(urllib.request.urlopen('http://127.0.0.1:8000/capabilities')); assert p['external_delivery_enabled'] is False"
+
+docker exec "$gateway_name" python -m app.durable_backup
 
 printf 'SERVER37_RESTORE=PASS isolation=network_none delivery=false\n'
