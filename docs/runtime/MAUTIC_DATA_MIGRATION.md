@@ -125,3 +125,31 @@ rehearsals, not proof that production data or runtime has been migrated.
 Upstream references: Mautic image persistent-storage contract
 https://hub.docker.com/r/mautic/mautic and Python's tar security notes
 https://docs.python.org/3/library/tarfile.html#extraction-filters .
+
+## Concurrent-writer and nested-mount safeguards
+
+Every file hash and copy reads only the inventoried byte count, then one sentinel
+byte to reject growth. Copies compare content digests and opened-file metadata
+before/after reading, and reject short reads, short writes or changed metadata.
+A file that keeps growing cannot extend the copy/hash loop or its byte budget.
+The file is opened without buffering or symlink following and with nonblocking
+semantics so a replaced FIFO cannot hold the reader open.
+
+Source traversal pins directory descriptors. Each intermediate ancestor and
+opened file must have the root descriptor's Linux `/proc/self/fdinfo` `mnt_id`.
+This rejects same-filesystem bind mounts, including mounts on `var`,
+`docroot/media`, an allowlisted root, or an individual file. Device numbers and
+`Path.is_mount()` are not relied upon for this boundary. Missing or malformed
+kernel mount identity fails closed. The source root may itself be the approved
+read-only bind mount. No source writer is stopped by these checks; operator
+quiescence/fencing is still required, and privileged hostile namespace changes
+are outside this tool's authority.
+
+The hosted root rehearsal includes four actual nested same-filesystem bind
+mounts. Unit regressions cover bounded continuous-growth streams, truncation,
+same-size content changes, short reads/writes, missing kernel mount identity,
+and a mount change between inventory and copy. These tests use synthetic data
+only and do not establish production migration or restore approval.
+
+Reference: Linux kernel `/proc` documentation, sections on `mountinfo` and
+`fdinfo`: https://docs.kernel.org/filesystems/proc.html

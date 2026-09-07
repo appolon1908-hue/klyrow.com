@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
 import hashlib
 import io
 import json
@@ -71,40 +72,129 @@ def metadata(info: os.stat_result) -> dict:
     return {"uid": info.st_uid, "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode), "mtime_ns": info.st_mtime_ns}
 
 
+def mount_id(descriptor: int) -> int:
+    """Use the opened object's Linux mount identity, not its filesystem device."""
+    with open(f"/proc/self/fdinfo/{descriptor}", "rb") as stream:
+        information = stream.read(8193)
+    require(len(information) <= 8192, "mount_identity_unavailable")
+    matches = re.findall(rb"^mnt_id:\s+([0-9]+)$", information, re.MULTILINE)
+    require(len(matches) == 1, "mount_identity_unavailable")
+    return int(matches[0])
+
+
+@contextmanager
+def tree_root(root: Path):
+    checked_path(root)
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def open_beneath(root_descriptor: int, relative: str):
+    """Pin each ancestor and reject symlinks and *all* intervening bind mounts."""
+    path = PurePosixPath(relative)
+    require(not path.is_absolute() and path.parts and ".." not in path.parts, "unsafe_path")
+    expected_mount = mount_id(root_descriptor)
+    parent = os.dup(root_descriptor)
+    descriptor = None
+    try:
+        for index, part in enumerate(path.parts):
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+            if index < len(path.parts) - 1:
+                flags |= os.O_DIRECTORY
+            try:
+                descriptor = os.open(part, flags, dir_fd=parent)
+            except OSError as error:
+                if error.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise Blocked("symlink_or_nondirectory_rejected") from None
+                raise
+            require(mount_id(descriptor) == expected_mount, "nested_mount_rejected")
+            os.close(parent)
+            parent, descriptor = descriptor, None
+        yield parent
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent)
+
+
+def stable_identity(info: os.stat_result) -> tuple:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_uid,
+            info.st_gid, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def bounded_content(stream, size: int, output=None) -> str:
+    """Read at most size + one sentinel byte; never chase a growing file's EOF."""
+    require(type(size) is int and 0 <= size <= MAX_BYTES, "byte_limit")
+    digest = hashlib.sha256()
+    remaining = size
+    while remaining:
+        chunk = stream.read(min(1024**2, remaining))
+        require(isinstance(chunk, bytes) and 0 < len(chunk) <= remaining, "source_changed")
+        digest.update(chunk)
+        if output is not None:
+            require(output.write(chunk) == len(chunk), "copy_failed")
+        remaining -= len(chunk)
+    require(stream.read(1) == b"", "source_changed")
+    return digest.hexdigest()
+
+
 def inventory(root: Path, mapping: dict = ROOTS) -> list[dict]:
     entries, total = [], 0
-    device = root.stat().st_dev
-    for source, destination in mapping.items():
-        base = root / source
-        checked_path(base)
-        require(base.is_dir(), "persistent_directory_missing")
-        pending = [(base, destination)]
-        while pending:
-            path, name = pending.pop()
-            info = path.lstat()
-            require(info.st_dev == device and not path.is_mount(), "nested_mount_rejected")
-            require(not info.st_mode & 0o7000, "special_mode_rejected")
-            require(not os.listxattr(path, follow_symlinks=False), "extended_metadata_rejected")
-            entry = {"path": name, **metadata(info)}
-            if stat.S_ISDIR(info.st_mode):
-                entry.update(kind="directory", size=0)
-                children = sorted(path.iterdir(), reverse=True)
-                pending.extend((child, name + "/" + child.name) for child in children)
-            else:
-                require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "special_file_rejected")
-                total += info.st_size
-                require(total <= MAX_BYTES, "byte_limit")
-                with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:
-                    before = os.fstat(stream.fileno())
-                    sha = hashlib.file_digest(stream, "sha256").hexdigest()
-                    after = os.fstat(stream.fileno())
-                require((before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) ==
-                        (after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) ==
-                        (info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns), "source_changed")
-                entry.update(kind="file", size=info.st_size, sha256=sha)
-            require(len(entries) < MAX_FILES, "entry_limit")
-            entries.append(entry)
+    with tree_root(root) as root_descriptor:
+        for source, destination in mapping.items():
+            # Include intermediate ancestors (e.g. var and docroot/media) in the
+            # descriptor walk even though they are not themselves copied.
+            try:
+                with open_beneath(root_descriptor, source) as base:
+                    require(stat.S_ISDIR(os.fstat(base).st_mode), "persistent_directory_missing")
+            except FileNotFoundError:
+                raise Blocked("persistent_directory_missing") from None
+            pending = [(source, destination)]
+            while pending:
+                relative, name = pending.pop()
+                with open_beneath(root_descriptor, relative) as descriptor:
+                    info = os.fstat(descriptor)
+                    require(not info.st_mode & 0o7000, "special_mode_rejected")
+                    require(not os.listxattr(descriptor), "extended_metadata_rejected")
+                    entry = {"path": name, **metadata(info)}
+                    if stat.S_ISDIR(info.st_mode):
+                        entry.update(kind="directory", size=0)
+                        children = []
+                        with os.scandir(descriptor) as iterator:
+                            for child in iterator:
+                                require(len(entries) + len(pending) + len(children) + 1 < MAX_FILES, "entry_limit")
+                                children.append(child.name)
+                        pending.extend((relative + "/" + child, name + "/" + child)
+                                       for child in sorted(children, reverse=True))
+                    else:
+                        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "special_file_rejected")
+                        total += info.st_size
+                        require(total <= MAX_BYTES, "byte_limit")
+                        # Unbuffered reads keep the limit effective at the descriptor.
+                        with os.fdopen(os.dup(descriptor), "rb", buffering=0) as stream:
+                            sha = bounded_content(stream, info.st_size)
+                        entry.update(kind="file", size=info.st_size, sha256=sha)
+                    require(stable_identity(os.fstat(descriptor)) == stable_identity(info), "source_changed")
+                require(len(entries) < MAX_FILES, "entry_limit")
+                entries.append(entry)
     return sorted(entries, key=lambda entry: entry["path"])
+
+
+def copy_entry(root_descriptor: int, relative: str, entry: dict, target: Path) -> None:
+    with open_beneath(root_descriptor, relative) as descriptor:
+        before = os.fstat(descriptor)
+        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and
+                before.st_size == entry["size"] and metadata(before) ==
+                {key: entry[key] for key in ("uid", "gid", "mode", "mtime_ns")}, "source_changed")
+        require(not os.listxattr(descriptor), "extended_metadata_rejected")
+        with os.fdopen(os.dup(descriptor), "rb", buffering=0) as original, target.open("xb") as output:
+            digest = bounded_content(original, entry["size"], output)
+        require(digest == entry["sha256"] and
+                stable_identity(os.fstat(descriptor)) == stable_identity(before), "source_changed")
 
 
 def validate_manifest(document: dict) -> None:
@@ -297,15 +387,17 @@ def migrate(args) -> dict:
     require(args.recipient_file is not None and args.recipient_fingerprint is not None, "backup_recipient_required")
     with staging(args.destination.parent) as stage:
         inverse = {value: key for key, value in ROOTS.items()}
-        for entry in manifest["entries"]:
-            target = stage / entry["path"]
-            relative = PurePosixPath(entry["path"])
-            source = args.source / inverse[relative.parts[0]] / Path(*relative.parts[1:])
-            if entry["kind"] == "directory":
-                target.mkdir(mode=0o700)
-            else:
-                with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW), "rb") as original, target.open("xb") as copy:
-                    shutil.copyfileobj(original, copy, 1024**2)
+        with tree_root(args.source) as root_descriptor:
+            for entry in manifest["entries"]:
+                target = stage / entry["path"]
+                relative = PurePosixPath(entry["path"])
+                source = str(PurePosixPath(inverse[relative.parts[0]], *relative.parts[1:]))
+                if entry["kind"] == "directory":
+                    with open_beneath(root_descriptor, source) as descriptor:
+                        require(stat.S_ISDIR(os.fstat(descriptor).st_mode), "source_changed")
+                    target.mkdir(mode=0o700)
+                else:
+                    copy_entry(root_descriptor, source, entry, target)
         restore_metadata(stage, manifest["entries"])
         check_tree(stage, manifest)
         require(inventory(args.source) == manifest["entries"], "source_changed")

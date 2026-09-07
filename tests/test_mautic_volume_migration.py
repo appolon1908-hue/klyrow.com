@@ -345,3 +345,153 @@ def test_real_readonly_mount_and_root_cli(sample, recipient, tmp_path):
         m.check_tree(restore.destination, document(sample))
     finally:
         subprocess.run(["umount", str(mountpoint)], check=True)
+
+
+@pytest.mark.parametrize("size", [0, 1, 1024**2 + 13])
+def test_growing_stream_cannot_expand_copy_or_hash_budget(size):
+    class Endless:
+        consumed = 0
+        def read(self, count):
+            assert 0 < count <= 1024**2
+            self.consumed += count
+            return b"x" * count
+    for output in (None, io.BytesIO()):
+        stream = Endless()
+        with pytest.raises(m.Blocked, match="source_changed"):
+            m.bounded_content(stream, size, output)
+        assert stream.consumed == size + 1
+        if output is not None:
+            assert len(output.getvalue()) == size
+
+
+@pytest.mark.parametrize("payload,size", [(b"", 1), (b"short", 10)])
+def test_truncated_stream_never_produces_a_successful_copy(payload, size):
+    output = io.BytesIO()
+    with pytest.raises(m.Blocked, match="source_changed"):
+        m.bounded_content(io.BytesIO(payload), size, output)
+    assert output.getvalue() == payload
+
+
+def test_short_reads_still_copy_exact_content():
+    class ShortReader(io.BytesIO):
+        def read(self, count):
+            return super().read(min(count, 2))
+    output = io.BytesIO()
+    assert m.bounded_content(ShortReader(b"correct"), 7, output) == hashlib.sha256(b"correct").hexdigest()
+    assert output.getvalue() == b"correct"
+
+
+def test_short_writes_are_rejected():
+    class ShortWriter:
+        def write(self, value):
+            return len(value) - 1
+    with pytest.raises(m.Blocked, match="copy_failed"):
+        m.bounded_content(io.BytesIO(b"correct"), 7, ShortWriter())
+
+
+@pytest.mark.parametrize("change", ["append", "truncate", "replace-content"])
+def test_copy_rejects_inflight_change_before_checkpoint(sample, offline, recipient, monkeypatch, change):
+    original = m.bounded_content
+    source = sample.source / "config/sample.txt"
+    expected_size = source.stat().st_size
+    observed = []
+    def mutate(stream, size, output=None):
+        if output is not None and not observed:
+            if change == "append":
+                with source.open("ab") as writer:
+                    writer.write(b"appended-outside-readonly-view")
+            elif change == "truncate":
+                source.write_bytes(b"x")
+            else:
+                source.write_bytes(b"X" * expected_size)
+            try:
+                return original(stream, size, output)
+            finally:
+                observed.append(output.tell())
+        return original(stream, size, output)
+    monkeypatch.setattr(m, "bounded_content", mutate)
+    with pytest.raises(m.Blocked, match="source_changed"):
+        m.migrate(apply_args(sample, recipient))
+    assert len(observed) == 1 and observed[0] <= expected_size
+    assert not sample.destination.exists() and not sample.backup_file.exists()
+    assert not list(sample.destination.parent.iterdir())
+
+
+def test_inventory_hashing_is_also_bounded_on_inflight_append(sample, monkeypatch):
+    original = m.bounded_content
+    source = sample.source / "config/sample.txt"
+    expected_size = source.stat().st_size
+    observed = []
+    def grow(stream, size, output=None):
+        with source.open("ab") as writer:
+            writer.write(b"unexpected-growth")
+        try:
+            return original(stream, size, output)
+        finally:
+            observed.append(stream.tell())
+    monkeypatch.setattr(m, "bounded_content", grow)
+    with pytest.raises(m.Blocked, match="source_changed"):
+        m.inventory(sample.source)
+    assert observed == [expected_size + 1]
+
+
+@pytest.mark.parametrize("relative", ["config", "var", "docroot/media", "config/sample.txt"])
+def test_descriptor_mount_identity_rejects_same_device_mounts(sample, monkeypatch, relative):
+    original = m.mount_id
+    nested_inode = (sample.source / relative).stat().st_ino
+    assert (sample.source / relative).stat().st_dev == sample.source.stat().st_dev
+    def nested(descriptor):
+        return original(descriptor) + (1 if os.fstat(descriptor).st_ino == nested_inode else 0)
+    monkeypatch.setattr(m, "mount_id", nested)
+    with pytest.raises(m.Blocked, match="nested_mount_rejected"):
+        m.inventory(sample.source)
+
+
+def test_copy_rechecks_mount_identity_after_inventory(sample, monkeypatch, tmp_path):
+    entry = next(item for item in document(sample)["entries"] if item["path"] == "config/sample.txt")
+    original = m.mount_id
+    ancestor_inode = (sample.source / "config").stat().st_ino
+    monkeypatch.setattr(m, "mount_id", lambda fd: original(fd) + (os.fstat(fd).st_ino == ancestor_inode))
+    target = tmp_path / "copy"
+    with m.tree_root(sample.source) as descriptor, pytest.raises(m.Blocked, match="nested_mount_rejected"):
+        m.copy_entry(descriptor, "config/sample.txt", entry, target)
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("raw", [b"pos:\t0\n", b"mnt_id:\t123\nmnt_id:\t123\n", b"mnt_id:\t-1\n", b"x" * 8193])
+def test_missing_or_malformed_kernel_mount_identity_fails_closed(monkeypatch, raw):
+    monkeypatch.setattr(m, "open", lambda *args, **kwargs: io.BytesIO(raw), raising=False)
+    with pytest.raises(m.Blocked, match="mount_identity_unavailable"):
+        m.mount_id(100)
+
+
+@pytest.mark.skipif(os.getenv("KLYROW_MAUTIC_MOUNT_REHEARSAL") != "1", reason="explicit isolated root mount rehearsal only")
+@pytest.mark.parametrize("relative", ["config", "var", "docroot/media", "config/sample.txt"])
+def test_real_same_filesystem_nested_bind_mount_is_rejected(sample, tmp_path, relative):
+    assert os.geteuid() == 0
+    readonly = tmp_path / "readonly"
+    readonly.mkdir()
+    foreign = tmp_path / "foreign"
+    original = sample.source / relative
+    if original.is_dir():
+        shutil.copytree(original, foreign)
+    else:
+        shutil.copy2(original, foreign)
+    subprocess.run(["mount", "--bind", str(sample.source), str(readonly)], check=True)
+    nested = readonly / relative
+    nested_mounted = False
+    try:
+        subprocess.run(["mount", "-o", "remount,bind,ro", str(readonly)], check=True)
+        subprocess.run(["mount", "--bind", str(foreign), str(nested)], check=True)
+        nested_mounted = True
+        # A different mount ID with the SAME filesystem device was the original bypass.
+        assert readonly.stat().st_dev == nested.stat().st_dev
+        assert not nested.is_mount()
+        sample.source = readonly
+        with pytest.raises(m.Blocked, match="nested_mount_rejected"):
+            m.migrate(sample)
+        assert not sample.destination.exists() and not sample.backup_file.exists()
+    finally:
+        if nested_mounted:
+            subprocess.run(["umount", str(nested)], check=True)
+        subprocess.run(["umount", str(readonly)], check=True)
