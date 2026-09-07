@@ -1,4 +1,4 @@
-name: Isolated review correction rehearsal
+name: Isolated retention and replay validation
 on:
   push:
     branches: [workbench/klyrow-issues-20260907]
@@ -6,61 +6,88 @@ on:
 permissions:
   contents: write
 jobs:
-  verify:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: source
+    services:
+      postgres:
+        image: postgres:17.6-bookworm
+        env:
+          POSTGRES_DB: klyrow_ci
+          POSTGRES_USER: klyrow
+          POSTGRES_PASSWORD: ci-only-password
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd 'pg_isready -U klyrow -d klyrow_ci'
+          --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          ref: bcb8aa968e8c8244071214d4293c2ca1ae2ce2ed
+          ref: 0c485374d084860677c000fa15d13f17b3ab00eb
           path: transport
           persist-credentials: false
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          ref: 415aac98d7fec9ecdf5c618d85a8043c86c28ab5
+          ref: 194f3bf34c4f0ee29c6557f7a9abd35cdad78312
           path: source
-      - name: Verify and apply exact reviewed bytes
+      - name: Verify bounded patch bytes and source tree
         run: |
           set -euo pipefail
           python - <<'PY'
-          import base64, gzip, hashlib, subprocess
+          import base64, hashlib, lzma, subprocess
           from pathlib import Path
-          encoded = Path('../transport/.workbench/pr100-review-fixes.patch.b64').read_text().strip()
-          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
-          assert hashlib.sha256(patch).hexdigest() == '0c70afb77423c2ad4d0a7e79a54f3b34eb38f353c5e46bce7be2d54bff140145'
+          encoded = ''.join(Path('../transport/.workbench/retention-patch.part'+str(n)).read_text().strip() for n in (1, 2))
+          patch = lzma.decompress(base64.b64decode(encoded, validate=True))
+          assert hashlib.sha256(patch).hexdigest() == 'c1ebe1abe49aadbf6d73a1f04752c5db183947c10a8e97cb17e852480480a596'
           subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
           subprocess.run(['git', 'apply', '-'], input=patch, check=True)
           PY
-          git add scripts/migrate-mautic-volumes tests/test_mautic_volume_migration.py docs/runtime/MAUTIC_DATA_MIGRATION.md
+          git add apps/gateway/app/durable_results.py apps/gateway/app/durable_retention.py apps/gateway/app/operations.py apps/gateway/app/production_api.py migrations/2026090701_durable_result_retention_holds.sql scripts/retain-durable-results tests/test_durable_operation_results.py tests/test_durable_retention_cli.py docs/DURABLE_RESULTS.md docs/DURABLE_RESULT_RETENTION.md
           git diff --cached --check
-          test "$(git write-tree)" = ef19e9d96e2b576fdc569ccd9b049f0df18eb63d
+          test "$(git write-tree)" = 0cc1c0cd5937c44890c3743aede5c3e0a77686d4
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
-      - name: Install isolated test dependencies
-        run: python -m pip install pytest cryptography==50.0.0
-      - name: Real root copy and nested-bind-mount regression rehearsal
+          cache: pip
+          cache-dependency-path: source/apps/gateway/requirements.txt
+      - name: Install pinned application and test dependencies
+        run: python -m pip install -r apps/gateway/requirements.txt pytest openapi-spec-validator
+      - name: Apply additive migrations twice to disposable PostgreSQL
         env:
-          REHEARSAL_BASE: /tmp/klyrow-review-${{ github.run_id }}-${{ github.run_attempt }}
+          KLYROW_DATABASE_URL: postgresql+psycopg://klyrow@127.0.0.1:5432/klyrow_ci
+          KLYROW_DATABASE_OWNER_PASSWORD_FILE: ${{ runner.temp }}/klyrow-owner
+          KLYROW_DATABASE_RUNTIME_PASSWORD_FILE: ${{ runner.temp }}/klyrow-runtime
         run: |
           set -euo pipefail
-          test ! -e "$REHEARSAL_BASE"
-          sudo env KLYROW_MAUTIC_MOUNT_REHEARSAL=1 \
-            "$(command -v python)" -m pytest -q tests/test_mautic_volume_migration.py \
-            --basetemp "$REHEARSAL_BASE"
-      - name: Publish verified correction to an isolated transfer branch
+          umask 077
+          printf '%s' 'ci-only-password' > "$KLYROW_DATABASE_OWNER_PASSWORD_FILE"
+          printf '%s' 'ci-runtime-only-password' > "$KLYROW_DATABASE_RUNTIME_PASSWORD_FILE"
+          trap 'shred -u "$KLYROW_DATABASE_OWNER_PASSWORD_FILE" "$KLYROW_DATABASE_RUNTIME_PASSWORD_FILE"' EXIT
+          python scripts/migrate
+          python scripts/migrate
+      - name: Full repository regression tests
+        env:
+          PYTHONPATH: .
+        run: |
+          python -m compileall -q apps/gateway
+          python -m pytest -q tests
+      - name: Real PostgreSQL hold purge callback and replay acceptance
+        env:
+          KLYROW_CONTRACT_POSTGRES_URL: postgresql+psycopg://klyrow:ci-only-password@127.0.0.1:5432/klyrow_ci
+        run: python -m pytest -q tests/test_durable_operation_results.py tests/test_middleware_email_contract.py
+      - name: Publish only the tested source to isolated transfer branch
         run: |
           set -euo pipefail
-          test "$(git write-tree)" = ef19e9d96e2b576fdc569ccd9b049f0df18eb63d
+          test "$(git write-tree)" = 0cc1c0cd5937c44890c3743aede5c3e0a77686d4
           git diff --exit-code
-          target=workbench/pr100-verified-repairs-20260907
+          target=workbench/verified-result-retention-20260907
           test -z "$(git ls-remote origin "refs/heads/$target")"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix(mautic): bound file reads and enforce descriptor mount identity'
+          git commit -m 'feat(operations): add hold-aware result payload retention' -m 'Preserve authenticated replay tombstones, serialize holds and callbacks, and require an exact dry-run plan. Related: #82, #21. No production purge or deployment.'
           git push origin "HEAD:refs/heads/$target"
           git rev-parse HEAD
           git rev-parse HEAD^{tree}
