@@ -12,16 +12,20 @@ ROOT = Path(__file__).resolve().parents[1]
 DATABASE = 'mirror.gcr.io/library/mariadb@sha256:611a2fcc5fa7c6ceb8644c6f74b25ede004ff6c3a6b38c8f8c23d3bbf6c26430'
 
 
+def redact(diagnostic):
+    for value in ('ci-only-mautic-password', 'ci-only-database-root',
+                  'ci-only-mautic-installation-key', 'ci-only-installer-password',
+                  'ci-only-sensitive-value', 'obsolete-value-must-be-overridden'):
+        diagnostic = diagnostic.replace(value, '[REDACTED]')
+    return diagnostic
+
+
 def docker(*args, check=True, timeout=240):
     result = subprocess.run(['docker', *args], text=True, capture_output=True, timeout=timeout)
     if check and result.returncode:
         # This isolated rehearsal uses synthetic credentials only. Keep even
         # those credentials out of command/exception output.
-        diagnostic = (result.stdout + result.stderr)[-4000:]
-        for value in ('ci-only-mautic-password', 'ci-only-database-root',
-                      'ci-only-mautic-installation-key', 'ci-only-installer-password',
-                      'ci-only-sensitive-value', 'obsolete-value-must-be-overridden'):
-            diagnostic = diagnostic.replace(value, '[REDACTED]')
+        diagnostic = redact((result.stdout + result.stderr)[-4000:])
         raise RuntimeError('Disposable Docker rehearsal command failed: ' + args[0] + '\n' + diagnostic)
     return result
 
@@ -152,10 +156,17 @@ $parameters = [
                 docker('run', '--detach', '--name', name, *restricted, args.image)
                 try:
                     wait_ready(lambda: docker('exec', name, '/usr/local/bin/klyrow-mautic',
-                                              'healthcheck', check=False))
+                                              'healthcheck', check=False), timeout=60)
                 except RuntimeError:
                     # This is a disposable synthetic fixture, never live logs.
-                    print(docker('logs', '--tail', '20', name, check=False).stdout)
+                    result = docker('logs', '--tail', '20', name, check=False)
+                    print(redact(result.stdout + result.stderr))
+                    result = docker('exec', name, 'python3', '-c',
+                        'from pathlib import Path; '
+                        'files=sorted(Path("/var/www/html/var/logs").glob("*"))[-5:]; '
+                        '[print(p.name, p.read_text(errors="replace")[-8000:]) '
+                        'for p in files if p.is_file()]', check=False)
+                    print(redact(result.stdout + result.stderr))
                     result = docker('exec', name, 'curl', '--max-time', '10', '--silent',
                                     '--output', '/dev/null', '--write-out', '%{http_code}',
                                     'http://127.0.0.1:8080/s/login', check=False)
@@ -171,6 +182,7 @@ $parameters = [
                 print(role + ': same image, non-root, read-only, healthy', flush=True)
                 if role == 'mautic_web':
                     (base / 'images/probe.php').write_text('<?php echo "must-not-execute";')
+                    (base / 'files/probe.php').write_text('<?php echo "must-not-execute";')
                     (base / 'images/.htaccess').write_text('Require all granted\n')
                     for path in ('/media/images/probe.php', '/media/files/probe.php'):
                         result = docker('exec', name, 'curl', '--silent', '--output', '/dev/null',

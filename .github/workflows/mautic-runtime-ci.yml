@@ -58,6 +58,7 @@ jobs:
           test -z "$(git status --porcelain)"
           echo "epoch=$(git log -1 --pretty=%ct)" >> "$GITHUB_OUTPUT"
       - name: Build the non-publishing Mautic candidate
+        id: candidate
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
@@ -80,6 +81,7 @@ jobs:
       - name: Rehearse all roles, secret authority, failure and restart
         run: python3 scripts/mautic-runtime-rehearsal --image "klyrow-mautic:${KLYROW_SOURCE_SHA}" --source-sha "$KLYROW_SOURCE_SHA"
       - name: Scan the Mautic candidate
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: klyrow-mautic:${{ env.KLYROW_SOURCE_SHA }}
@@ -90,6 +92,7 @@ jobs:
           exit-code: '1'
           ignore-unfixed: false
       - name: Generate the Mautic CycloneDX SBOM
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
         with:
           image: klyrow-mautic:${{ env.KLYROW_SOURCE_SHA }}
