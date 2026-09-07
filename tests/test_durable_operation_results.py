@@ -485,3 +485,354 @@ def test_recovery_rechecks_observation_after_competing_writer_commits(operation_
         assert verify.get(IntegrationOutbox, "operation-a").state == "RETRY"
         assert verify.scalar(select(func.count()).select_from(Idempotency)) == 0
         assert _claim(verify) is None
+
+# Operator-only retention: shared SQLite/PostgreSQL acceptance in required CI.
+from apps.gateway.app.durable_retention import purge_result_batch, result_hold
+from apps.gateway.app.durable_results import integration_record, seal, seal_result_tombstone, rewrap_integration_result
+from apps.gateway.app.operations import AccountClosure, IntegrationResultHold
+from apps.gateway.app.main import Audit
+
+RETENTION_NOW = datetime(2026, 9, 7, 12, tzinfo=timezone.utc)
+RETENTION_BEFORE = RETENTION_NOW - timedelta(days=31)
+CHANGE_SHA = "a" * 64
+RELEASE_SHA = "b" * 64
+
+
+def old_result(session, name="a", *, tenant="tenant-a", target="N8N", state="COMPLETED", age=40):
+    item = operation(state, id="operation-" + name, tenant_id=tenant, target=target,
+                     idempotency_key="idempotency-" + name, lease_expires_at=None)
+    row = result_row({"count": 4, "email": "synthetic@example.test"}, id="result-" + name,
+                     tenant_id=tenant, outbox_id=item.id, source=target, result_key="result-key-" + name,
+                     created_at=RETENTION_NOW - timedelta(days=age))
+    session.add_all([item, row]); session.commit()
+    return item, row
+
+
+def purge_kwargs(**changes):
+    return {"tenant_id": "tenant-a", "before": RETENTION_BEFORE, "current": RETENTION_NOW, **changes}
+
+
+def planned_purge(session, **changes):
+    args = purge_kwargs(**changes)
+    plan = purge_result_batch(session, **args)
+    session.rollback()
+    return purge_result_batch(session, **args, apply=True, expected_plan_sha256=plan["plan_sha256"])
+
+
+def place_hold(session, item="operation-a", identity="hold-a", **changes):
+    return result_hold(session, tenant_id="tenant-a", outbox_id=item, hold_id=identity,
+                       change_sha256=CHANGE_SHA, apply=True, **changes)
+
+
+def test_retention_dry_run_then_purge_preserves_replay_and_operation_truth(operation_db):
+    with operation_db() as session:
+        item, row = old_result(session)
+        payload = row.payload_json
+        original_item = (item.payload_json, item.idempotency_key, item.state, item.attempts)
+        report = purge_result_batch(session, **purge_kwargs())
+        assert report["eligible"] == 1 and report["updated"] == 0
+        session.commit()  # Even a mistakenly committed dry-run writes nothing.
+        assert session.get(IntegrationResult, row.id).payload_json == payload
+        assert session.scalar(select(func.count()).select_from(Audit)) == 0
+        applied = planned_purge(session)
+        session.commit(); session.refresh(row); session.refresh(item)
+        assert applied["updated"] == 1
+        document = integration_record(row)
+        assert set(document) == {"schema_version", "request_hash", "purged_at", "policy_sha256"}
+        assert document["schema_version"] == 2
+        assert (item.payload_json, item.idempotency_key, item.state, item.attempts) == original_item
+        assert session.scalar(select(func.count()).select_from(IntegrationResult)) == 1
+        payload, metadata = result_readback(row, current=RETENTION_NOW)
+        assert payload == {} and metadata["availability"] == "PURGED"
+        api = _operation_json(item, session)
+        assert api["status"] == "SUCCEEDED" and not api["reconciliation_required"]
+        assert api["result_metadata"]["availability"] == "PURGED" and api["error"] is None
+        same = ResultIn(outbox_id=item.id, source="N8N", result_key=row.result_key,
+                        payload={"count": 4, "email": "synthetic@example.test"})
+        assert accept_result(same, CTX, session) == {"id": row.id, "duplicate": True}
+        with pytest.raises(HTTPException) as conflict:
+            accept_result(same.model_copy(update={"payload": {"count": 4, "email": "changed@example.test"}}), CTX, session)
+        assert conflict.value.status_code == 409
+        session.rollback()
+        repeated = planned_purge(session)
+        assert repeated["updated"] == 0 and repeated["skipped"]["purged"] == 1
+
+
+def test_multiple_preservation_holds_need_individual_explicit_release(operation_db):
+    with operation_db() as session:
+        _, row = old_result(session)
+        original = row.payload_json
+        assert place_hold(session)["updated"] == 1
+        session.commit()
+        assert place_hold(session)["updated"] == 0
+        session.commit()
+        place_hold(session, identity="hold-b"); session.commit()
+        assert planned_purge(session)["skipped"]["held"] == 1
+        session.rollback()
+        args = dict(tenant_id="tenant-a", outbox_id="operation-a", hold_id="hold-a", change_sha256=RELEASE_SHA, release=True)
+        assert result_hold(session, **args)["updated"] == 0
+        session.commit()
+        assert session.get(IntegrationResultHold, "hold-a").state == "ACTIVE"
+        assert result_hold(session, **args, apply=True)["updated"] == 1
+        session.commit()
+        assert result_hold(session, **args, apply=True)["updated"] == 0
+        session.commit()
+        assert planned_purge(session)["eligible"] == 0
+        session.rollback()
+        assert session.get(IntegrationResult, row.id).payload_json == original
+        result_hold(session, **{**args, "hold_id": "hold-b"}, apply=True); session.commit()
+        assert planned_purge(session)["updated"] == 1
+        session.commit()
+        with pytest.raises(ValueError, match="conflict"):
+            place_hold(session)
+
+
+@pytest.mark.parametrize("change", ["hold", "rewrap", "result-content", "retention-setting"])
+def test_retention_plan_cannot_apply_after_its_eligible_set_or_authority_changes(operation_db, monkeypatch, change):
+    with operation_db() as session:
+        _, row = old_result(session)
+        original = row.payload_json
+        first = purge_result_batch(session, **purge_kwargs())
+        session.rollback()
+        row = session.get(IntegrationResult, "result-a")
+        if change == "hold":
+            place_hold(session); session.commit()
+        elif change == "rewrap":
+            row.payload_json = rewrap_integration_result(row); session.commit()
+        elif change == "result-content":
+            row.payload_json = seal_integration_result({"count": 2}, tenant_id=row.tenant_id,
+                outbox_id=row.outbox_id, source=row.source, result_key=row.result_key)
+            session.commit()
+        else:
+            monkeypatch.setenv("KLYROW_RESULT_RETENTION_SECONDS", str(29 * 86400))
+        before_apply = row.payload_json
+        with pytest.raises(ValueError, match="retention_plan_changed"):
+            purge_result_batch(session, **purge_kwargs(), apply=True, expected_plan_sha256=first["plan_sha256"])
+        session.rollback()
+        assert session.get(IntegrationResult, row.id).payload_json == before_apply
+        assert integration_record(row)["schema_version"] == 1
+
+
+@pytest.mark.parametrize("kind", ["corrupt", "legacy", "missing-key", "unknown-key"])
+def test_retention_bad_record_rolls_back_entire_batch(operation_db, monkeypatch, kind):
+    with operation_db() as session:
+        _, first = old_result(session)
+        _, second = old_result(session, "b")
+        if kind == "corrupt": second.payload_json = "not-json"
+        if kind == "legacy": second.payload_json = '{"legacy":true}'
+        if kind == "unknown-key":
+            envelope = json.loads(second.payload_json); envelope["kid"] = "missing"
+            second.payload_json = json.dumps(envelope)
+        session.commit(); before = (first.payload_json, second.payload_json)
+        if kind == "missing-key": monkeypatch.delenv(KEYRING_ENV)
+        with pytest.raises((HTTPException, ValueError, KeyringError)):
+            purge_result_batch(session, **purge_kwargs(), apply=True, expected_plan_sha256=CHANGE_SHA)
+        session.rollback()
+        assert (session.get(IntegrationResult, first.id).payload_json, session.get(IntegrationResult, second.id).payload_json) == before
+        assert session.scalar(select(func.count()).select_from(Audit)) == 0
+
+
+@pytest.mark.parametrize("state", ["PENDING", "PROCESSING", "RETRY", "DEAD_LETTER", "CANCELLED"])
+def test_retention_never_erases_nonterminal_or_unreconciled_results(operation_db, state):
+    with operation_db() as session:
+        _, row = old_result(session, state=state)
+        original = row.payload_json
+        assert planned_purge(session)["skipped"]["nonterminal"] == 1
+        session.commit()
+        assert session.get(IntegrationResult, row.id).payload_json == original
+
+
+@pytest.mark.parametrize("kind", ["late", "wrong-source", "lease", "young", "foreign-tenant", "tenant-hold"])
+def test_retention_skips_evidence_outside_its_safe_scope(operation_db, kind):
+    with operation_db() as session:
+        item, row = old_result(session, target="MAUTIC", age=2 if kind == "young" else 40)
+        if kind == "late": session.add(result_row({"late": True}, id="late-a", source="MAUTIC_LATE"))
+        if kind == "wrong-source": row.source = "N8N"
+        if kind == "lease": item.lease_expires_at = RETENTION_NOW + timedelta(days=1)
+        if kind == "foreign-tenant": row.tenant_id = "tenant-b"
+        if kind == "tenant-hold":
+            session.add(AccountClosure(id="closure-a", tenant_id="tenant-a", requested_by="owner",
+                confirmation_hash=CHANGE_SHA, grace_until=RETENTION_NOW, retention_policy="LEGAL_HOLD", state="CLOSED"))
+        session.commit(); original = row.payload_json
+        report = planned_purge(session)
+        session.commit()
+        assert report["eligible"] == report["updated"] == 0
+        assert session.get(IntegrationResult, row.id).payload_json == original
+
+
+def test_foreign_tenant_observation_and_hold_do_not_block_owned_purge(operation_db):
+    with operation_db() as session:
+        _, row = old_result(session, target="MAUTIC")
+        session.add(result_row({"late": True}, id="late-b", tenant_id="tenant-b", source="MAUTIC_LATE"))
+        session.add(AccountClosure(id="closure-b", tenant_id="tenant-b", requested_by="owner-b",
+            confirmation_hash=CHANGE_SHA, grace_until=RETENTION_NOW, retention_policy="LEGAL_HOLD"))
+        session.commit()
+        assert planned_purge(session)["updated"] == 1
+        session.commit()
+        assert integration_record(row)["schema_version"] == 2
+
+
+@pytest.mark.parametrize("changes", [{"tenant_id": "*"}, {"limit": True}, {"limit": 0}, {"limit": 1001},
+    {"before": RETENTION_NOW}, {"before": datetime(2020, 1, 1)}, {"after_id": None}, {"after_id": "*"}, {"apply": "true"}])
+def test_invalid_retention_scope_is_rejected(operation_db, changes):
+    with operation_db() as session:
+        old_result(session)
+        with pytest.raises(ValueError): purge_result_batch(session, **purge_kwargs(**changes))
+        session.rollback()
+        assert integration_record(session.get(IntegrationResult, "result-a"))["schema_version"] == 1
+
+
+@pytest.mark.parametrize("method", ["purge", "hold"])
+def test_retention_rejects_dirty_sessions_before_any_autoflush(operation_db, method):
+    with operation_db() as session:
+        item, _ = old_result(session)
+        item.last_error = "pending-change"
+        with pytest.raises(ValueError, match="clean_session"):
+            if method == "purge": purge_result_batch(session, **purge_kwargs())
+            else: place_hold(session)
+        session.rollback()
+        assert session.get(IntegrationOutbox, item.id).last_error is None
+
+
+def test_hold_is_tenant_bound_and_change_references_are_idempotent(operation_db):
+    with operation_db() as session:
+        old_result(session)
+        session.add(Tenant(id="tenant-b", name="Other", quota=1)); session.commit()
+        old_result(session, "b", tenant="tenant-b")
+        place_hold(session); session.commit()
+        with pytest.raises(ValueError, match="not_found"):
+            result_hold(session, tenant_id="tenant-b", outbox_id="operation-b", hold_id="hold-a", change_sha256=CHANGE_SHA, release=True, apply=True)
+        session.rollback()
+        with pytest.raises(ValueError, match="conflict"):
+            result_hold(session, tenant_id="tenant-a", outbox_id="operation-a", hold_id="hold-a", change_sha256=RELEASE_SHA, apply=True)
+        session.rollback()
+        assert session.get(IntegrationResultHold, "hold-a").state == "ACTIVE"
+
+
+def test_tombstone_rotation_and_restore_verification_keep_replay_authority(operation_db, isolated_durable_result_keyring):
+    from apps.gateway.app.durable_backup import verify_restored_records
+    with operation_db() as session:
+        _, row = old_result(session)
+        planned_purge(session); session.commit()
+        before = integration_record(row)
+        path = isolated_durable_result_keyring
+        keys = json.loads(path.read_text()); old_id = keys["active_key_id"]
+        keys["keys"]["rotated"] = base64.urlsafe_b64encode(os.urandom(32)).decode(); keys["active_key_id"] = "rotated"
+        path.write_text(json.dumps(keys))
+        row.payload_json = rewrap_integration_result(row); session.commit()
+        del keys["keys"][old_id]; path.write_text(json.dumps(keys))
+        assert integration_record(row) == before and result_readback(row)[1]["availability"] == "PURGED"
+        assert result_matches(row, {"count": 4, "email": "synthetic@example.test"})
+        session.rollback()
+        report = verify_restored_records(session)
+        assert report["authenticated_encrypted_records"] == 1 and report["legacy_records"] == 0
+
+
+@pytest.mark.parametrize("change", [{"schema_version": True}, {"schema_version": 3}, {"purged_at": "yesterday"},
+    {"purged_at": "2020-01-01T00:00:00"}, {"policy_sha256": "bad"}, {"request_hash": "bad"}, {"result": {"unexpected": True}}])
+def test_authenticated_but_invalid_tombstone_is_not_a_success(change):
+    row = result_row()
+    row.payload_json = seal_result_tombstone(row, current=RETENTION_NOW, policy_sha256=CHANGE_SHA)
+    document = {**integration_record(row), **change}
+    row.payload_json = seal(document, ["integration-result", row.tenant_id, row.outbox_id, row.source, row.result_key])
+    assert result_readback(row)[1]["availability"] == "INVALID"
+    with pytest.raises(HTTPException): result_matches(row, {"contacts": {"total": 1}})
+
+
+def test_purge_cursor_reports_skips_and_requires_new_pass_after_hold_release(operation_db):
+    with operation_db() as session:
+        for name in ("a", "b", "c"): old_result(session, name)
+        place_hold(session); session.commit()
+        first = planned_purge(session, limit=1); session.commit()
+        assert first["next_after_id"] == "result-a" and first["skipped"]["held"] == 1
+        second = planned_purge(session, limit=2, after_id=first["next_after_id"]); session.commit()
+        assert second["updated"] == 2
+        assert integration_record(session.get(IntegrationResult, "result-a"))["schema_version"] == 1
+        result_hold(session, tenant_id="tenant-a", outbox_id="operation-a", hold_id="hold-a",
+                    change_sha256=RELEASE_SHA, release=True, apply=True); session.commit()
+        assert planned_purge(session)["updated"] == 1
+
+
+@pytest.mark.skipif(not os.getenv("KLYROW_CONTRACT_POSTGRES_URL"), reason="Required CI supplies disposable PostgreSQL")
+@pytest.mark.parametrize("lock_owner", ["tenant", "outbox", "result"])
+def test_postgres_retention_does_not_skip_locked_candidate_and_rechecks_hold(operation_db, lock_owner):
+    from sqlalchemy.exc import OperationalError
+    from apps.gateway.app.operations import locked_integration_outbox, locked_retention_tenant
+    with operation_db() as setup: old_result(setup)
+    with operation_db() as holder:
+        model = {"tenant": Tenant, "outbox": IntegrationOutbox, "result": IntegrationResult}[lock_owner]
+        identity = {"tenant": "tenant-a", "outbox": "operation-a", "result": "result-a"}[lock_owner]
+        holder.scalar(select(model).where(model.id == identity).with_for_update())
+        with operation_db() as candidate:
+            candidate.execute(text("SET LOCAL statement_timeout = '3s'"))
+            with pytest.raises(OperationalError): purge_result_batch(candidate, **purge_kwargs())
+            candidate.rollback()
+        holder.rollback()
+    with operation_db() as holding:
+        place_hold(holding); holding.commit()
+    with operation_db() as candidate:
+        assert planned_purge(candidate)["skipped"]["held"] == 1
+        candidate.commit()
+
+
+@pytest.mark.skipif(not os.getenv("KLYROW_CONTRACT_POSTGRES_URL"), reason="Required CI supplies disposable PostgreSQL")
+@pytest.mark.parametrize("competing", ["hold", "tenant-hold", "callback"])
+def test_postgres_purge_serializes_preservation_and_duplicate_callbacks(operation_db, competing):
+    from sqlalchemy.exc import OperationalError
+    from apps.gateway.app.operations import closure, ClosureIn
+    with operation_db() as setup: old_result(setup)
+    with operation_db() as purger:
+        assert planned_purge(purger)["updated"] == 1
+        with operation_db() as other:
+            other.execute(text("SET LOCAL lock_timeout = '150ms'"))
+            with pytest.raises(OperationalError):
+                if competing == "hold": place_hold(other)
+                elif competing == "tenant-hold": closure(ClosureIn(retention_policy="LEGAL_HOLD"), CTX, other)
+                else:
+                    accept_result(ResultIn(outbox_id="operation-a", source="N8N", result_key="result-key-a",
+                        payload={"count": 4, "email": "synthetic@example.test"}), CTX, other)
+            other.rollback()
+        purger.commit()
+    with operation_db() as later:
+        # A later hold is not retroactive, but it cannot resurrect/purge a payload again.
+        if competing == "hold": place_hold(later); later.commit()
+        elif competing == "tenant-hold": closure(ClosureIn(retention_policy="LEGAL_HOLD"), CTX, later)
+        else:
+            assert accept_result(ResultIn(outbox_id="operation-a", source="N8N", result_key="result-key-a",
+                payload={"count": 4, "email": "synthetic@example.test"}), CTX, later)["duplicate"]
+        assert integration_record(later.get(IntegrationResult, "result-a"))["schema_version"] == 2
+
+
+def test_retention_keyring_change_during_apply_rolls_back_before_writes(operation_db, monkeypatch, isolated_durable_result_keyring):
+    import apps.gateway.app.durable_retention as retention
+    with operation_db() as session:
+        _, row = old_result(session)
+        initial = row.payload_json
+        plan = purge_result_batch(session, **purge_kwargs()); session.rollback()
+        original = retention.seal_result_tombstone
+        def rotate(*args, **kwargs):
+            encoded = original(*args, **kwargs)
+            keys = json.loads(isolated_durable_result_keyring.read_text())
+            keys["keys"]["changed"] = base64.urlsafe_b64encode(os.urandom(32)).decode()
+            keys["active_key_id"] = "changed"
+            isolated_durable_result_keyring.write_text(json.dumps(keys))
+            return encoded
+        monkeypatch.setattr(retention, "seal_result_tombstone", rotate)
+        with pytest.raises(ValueError, match="authority_changed"):
+            purge_result_batch(session, **purge_kwargs(), apply=True, expected_plan_sha256=plan["plan_sha256"])
+        session.rollback()
+        assert session.get(IntegrationResult, "result-a").payload_json == initial
+
+
+def test_retention_plan_supports_documented_large_batch_without_result_payload_limit(operation_db):
+    with operation_db() as session:
+        for index in range(400):
+            name = f"batch-{index:04}-" + "x" * 130
+            item = operation("COMPLETED", id="operation-" + name, target="N8N", idempotency_key=name, lease_expires_at=None)
+            row = result_row({"count": 1}, id="result-" + name, outbox_id=item.id, source="N8N", result_key=name,
+                             created_at=RETENTION_NOW - timedelta(days=40))
+            session.add_all([item, row])
+        session.commit()
+        report = purge_result_batch(session, **purge_kwargs(limit=1000))
+        assert report["eligible"] == 400 and not report["more_may_exist"]
+        session.rollback()

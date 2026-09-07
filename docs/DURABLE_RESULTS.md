@@ -74,10 +74,15 @@ Encryption is additional protection, not permission to transport secrets.
 Readback is tenant + outbox + expected-source scoped. Metadata distinguishes
 AVAILABLE, UNAVAILABLE, INVALID and EXPIRED. Default result access retention is
 30 days, configurable from one hour to 90 days with
-`KLYROW_RESULT_RETENTION_SECONDS`. This controls **read visibility**, not physical
-deletion; legal-hold-aware storage purge remains a separate operator-controlled
-retention process. Completed operations without usable results explicitly require
-reconciliation. Correlation is taken from the durable envelope, never fabricated
+`KLYROW_RESULT_RETENTION_SECONDS`. This setting controls **read visibility**, not automatic deletion. The separate
+operator-only `scripts/retain-durable-results` command can replace expired,
+completed, unheld result payloads with authenticated replay tombstones after
+an exact dry-run plan and explicit apply confirmation. See
+[DURABLE_RESULT_RETENTION.md](DURABLE_RESULT_RETENTION.md) for hold ordering,
+compatibility, backup and rollback requirements. Readback distinguishes intentional
+`PURGED` payloads from missing/invalid evidence; only the latter requires
+reconciliation by itself. Payload removal is not secure erasure of database pages,
+WAL or retained backups. No purge runs from a request, worker or startup hook. Correlation is taken from the durable envelope, never fabricated
 from the idempotency/storage digest.
 
 ## Worker races and ambiguous outcomes

@@ -5,7 +5,7 @@ from typing import Optional
 
 from fastapi import APIRouter,Depends,HTTPException
 from pydantic import BaseModel,Field
-from sqlalchemy import Boolean,DateTime,Integer,String,Text,UniqueConstraint,func,select
+from sqlalchemy import Boolean,CheckConstraint,DateTime,ForeignKeyConstraint,Integer,String,Text,UniqueConstraint,func,select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped,Session,mapped_column
 
@@ -17,9 +17,24 @@ from .capabilities import has_service_permission
 router=APIRouter(prefix="/v1",tags=["Operations and integrations"]);now=lambda:datetime.now(timezone.utc)
 
 class IntegrationOutbox(Base):
-    __tablename__="integration_outbox";id:Mapped[str]=mapped_column(String,primary_key=True);tenant_id:Mapped[str]=mapped_column(String,index=True);target:Mapped[str]=mapped_column(String,index=True);event_type:Mapped[str]=mapped_column(String,index=True);aggregate_id:Mapped[str]=mapped_column(String,index=True);payload_json:Mapped[str]=mapped_column(Text);idempotency_key:Mapped[str]=mapped_column(String);state:Mapped[str]=mapped_column(String,default="PENDING",index=True);attempts:Mapped[int]=mapped_column(Integer,default=0);next_attempt_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);lease_expires_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True);last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True);created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);__table_args__=(UniqueConstraint("tenant_id","target","idempotency_key",name="uq_integration_outbox_key"),)
+    __tablename__="integration_outbox";id:Mapped[str]=mapped_column(String,primary_key=True);tenant_id:Mapped[str]=mapped_column(String,index=True);target:Mapped[str]=mapped_column(String,index=True);event_type:Mapped[str]=mapped_column(String,index=True);aggregate_id:Mapped[str]=mapped_column(String,index=True);payload_json:Mapped[str]=mapped_column(Text);idempotency_key:Mapped[str]=mapped_column(String);state:Mapped[str]=mapped_column(String,default="PENDING",index=True);attempts:Mapped[int]=mapped_column(Integer,default=0);next_attempt_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);lease_expires_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True);last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True);created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);__table_args__=(UniqueConstraint("tenant_id","target","idempotency_key",name="uq_integration_outbox_key"),UniqueConstraint("tenant_id","id",name="uq_integration_outbox_tenant_id"))
 class IntegrationResult(Base):
     __tablename__="integration_results";id:Mapped[str]=mapped_column(String,primary_key=True);tenant_id:Mapped[str]=mapped_column(String,index=True);outbox_id:Mapped[str]=mapped_column(String,index=True);source:Mapped[str]=mapped_column(String);result_key:Mapped[str]=mapped_column(String);payload_json:Mapped[str]=mapped_column(Text);created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);__table_args__=(UniqueConstraint("tenant_id","source","result_key",name="uq_integration_result_source_key"),)
+class IntegrationResultHold(Base):
+    __tablename__ = "integration_result_holds"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String, index=True)
+    outbox_id: Mapped[str] = mapped_column(String, index=True)
+    state: Mapped[str] = mapped_column(String, default="ACTIVE")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    released_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    change_sha256: Mapped[str] = mapped_column(String(64))
+    release_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id", "outbox_id"], ["integration_outbox.tenant_id", "integration_outbox.id"]),
+        CheckConstraint("state IN ('ACTIVE','RELEASED')", name="ck_result_hold_state"),
+    )
+
 class SupportTicket(Base):
     __tablename__="support_tickets";id:Mapped[str]=mapped_column(String,primary_key=True);tenant_id:Mapped[str]=mapped_column(String,index=True);created_by:Mapped[str]=mapped_column(String);category:Mapped[str]=mapped_column(String);subject:Mapped[str]=mapped_column(String);description:Mapped[str]=mapped_column(Text);status:Mapped[str]=mapped_column(String,default="OPEN");priority:Mapped[str]=mapped_column(String,default="NORMAL");odoo_reference:Mapped[Optional[str]]=mapped_column(String,nullable=True);created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now);updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class ExportJob(Base):
@@ -61,6 +76,12 @@ def trusted_result_auth(ctx=Depends(auth)):
 
 def integration_result_by_key(s:Session,tenant_id:str,source:str,result_key:str):
     return s.scalar(select(IntegrationResult).where(IntegrationResult.tenant_id==tenant_id,IntegrationResult.source==source,IntegrationResult.result_key==result_key))
+
+def locked_retention_tenant(s:Session,tenant_id:str):
+    """Serialize creation of a tenant-wide hold against offline payload purges."""
+    tenant=s.scalar(select(Tenant).where(Tenant.id==tenant_id).with_for_update(nowait=True).execution_options(populate_existing=True))
+    if tenant is None:raise HTTPException(404,"not_found")
+    return tenant
 
 def locked_integration_outbox(s:Session,item_id:str,tenant_id:Optional[str]=None):
     query=select(IntegrationOutbox).where(IntegrationOutbox.id==item_id)
@@ -122,6 +143,7 @@ def export(x:ExportIn,ctx=Depends(auth),s:Session=Depends(db)):
     item=ExportJob(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],requested_by=ctx["sub"],scope_json=json.dumps(sorted(set(x.scopes))));s.add(item);audit(s,ctx,"tenant.export.requested");s.commit();return {"id":item.id,"state":item.state,"asynchronous":True}
 @router.post("/account/closure",status_code=202)
 def closure(x:ClosureIn,ctx=Depends(auth),s:Session=Depends(db)):
+    locked_retention_tenant(s,ctx["tenant"])
     if s.scalar(select(AccountClosure).where(AccountClosure.tenant_id==ctx["tenant"],AccountClosure.state.notin_(["CANCELLED","CLOSED"]))):raise HTTPException(409,"closure_already_requested")
     raw=str(uuid.uuid4());item=AccountClosure(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],requested_by=ctx["sub"],confirmation_hash=__import__('hashlib').sha256(raw.encode()).hexdigest(),grace_until=now()+timedelta(days=x.grace_days),retention_policy=x.retention_policy);s.add(item);gate=s.get(TenantSendGate,ctx["tenant"]) or TenantSendGate(tenant_id=ctx["tenant"],updated_by=ctx["sub"]);gate.enabled=False;gate.reason="ACCOUNT_CLOSURE_REQUESTED";gate.updated_by=ctx["sub"];gate.updated_at=now();s.add(gate);audit(s,ctx,"account.closure.requested");s.commit();return {"id":item.id,"confirmation":raw,"state":item.state,"grace_until":item.grace_until,"sending_enabled":False}
 @router.post("/account/closure/{item_id}/confirm")
