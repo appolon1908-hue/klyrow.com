@@ -117,7 +117,10 @@ $parameters = [
                    'file_put_contents("/ci/bootstrap-output/key", $parameters["secret_key"]) === false) {exit(1);} '
                    'chmod("/ci/bootstrap-output/local.php", 0644); chmod("/ci/bootstrap-output/key", 0644);\'',
                    timeout=360)
-            assert 'Install complete' in installation.stdout  # a no-op is not success evidence
+            if 'Install complete' not in installation.stdout:
+                # Upstream also returns zero when requirements cancel step zero.
+                raise RuntimeError('Disposable installation did not complete:\n' +
+                                   redact(installation.stdout + installation.stderr))
             installed_key = (base / 'bootstrap-output/key').read_text()
             assert installed_key
             GENERATED_SECRETS.append(installed_key)

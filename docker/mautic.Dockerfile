@@ -31,7 +31,7 @@ RUN echo '59ec10ac76c91171d4139dad05f70c1817022ce4ca068e9f9243e2189a5da9f4  comp
     && php bin/console --version \
     && rm -rf var/cache/* var/tmp/* \
     && rm -rf /root/.composer /tmp/* \
-    && mkdir -p var/cache var/tmp /var/lib/klyrow-mautic/config \
+    && mkdir -p var/cache var/tmp var/logs /var/lib/klyrow-mautic/config \
     && chown -R root:root /var/www/html \
     && chmod -R go-w /var/www/html \
     && sed -ri 's/Listen 80/Listen 8080/' /etc/apache2/ports.conf \
