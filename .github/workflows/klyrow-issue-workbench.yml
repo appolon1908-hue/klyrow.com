@@ -12,17 +12,15 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          ref: 6da623eea278ee7ccb9d7c4d2eaa96c5194cf594
+          ref: 215adf292397f5f2872d36fbb50d88f7551eaeac
           persist-credentials: false
-      - name: Export tracked source only
+      - name: Export transport for exact-byte verification
         run: |
-          mkdir -p "$RUNNER_TEMP/source"
-          git archive --format=tar.gz --prefix=klyrow/ HEAD > "$RUNNER_TEMP/source/klyrow-source.tar.gz"
-          git rev-parse HEAD > "$RUNNER_TEMP/source/SOURCE_SHA.txt"
-          sha256sum "$RUNNER_TEMP/source/klyrow-source.tar.gz"
+          mkdir -p "$RUNNER_TEMP/transport"
+          cp .workbench/integration-authority.patch.gz.b64 "$RUNNER_TEMP/transport/patch.b64"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: exact-klyrow-source
-          path: ${{ runner.temp }}/source/
+          name: patch-transport-verification
+          path: ${{ runner.temp }}/transport/
           retention-days: 1
           if-no-files-found: error
