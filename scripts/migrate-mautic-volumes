@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+"""Offline, data-only Mautic split/restore. Dry-run unless --apply is explicit."""
+from __future__ import annotations
+
+import argparse
+import ctypes
+import errno
+import hashlib
+import io
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+from contextlib import contextmanager
+
+ROOTS = {"config": "config", "var/logs": "logs", "docroot/media/files": "media-files", "docroot/media/images": "media-images"}
+SCHEMA = "klyrow.mautic-data.v1"
+MAX_FILES, MAX_BYTES, MAX_MANIFEST = 100_000, 100 * 1024**3, 32 * 1024**2
+RESERVE = 16 * 1024**2
+CONFIRM = "OFFLINE_MAUTIC_DATA_V1"
+IMAGE = re.compile(r"[a-z0-9][a-z0-9./:_-]*@sha256:[a-f0-9]{64}\Z")
+
+
+class Blocked(Exception):
+    """Only fixed reason codes may be exposed by the CLI."""
+
+
+def require(condition: bool, code: str) -> None:
+    if not condition:
+        raise Blocked(code)
+
+
+def canonical(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+
+
+def digest_file(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def checked_path(path: Path, *, private: bool = False) -> Path:
+    require(path.is_absolute() and ".." not in path.parts and path != Path("/"), "unsafe_path")
+    for part in list(reversed(path.parents)) + [path]:
+        require(not part.is_symlink(), "symlink_path")
+    if private:
+        info = path.stat()
+        require(info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) & 0o077 == 0, "private_path_required")
+    return path
+
+
+def private_file(path: Path, limit: int) -> Path:
+    checked_path(path, private=True)
+    info = path.stat()
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and 0 < info.st_size <= limit, "private_regular_file_required")
+    return path
+
+
+def readonly_source(path: Path) -> None:
+    checked_path(path)
+    require(path.is_dir(), "source_directory_required")
+    require(bool(os.statvfs(path).f_flag & os.ST_RDONLY), "readonly_source_required")
+
+
+def metadata(info: os.stat_result) -> dict:
+    return {"uid": info.st_uid, "gid": info.st_gid, "mode": stat.S_IMODE(info.st_mode), "mtime_ns": info.st_mtime_ns}
+
+
+def mount_id(descriptor: int) -> int:
+    """Use the opened object's Linux mount identity, not its filesystem device."""
+    with open(f"/proc/self/fdinfo/{descriptor}", "rb") as stream:
+        information = stream.read(8193)
+    require(len(information) <= 8192, "mount_identity_unavailable")
+    matches = re.findall(rb"^mnt_id:\s+([0-9]+)$", information, re.MULTILINE)
+    require(len(matches) == 1, "mount_identity_unavailable")
+    return int(matches[0])
+
+
+@contextmanager
+def tree_root(root: Path):
+    checked_path(root)
+    descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def open_beneath(root_descriptor: int, relative: str):
+    """Pin each ancestor and reject symlinks and *all* intervening bind mounts."""
+    path = PurePosixPath(relative)
+    require(not path.is_absolute() and path.parts and ".." not in path.parts, "unsafe_path")
+    expected_mount = mount_id(root_descriptor)
+    parent = os.dup(root_descriptor)
+    descriptor = None
+    try:
+        for index, part in enumerate(path.parts):
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+            if index < len(path.parts) - 1:
+                flags |= os.O_DIRECTORY
+            try:
+                descriptor = os.open(part, flags, dir_fd=parent)
+            except OSError as error:
+                if error.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise Blocked("symlink_or_nondirectory_rejected") from None
+                raise
+            require(mount_id(descriptor) == expected_mount, "nested_mount_rejected")
+            os.close(parent)
+            parent, descriptor = descriptor, None
+        yield parent
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent)
+
+
+def stable_identity(info: os.stat_result) -> tuple:
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_uid,
+            info.st_gid, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def bounded_content(stream, size: int, output=None) -> str:
+    """Read at most size + one sentinel byte; never chase a growing file's EOF."""
+    require(type(size) is int and 0 <= size <= MAX_BYTES, "byte_limit")
+    digest = hashlib.sha256()
+    remaining = size
+    while remaining:
+        chunk = stream.read(min(1024**2, remaining))
+        require(isinstance(chunk, bytes) and 0 < len(chunk) <= remaining, "source_changed")
+        digest.update(chunk)
+        if output is not None:
+            require(output.write(chunk) == len(chunk), "copy_failed")
+        remaining -= len(chunk)
+    require(stream.read(1) == b"", "source_changed")
+    return digest.hexdigest()
+
+
+def inventory(root: Path, mapping: dict = ROOTS) -> list[dict]:
+    entries, total = [], 0
+    with tree_root(root) as root_descriptor:
+        for source, destination in mapping.items():
+            # Include intermediate ancestors (e.g. var and docroot/media) in the
+            # descriptor walk even though they are not themselves copied.
+            try:
+                with open_beneath(root_descriptor, source) as base:
+                    require(stat.S_ISDIR(os.fstat(base).st_mode), "persistent_directory_missing")
+            except FileNotFoundError:
+                raise Blocked("persistent_directory_missing") from None
+            pending = [(source, destination)]
+            while pending:
+                relative, name = pending.pop()
+                with open_beneath(root_descriptor, relative) as descriptor:
+                    info = os.fstat(descriptor)
+                    require(not info.st_mode & 0o7000, "special_mode_rejected")
+                    require(not os.listxattr(descriptor), "extended_metadata_rejected")
+                    entry = {"path": name, **metadata(info)}
+                    if stat.S_ISDIR(info.st_mode):
+                        entry.update(kind="directory", size=0)
+                        children = []
+                        with os.scandir(descriptor) as iterator:
+                            for child in iterator:
+                                require(len(entries) + len(pending) + len(children) + 1 < MAX_FILES, "entry_limit")
+                                children.append(child.name)
+                        pending.extend((relative + "/" + child, name + "/" + child)
+                                       for child in sorted(children, reverse=True))
+                    else:
+                        require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1, "special_file_rejected")
+                        total += info.st_size
+                        require(total <= MAX_BYTES, "byte_limit")
+                        # Unbuffered reads keep the limit effective at the descriptor.
+                        with os.fdopen(os.dup(descriptor), "rb", buffering=0) as stream:
+                            sha = bounded_content(stream, info.st_size)
+                        entry.update(kind="file", size=info.st_size, sha256=sha)
+                    require(stable_identity(os.fstat(descriptor)) == stable_identity(info), "source_changed")
+                require(len(entries) < MAX_FILES, "entry_limit")
+                entries.append(entry)
+    return sorted(entries, key=lambda entry: entry["path"])
+
+
+def copy_entry(root_descriptor: int, relative: str, entry: dict, target: Path) -> None:
+    with open_beneath(root_descriptor, relative) as descriptor:
+        before = os.fstat(descriptor)
+        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and
+                before.st_size == entry["size"] and metadata(before) ==
+                {key: entry[key] for key in ("uid", "gid", "mode", "mtime_ns")}, "source_changed")
+        require(not os.listxattr(descriptor), "extended_metadata_rejected")
+        with os.fdopen(os.dup(descriptor), "rb", buffering=0) as original, target.open("xb") as output:
+            digest = bounded_content(original, entry["size"], output)
+        require(digest == entry["sha256"] and
+                stable_identity(os.fstat(descriptor)) == stable_identity(before), "source_changed")
+
+
+def validate_manifest(document: dict) -> None:
+    require(isinstance(document, dict) and set(document) == {"schema", "source_sha", "source_image", "target_image", "entries"}, "manifest_schema")
+    require(document["schema"] == SCHEMA and isinstance(document["source_sha"], str) and bool(re.fullmatch(r"[a-f0-9]{40}", document["source_sha"])), "source_identity")
+    require(all(isinstance(document[key], str) and IMAGE.fullmatch(document[key]) for key in ("source_image", "target_image")), "image_digest_required")
+    entries = document["entries"]
+    require(isinstance(entries, list) and 4 <= len(entries) <= MAX_FILES, "manifest_entries")
+    seen, total = {}, 0
+    for entry in entries:
+        require(isinstance(entry, dict), "manifest_entry")
+        name = entry.get("path")
+        require(isinstance(name, str) and len(name) <= 4096, "entry_path")
+        path = PurePosixPath(name)
+        require(name == str(path) and not path.is_absolute() and ".." not in path.parts and path.parts[0] in ROOTS.values() and name not in seen, "entry_path")
+        require(entry.get("kind") in ("file", "directory"), "entry_kind")
+        expected = {"path", "uid", "gid", "mode", "mtime_ns", "kind", "size"} | ({"sha256"} if entry["kind"] == "file" else set())
+        require(set(entry) == expected, "entry_schema")
+        require(all(type(entry[key]) is int and entry[key] >= 0 for key in ("uid", "gid", "mode", "mtime_ns", "size")), "entry_metadata")
+        require(entry["mode"] <= 0o777 and entry["uid"] < 2**32 - 1 and entry["gid"] < 2**32 - 1, "entry_metadata")
+        if entry["kind"] == "file":
+            require(isinstance(entry["sha256"], str) and bool(re.fullmatch(r"[a-f0-9]{64}", entry["sha256"])), "entry_digest")
+        else:
+            require(entry["size"] == 0, "directory_size")
+        if len(path.parts) > 1:
+            require(seen.get(str(path.parent)) == "directory", "entry_parent")
+        total += entry["size"]
+        require(total <= MAX_BYTES, "byte_limit")
+        seen[name] = entry["kind"]
+    require(all(seen.get(name) == "directory" for name in ROOTS.values()), "persistent_directory_missing")
+    require(len(canonical(document)) <= MAX_MANIFEST, "manifest_limit")
+
+
+def load_json(raw: bytes) -> dict:
+    require(len(raw) <= MAX_MANIFEST, "manifest_limit")
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            require(key not in result, "duplicate_json_key")
+            result[key] = value
+        return result
+    return json.loads(raw, object_pairs_hook=unique)
+
+
+def restore_metadata(stage: Path, entries: list[dict]) -> None:
+    for entry in sorted(entries, key=lambda item: len(PurePosixPath(item["path"]).parts), reverse=True):
+        path = stage / entry["path"]
+        os.chown(path, entry["uid"], entry["gid"], follow_symlinks=False)
+        os.chmod(path, entry["mode"], follow_symlinks=False)
+        os.utime(path, ns=(entry["mtime_ns"], entry["mtime_ns"]), follow_symlinks=False)
+
+
+def space_for(parent: Path, entries: list[dict], copies: int = 1) -> None:
+    needed = copies * (sum(entry["size"] for entry in entries) + len(entries) * 8192 + RESERVE)
+    require(shutil.disk_usage(parent).free >= needed, "insufficient_space")
+
+
+def fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def publish_directory(stage: Path, destination: Path) -> None:
+    # Linux renameat2(RENAME_NOREPLACE) atomically publishes without replacing even
+    # an empty directory created concurrently by a different process.
+    libc = ctypes.CDLL(None, use_errno=True)
+    function = getattr(libc, "renameat2", None)
+    require(function is not None, "atomic_publish_unavailable")
+    function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    function.restype = ctypes.c_int
+    require(function(-100, os.fsencode(stage), -100, os.fsencode(destination), 1) == 0, "destination_publish_conflict")
+    fsync_directory(destination.parent)
+
+
+@contextmanager
+def staging(parent: Path):
+    directory = Path(tempfile.mkdtemp(prefix=".mautic-data-", dir=parent))
+    try:
+        yield directory
+    finally:
+        if directory.exists():
+            shutil.rmtree(directory)
+
+
+def gpg_args(home: Path) -> list[str]:
+    return ["/usr/bin/gpg", "--no-options", "--homedir", str(home), "--batch", "--no-tty"]
+
+
+def encrypt_checkpoint(stage: Path, manifest: dict, backup: Path, public_key: Path, fingerprint: str) -> str:
+    require(bool(re.fullmatch(r"[A-F0-9]{40}|[A-F0-9]{64}", fingerprint)), "recipient_fingerprint")
+    checked_path(public_key)
+    require(public_key.is_file() and public_key.stat().st_size <= 1024**2, "public_key_required")
+    # Keep GPG sockets below Linux's path-length limit even for long backup paths.
+    # This private temporary home holds only the independently verified public key.
+    with staging(backup.parent) as scratch, tempfile.TemporaryDirectory(prefix="km-gpg-", dir="/tmp") as keyhome:
+        home = Path(keyhome)
+        public_args = gpg_args(home) + ["--no-autostart"]
+        subprocess.run(public_args + ["--import", str(public_key)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        secret = subprocess.run(public_args + ["--with-colons", "--list-secret-keys"], check=True, capture_output=True, timeout=30).stdout
+        require(b"sec:" not in secret, "public_recipient_only")
+        listing = subprocess.run(public_args + ["--with-colons", "--list-keys"], check=True, capture_output=True, timeout=30).stdout.decode()
+        primaries = []
+        primary = False
+        for line in listing.splitlines():
+            parts = line.split(":")
+            if parts[0] == "pub":
+                primary = True
+            elif parts[0] == "fpr" and primary:
+                primaries.append(parts[9])
+                primary = False
+        require(primaries == [fingerprint], "recipient_mismatch")
+        temporary = scratch / "checkpoint.gpg"
+        with temporary.open("xb") as output:
+            os.chmod(temporary, 0o600)
+            process = subprocess.Popen(public_args + ["--trust-model", "always", "--recipient", fingerprint, "--encrypt", "--output", "-"], stdin=subprocess.PIPE, stdout=output, stderr=subprocess.DEVNULL)
+            try:
+                with tarfile.open(fileobj=process.stdin, mode="w|", format=tarfile.PAX_FORMAT) as archive:
+                    raw = canonical(manifest)
+                    header = tarfile.TarInfo("manifest.json")
+                    header.size, header.mode = len(raw), 0o600
+                    archive.addfile(header, io.BytesIO(raw))
+                    for entry in manifest["entries"]:
+                        archive.add(stage / entry["path"], arcname=entry["path"], recursive=False)
+                process.stdin.close()
+                require(process.wait(timeout=120) == 0, "checkpoint_encryption_failed")
+                output.flush()
+                os.fsync(output.fileno())
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+                if process.stdin and not process.stdin.closed:
+                    process.stdin.close()
+        digest = digest_file(temporary)
+        # An existing backup is never overwritten. Only ciphertext leaves scratch.
+        os.link(temporary, backup, follow_symlinks=False)
+        fsync_directory(backup.parent)
+        return digest
+
+
+def check_tree(destination: Path, manifest: dict) -> None:
+    require(inventory(destination, {name: name for name in ROOTS.values()}) == manifest["entries"], "destination_data_mismatch")
+    require(set(path.name for path in destination.iterdir()) <= set(ROOTS.values()) | {"migration.json"}, "unexpected_destination_data")
+
+
+def write_receipt(stage: Path, manifest: dict, backup_sha: str) -> None:
+    with (stage / "migration.json").open("xb") as stream:
+        os.chmod(stage / "migration.json", 0o600)
+        stream.write(canonical({"manifest": manifest, "backup_sha256": backup_sha}))
+        stream.flush()
+        os.fsync(stream.fileno())
+    for root, _, files in os.walk(stage):
+        for name in files:
+            with (Path(root) / name).open("rb") as stream:
+                os.fsync(stream.fileno())
+        fsync_directory(Path(root))
+
+
+def output_summary(manifest: dict, state: str) -> dict:
+    return {"state": state, "entries": len(manifest["entries"]), "bytes": sum(entry["size"] for entry in manifest["entries"]), "manifest_sha256": hashlib.sha256(canonical(manifest)).hexdigest(), "cutover_performed": False}
+
+
+def migrate(args) -> dict:
+    readonly_source(args.source)
+    manifest = {"schema": SCHEMA, "source_sha": args.source_sha, "source_image": args.source_image, "target_image": args.target_image, "entries": inventory(args.source)}
+    validate_manifest(manifest)
+    checked_path(args.destination)
+    checked_path(args.backup_file)
+    checked_path(args.destination.parent, private=True)
+    checked_path(args.backup_file.parent, private=True)
+    require(args.destination != args.backup_file and args.destination not in args.backup_file.parents and args.source not in args.destination.parents and args.source not in args.backup_file.parents, "overlapping_paths")
+    if args.destination.exists():
+        receipt_path = private_file(args.destination / "migration.json", MAX_MANIFEST + 512)
+        receipt = load_json(receipt_path.read_bytes())
+        require(receipt["manifest"] == manifest, "existing_destination_conflict")
+        private_file(args.backup_file, MAX_BYTES + MAX_FILES * 8192 + RESERVE)
+        require(digest_file(args.backup_file) == receipt["backup_sha256"], "checkpoint_mismatch")
+        check_tree(args.destination, manifest)
+        return output_summary(manifest, "ALREADY_VERIFIED")
+    require(not args.backup_file.exists(), "backup_exists")
+    same_device = args.destination.parent.stat().st_dev == args.backup_file.parent.stat().st_dev
+    space_for(args.destination.parent, manifest["entries"], 2 if same_device else 1)
+    space_for(args.backup_file.parent, manifest["entries"])
+    if not args.apply:
+        return output_summary(manifest, "DRY_RUN")
+    require(args.confirm == CONFIRM, "offline_confirmation_required")
+    require(args.recipient_file is not None and args.recipient_fingerprint is not None, "backup_recipient_required")
+    with staging(args.destination.parent) as stage:
+        inverse = {value: key for key, value in ROOTS.items()}
+        with tree_root(args.source) as root_descriptor:
+            for entry in manifest["entries"]:
+                target = stage / entry["path"]
+                relative = PurePosixPath(entry["path"])
+                source = str(PurePosixPath(inverse[relative.parts[0]], *relative.parts[1:]))
+                if entry["kind"] == "directory":
+                    with open_beneath(root_descriptor, source) as descriptor:
+                        require(stat.S_ISDIR(os.fstat(descriptor).st_mode), "source_changed")
+                    target.mkdir(mode=0o700)
+                else:
+                    copy_entry(root_descriptor, source, entry, target)
+        restore_metadata(stage, manifest["entries"])
+        check_tree(stage, manifest)
+        require(inventory(args.source) == manifest["entries"], "source_changed")
+        backup_sha = encrypt_checkpoint(stage, manifest, args.backup_file, args.recipient_file, args.recipient_fingerprint)
+        require(inventory(args.source) == manifest["entries"], "source_changed")
+        write_receipt(stage, manifest, backup_sha)
+        publish_directory(stage, args.destination)
+    return output_summary(manifest, "VERIFIED")
+
+
+def unpack_checkpoint(stream, stage: Path | None, *, space_parent: Path) -> dict:
+    with tarfile.open(fileobj=stream, mode="r|") as archive:
+        first = archive.next()
+        require(first is not None and first.name == "manifest.json" and first.isreg() and 0 < first.size <= MAX_MANIFEST, "checkpoint_manifest")
+        manifest = load_json(archive.extractfile(first).read())
+        validate_manifest(manifest)
+        space_for(space_parent, manifest["entries"])
+        for entry in manifest["entries"]:
+            member = archive.next()
+            require(member is not None and member.name == entry["path"] and not member.issparse(), "checkpoint_member")
+            require((member.isdir() if entry["kind"] == "directory" else member.isreg()) and member.size == entry["size"], "checkpoint_type_or_size")
+            require(member.mode == entry["mode"] and member.uid == entry["uid"] and member.gid == entry["gid"], "checkpoint_metadata")
+            if entry["kind"] == "directory":
+                if stage is not None:
+                    (stage / member.name).mkdir(mode=0o700)
+            else:
+                digest = hashlib.sha256()
+                content = archive.extractfile(member)
+                output = (stage / member.name).open("xb") if stage is not None else None
+                try:
+                    for chunk in iter(lambda: content.read(1024**2), b""):
+                        digest.update(chunk)
+                        if output is not None:
+                            output.write(chunk)
+                finally:
+                    if output is not None:
+                        output.close()
+                require(digest.hexdigest() == entry["sha256"], "checkpoint_content")
+        require(archive.next() is None, "checkpoint_extra_members")
+    if stage is not None:
+        restore_metadata(stage, manifest["entries"])
+        check_tree(stage, manifest)
+    return manifest
+
+
+def restore(args) -> dict:
+    private_file(args.backup_file, MAX_BYTES + MAX_FILES * 8192 + RESERVE)
+    checked_path(args.gpg_home, private=True)
+    require(args.gpg_home.is_dir(), "gpg_home_required")
+    checked_path(args.destination)
+    checked_path(args.destination.parent, private=True)
+    require(not args.destination.exists(), "destination_exists")
+    require(bool(re.fullmatch(r"[a-f0-9]{64}", args.backup_sha256)), "backup_digest_required")
+    require(digest_file(args.backup_file) == args.backup_sha256, "checkpoint_mismatch")
+    if args.apply:
+        require(args.confirm == CONFIRM, "offline_confirmation_required")
+    # A temporary destination is created only for explicit apply. Decrypted bytes
+    # are otherwise streamed and discarded; GPG may take locks in its key home.
+    @contextmanager
+    def target():
+        if args.apply:
+            with staging(args.destination.parent) as stage:
+                yield stage
+        else:
+            yield None
+    with target() as stage:
+        process = subprocess.Popen(gpg_args(args.gpg_home) + ["--decrypt", str(args.backup_file)], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        try:
+            manifest = unpack_checkpoint(process.stdout, stage, space_parent=args.destination.parent)
+            # Consume the encrypted stream fully before trusting the GPG MDC/AEAD
+            # exit status. No destination is published on authentication failure.
+            while process.stdout.read(1024**2):
+                pass
+            require(process.wait(timeout=120) == 0, "checkpoint_authentication_failed")
+        finally:
+            process.stdout.close()
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        require(digest_file(args.backup_file) == args.backup_sha256, "checkpoint_changed")
+        if stage is not None:
+            write_receipt(stage, manifest, args.backup_sha256)
+            publish_directory(stage, args.destination)
+    return output_summary(manifest, "RESTORED" if args.apply else "RESTORE_DRY_RUN")
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="operation", required=True)
+    migration = sub.add_parser("migrate")
+    migration.add_argument("--source", type=Path, required=True)
+    migration.add_argument("--source-sha", required=True)
+    migration.add_argument("--source-image", required=True)
+    migration.add_argument("--target-image", required=True)
+    migration.add_argument("--recipient-file", type=Path)
+    migration.add_argument("--recipient-fingerprint")
+    restoration = sub.add_parser("restore")
+    restoration.add_argument("--backup-sha256", required=True)
+    restoration.add_argument("--gpg-home", type=Path, required=True)
+    for command in (migration, restoration):
+        command.add_argument("--destination", type=Path, required=True)
+        command.add_argument("--backup-file", type=Path, required=True)
+        command.add_argument("--apply", action="store_true")
+        command.add_argument("--confirm")
+    args = parser.parse_args(argv)
+    try:
+        require(os.geteuid() == 0, "root_required")
+        os.umask(0o077)
+        print(json.dumps((migrate if args.operation == "migrate" else restore)(args), sort_keys=True))
+        return 0
+    except Exception:
+        # Files, config contents, GPG diagnostics, recipient names and paths are
+        # deliberately absent. A failed candidate is never cut over automatically.
+        print("MAUTIC_DATA_MIGRATION=BLOCKED", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
