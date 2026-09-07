@@ -64,7 +64,9 @@ The worker runs bounded email and hit consumers. It never automatically consumes
 the failed queue. A consumer exit fails the container; the deployment's bounded
 restart policy and operator reconciliation handle recovery. Cron preserves the
 upstream UTC segments/update/trigger ordering, limits a command to ten minutes,
-and fails on command errors. Run one cron replica; this is not a distributed job
+and fails on command errors. Slots observed during an active command are queued
+and executed sequentially, so campaign updates cannot overtake segment updates.
+A backlog above twelve commands fails for operator reconciliation. Run one cron replica; this is not a distributed job
 lease redesign. Mautic's command locks and the gateway's existing policy remain
 necessary. Signal handling stops and reaps process groups, with a 25-second hard
 deadline. Configure a container stop grace period of at least 35 seconds.
@@ -137,6 +139,10 @@ not a claim that an unexecuted or failed gate passed.
 The initial full inventory had 338 package/advisory rows: four fixable libaom
 findings and 334 rows without a Debian fixed version, including 207 in development
 headers. The candidate removes the unused headers and applies the libaom fix.
+The [patched candidate scan](https://github.com/appolon1908-hue/klyrow.com/actions/runs/34160273000)
+reported zero fixable HIGH/CRITICAL findings and 127 remaining inventory rows
+(111 HIGH, 16 CRITICAL) without an available Debian fix. These are unresolved
+advisories, not accepted release exceptions.
 The final `trivy-mautic-all.sarif` remains required release-review evidence;
 `trivy-mautic.sarif` is the repository's established fixable-finding gate. A green
 gate does not assert that the full inventory is empty or waive review of unresolved

@@ -85,14 +85,17 @@ def test_long_cron_command_does_not_drop_the_next_due_command(tmp_path, monkeypa
     monkeypatch.setattr(runtime, 'STATE', tmp_path)
     calls = []
     children = []
-    dates = iter([dt.datetime(2026, 9, 7, 0, minute, tzinfo=dt.timezone.utc)
-                  for minute in (0, 5, 0, 5)])
+    minute = [0]
+    dates = iter([dt.datetime(2026, 9, 7, 0, value, tzinfo=dt.timezone.utc)
+                  for value in (0, 5, 6, 6, 0, 5)])
 
     class Clock:
         @staticmethod
         def now(zone):
             try:
-                return next(dates)
+                value = next(dates)
+                minute[0] = value.minute
+                return value
             except StopIteration:
                 raise RuntimeError('end of fixture')
 
@@ -100,10 +103,10 @@ def test_long_cron_command_does_not_drop_the_next_due_command(tmp_path, monkeypa
         def __init__(self, command, **kwargs):
             self.pid = 100 + len(children)
             children.append(self)
-            calls.append(command)
+            calls.append((minute[0], command))
 
         def poll(self):
-            return None
+            return 0 if self is children[0] and minute[0] >= 6 else None
 
     monkeypatch.setattr(runtime, 'dt', type('Dates', (), {'datetime': Clock, 'timezone': dt.timezone}))
     monkeypatch.setattr(runtime.subprocess, 'Popen', Child)
@@ -112,8 +115,9 @@ def test_long_cron_command_does_not_drop_the_next_due_command(tmp_path, monkeypa
     monkeypatch.setattr(runtime, 'stop_children', lambda items: stopped.extend(items))
     with pytest.raises(RuntimeError, match='end of fixture'):
         runtime.run_jobs('mautic_cron', {})
-    assert [command[-1] for command in calls] == ['mautic:segments:update', 'mautic:campaigns:update']
-    assert stopped == children  # both outstanding commands get shutdown
+    assert [(value, command[-1]) for value, command in calls] == [
+        (0, 'mautic:segments:update'), (6, 'mautic:campaigns:update')]
+    assert stopped == children[1:]  # only the unfinished queued command needs shutdown
 
 
 def test_uncooperative_child_is_killed_after_deadline(tmp_path):

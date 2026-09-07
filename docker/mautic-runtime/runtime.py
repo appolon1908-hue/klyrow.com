@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Non-root Mautic roles. No installer, migrations, fixture loading, or failed replay."""
 import datetime as dt
+from collections import deque
 import http.client
 import json
 import os
@@ -86,6 +87,7 @@ def run_jobs(role, counts):
     previous_handlers = {sig: signal.signal(sig, stop)
                          for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGWINCH)}
     children = []
+    pending = deque()
     last_slot = None
     started = {}
     try:
@@ -112,6 +114,11 @@ def run_jobs(role, counts):
                 slot = cron_slot(dt.datetime.now(dt.timezone.utc))
                 if slot is not None and (last_slot is None or slot[0] > last_slot):
                     last_slot, command = slot
+                    pending.append(command)
+                    if len(pending) > 12:
+                        raise RuntimeError('scheduled command backlog exceeded limit')
+                if pending and not children:
+                    command = pending.popleft()
                     children.append(subprocess.Popen(console(command), start_new_session=True,
                                                      stdout=subprocess.DEVNULL,
                                                      stderr=subprocess.DEVNULL))
