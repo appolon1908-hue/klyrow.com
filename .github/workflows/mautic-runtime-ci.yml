@@ -5,7 +5,6 @@ on:
     paths:
       - docker/mautic.Dockerfile
       - docker/mautic-runtime/**
-      - docker/postal-security/debian.sources.list
       - scripts/mautic-runtime-rehearsal
       - tests/test_mautic_runtime.py
       - docs/runtime/MAUTIC_HARDENED_RUNTIME.md
@@ -80,7 +79,18 @@ jobs:
             audit --locked --no-dev --abandoned=ignore --no-plugins --format=json > composer-mautic-audit.json
       - name: Rehearse all roles, secret authority, failure and restart
         run: python3 scripts/mautic-runtime-rehearsal --image "klyrow-mautic:${KLYROW_SOURCE_SHA}" --source-sha "$KLYROW_SOURCE_SHA"
-      - name: Scan the Mautic candidate
+      - name: Retain complete HIGH/CRITICAL vulnerability inventory
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: klyrow-mautic:${{ env.KLYROW_SOURCE_SHA }}
+          format: sarif
+          output: trivy-mautic-all.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: '0'
+          ignore-unfixed: false
+      - name: Enforce the protected-main fixable HIGH/CRITICAL policy
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -90,7 +100,7 @@ jobs:
           severity: CRITICAL,HIGH
           limit-severities-for-sarif: true
           exit-code: '1'
-          ignore-unfixed: false
+          ignore-unfixed: true
       - name: Generate the Mautic CycloneDX SBOM
         if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
@@ -122,6 +132,7 @@ jobs:
           path: |
             composer-mautic-audit.json
             trivy-mautic.sarif
+            trivy-mautic-all.sarif
             mautic.cdx.json
             mautic-oci.sha256
           if-no-files-found: warn

@@ -10,10 +10,11 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 DATABASE = 'mirror.gcr.io/library/mariadb@sha256:611a2fcc5fa7c6ceb8644c6f74b25ede004ff6c3a6b38c8f8c23d3bbf6c26430'
+GENERATED_SECRETS = []
 
 
 def redact(diagnostic):
-    for value in ('ci-only-mautic-password', 'ci-only-database-root',
+    for value in (*GENERATED_SECRETS, 'ci-only-mautic-password', 'ci-only-database-root',
                   'ci-only-mautic-installation-key', 'ci-only-installer-password',
                   'ci-only-sensitive-value', 'obsolete-value-must-be-overridden'):
         diagnostic = diagnostic.replace(value, '[REDACTED]')
@@ -61,6 +62,8 @@ def main():
             for name in ('config', 'secrets', 'logs', 'files', 'images'):
                 (base / name).mkdir(mode=0o777)
                 (base / name).chmod(0o777 if name in ('logs', 'files', 'images') else 0o755)
+            (base / 'bootstrap-output').mkdir(mode=0o777)
+            (base / 'bootstrap-output').chmod(0o777)
             # Deliberately synthetic, confined to the disposable internal network.
             for name, value in {'db': 'ci-only-mautic-password', 'root': 'ci-only-database-root',
                                 'mailer': 'null://null', 'key': 'ci-only-mautic-installation-key'}.items():
@@ -71,6 +74,9 @@ $parameters = [
     'db_driver' => 'pdo_mysql', 'db_host' => 'database', 'db_port' => 3306,
     'db_name' => 'mautic', 'db_user' => 'mautic', 'db_table_prefix' => '',
     'site_url' => 'http://localhost:8080',
+    'messenger_dsn_email' => 'doctrine://default?queue_name=email&auto_setup=false',
+    'messenger_dsn_hit' => 'doctrine://default?queue_name=hit&auto_setup=false',
+    'messenger_dsn_failed' => 'doctrine://default?queue_name=failed&auto_setup=false',
     'db_password' => 'obsolete-value-must-be-overridden',
     'mailer_dsn' => 'smtp://must-never-be-used.invalid',
     'secret_key' => 'obsolete-value-must-be-overridden',
@@ -95,14 +101,40 @@ $parameters = [
             # The only installer invocation is this disposable rehearsal. It has
             # a writable ephemeral config and filesystem and cannot reach Postal,
             # Middleware, the Internet, or any production database.
-            docker('run', '--rm', '--user', '0:0', '--network', network, *mounts, *env,
+            installation = docker('run', '--rm', '--user', '0:0', '--network', network, *mounts, *env,
                    '--tmpfs', '/var/www/html/config:rw', '--mount',
                    f'type=bind,src={ROOT}/docker/mautic-runtime/local.php,dst=/ci/bootstrap.php,readonly',
+                   '--mount', f'type=bind,src={base}/bootstrap-output,dst=/ci/bootstrap-output',
                    '--entrypoint', 'sh', args.image, '-ceu',
                    'cp /ci/bootstrap.php /var/www/html/config/local.php; '
+                   'printf \'\\nunset($parameters["site_url"]);\\n\' >> /var/www/html/config/local.php; '
                    'php bin/console mautic:install --force --no-interaction '
                    '--admin_username ciadmin --admin_email ci@example.invalid '
-                   '--admin_password ci-only-installer-password http://localhost:8080', timeout=360)
+                   '--admin_password ci-only-installer-password http://localhost:8080; '
+                   'php bin/console messenger:setup-transports --no-interaction; '
+                   'php -r \'require "config/local.php"; '
+                   'if (!copy("config/local.php", "/ci/bootstrap-output/local.php") || '
+                   'file_put_contents("/ci/bootstrap-output/key", $parameters["secret_key"]) === false) {exit(1);} '
+                   'chmod("/ci/bootstrap-output/local.php", 0644); chmod("/ci/bootstrap-output/key", 0644);\'',
+                   timeout=360)
+            assert 'Install complete' in installation.stdout  # a no-op is not success evidence
+            installed_key = (base / 'bootstrap-output/key').read_text()
+            assert installed_key
+            GENERATED_SECRETS.append(installed_key)
+            (base / 'secrets/key').chmod(0o644)
+            (base / 'secrets/key').write_text(installed_key)
+            (base / 'secrets/key').chmod(0o444)
+            # Retain every installer-generated setting while deliberately making
+            # the legacy credentials wrong, to exercise file authority.
+            (base / 'config/local.php').chmod(0o644)
+            installed_config = (base / 'bootstrap-output/local.php').read_text()
+            assert installed_config.lstrip().startswith('<?php') and '?>' not in installed_config
+            (base / 'config/local.php').write_text(installed_config +
+                '\n$parameters["db_password"] = "obsolete-value-must-be-overridden";\n' +
+                '$parameters["mailer_dsn"] = "smtp://must-never-be-used.invalid";\n' +
+                '$parameters["secret_key"] = "obsolete-value-must-be-overridden";\n')
+            (base / 'config/local.php').chmod(0o444)
+            print('Fresh schema, admin fixture and original installation key established.', flush=True)
             docker('run', '--rm', '--user', '0:0', '--network', network, *mounts, *env,
                    '--entrypoint', 'php', args.image, 'bin/console', 'doctrine:query:sql',
                    'CREATE TABLE klyrow_runtime_rehearsal (id INT PRIMARY KEY)')

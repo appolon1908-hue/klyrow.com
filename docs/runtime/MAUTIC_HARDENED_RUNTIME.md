@@ -36,9 +36,14 @@ alias, lock rewrite, or a build-time Composer update:
 - `composer.lock` SHA-256: `995c5149fa9cb76c750a32a19b9168aad1db74cc10d39a3aedc96cb1ff7928f9`.
 
 Builds check those hashes, installed versions, absence of aliases, Composer
-validation and actual PHP platform requirements. The immutable Debian snapshot
-already reviewed on main supplies OS patches. PCNTL is compiled from the pinned
-PHP source so Messenger can receive shutdown signals. Node tooling and generated
+validation and actual PHP platform requirements. The candidate's own immutable
+Debian snapshot at `20260907T180000Z` supplies OS patches and requires
+`libaom3 3.6.0-1+deb12u3`, fixing
+[CVE-2026-56208](https://security-tracker.debian.org/tracker/CVE-2026-56208)
+and the associated 56209–56211 findings. The four existing images keep their
+current snapshot. PCNTL is compiled from the pinned
+PHP source so Messenger can receive shutdown signals. Build tools and kernel
+development headers are purged after compilation. Node tooling and generated
 cache files are removed before flattening the final image, including its history.
 No package vulnerability exception is added.
 
@@ -63,6 +68,13 @@ and fails on command errors. Run one cron replica; this is not a distributed job
 lease redesign. Mautic's command locks and the gateway's existing policy remain
 necessary. Signal handling stops and reaps process groups, with a 25-second hard
 deadline. Configure a container stop grace period of at least 35 seconds.
+
+Configure real asynchronous email/hit transports before enabling workers; Mautic's
+upstream default is `sync://`, which cannot be consumed. The isolated rehearsal
+uses separate Doctrine queue names with `auto_setup=false` and creates those
+transport tables explicitly during disposable installation. Production must
+similarly provision its approved transport/schema before startup; queue creation
+or migration is not a responsibility of the long-running runtime role.
 
 Health requires the web login endpoint or a fresh supervisor heartbeat with live
 children, plus a successful database read. A stopped database is unhealthy. CLI
@@ -115,11 +127,20 @@ python3 scripts/mautic-runtime-rehearsal --image klyrow-mautic:local \
 
 The dedicated workflow checks the exact PR head, validates the image, audits the
 locked Composer graph, rehearses all roles and secret overrides, checks database
-failure and graceful restart, scans HIGH/CRITICAL findings without suppressing
-unfixed findings, generates a CycloneDX SBOM, and compares two independent OCI
+failure and graceful restart, retains the complete HIGH/CRITICAL vulnerability
+inventory, enforces the same **fixable HIGH/CRITICAL** gate as protected main and
+PostgreSQL runtime CI, generates a CycloneDX SBOM, and compares two independent OCI
 builds. It retains candidate evidence and has no registry publication permission.
 Only the workflow's completed results establish those gates; this document is
 not a claim that an unexecuted or failed gate passed.
+
+The initial full inventory had 338 package/advisory rows: four fixable libaom
+findings and 334 rows without a Debian fixed version, including 207 in development
+headers. The candidate removes the unused headers and applies the libaom fix.
+The final `trivy-mautic-all.sarif` remains required release-review evidence;
+`trivy-mautic.sarif` is the repository's established fixable-finding gate. A green
+gate does not assert that the full inventory is empty or waive review of unresolved
+runtime advisories. No existing protected workflow or exception policy is changed.
 
 For the eventual protected Compose change, the gateway's private
 `KLYROW_MAUTIC_API_URL` must be `http://mautic:8080`; its existing hostname and

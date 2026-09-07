@@ -3,7 +3,7 @@
 FROM mirror.gcr.io/mautic/mautic@sha256:dea3bb71a5c5bf4c0c7d1764e58a32109898e7b2e6a710f14f50e2a913c03a0f AS sanitized
 USER root
 ARG SOURCE_DATE_EPOCH
-COPY docker/postal-security/debian.sources.list /etc/apt/sources.list
+COPY docker/mautic-runtime/debian.sources.list /etc/apt/sources.list
 RUN test -n "${SOURCE_DATE_EPOCH}" \
     && rm -f /etc/apt/sources.list.d/* \
     && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Check-Valid-Until=false update \
@@ -11,6 +11,9 @@ RUN test -n "${SOURCE_DATE_EPOCH}" \
     && DEBIAN_FRONTEND=noninteractive apt-get purge -y nodejs \
     && docker-php-ext-install pcntl \
     && docker-php-source delete \
+    && DEBIAN_FRONTEND=noninteractive apt-get purge -y \
+        autoconf dpkg-dev file g++ gcc libc6-dev make pkg-config re2c linux-libc-dev \
+    && test "$(dpkg-query -W -f='${Version}' libaom3)" = '3.6.0-1+deb12u3' \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
         /var/www/html/node_modules /root/.composer /root/.npm \
         /usr/lib/node_modules /tmp/node-compile-cache \
