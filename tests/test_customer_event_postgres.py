@@ -25,7 +25,7 @@ def event_database():
     schema = "event_test_" + uuid.uuid4().hex
     with admin.begin() as connection:
         connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-    engine = create_engine(url, connect_args={"options": f"-csearch_path={schema},public"})
+    engine = create_engine(url, connect_args={"options": f"-csearch_path={schema}"})
     Base.metadata.create_all(engine)
     with Session(engine) as session:
         session.add(Tenant(id="tenant", name="Synthetic", quota=100))
