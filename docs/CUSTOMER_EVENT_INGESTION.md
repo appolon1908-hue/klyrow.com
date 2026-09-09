@@ -1,5 +1,10 @@
 # Customer event ingestion
 
+Profile creation and both event ingestion routes require the canonical
+`contact.manage` capability, including the external tenant resolver grant.
+Read-only, analyst, billing and ungranted service identities cannot mutate
+customer data. Existing owner/admin and marketing role grants are preserved.
+
 `POST /v1/events` accepts an optional `Idempotency-Key` header or the legacy
 `idempotency_key` JSON field. If both are supplied, they must match. Keys are
 scoped to tenant and source. Retries return the original event ID; changed

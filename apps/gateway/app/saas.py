@@ -9,6 +9,7 @@ from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Te
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
+from .capabilities import require_permission
 from .main import Audit, Base, Domain, Event, Message, Suppression, Tenant, User, audit, auth, db, require
 
 router=APIRouter(prefix="/v1",tags=["SaaS P0/P1"])
@@ -95,6 +96,7 @@ def segment_members(s,seg): return [p for p in s.scalars(select(Profile).where(P
 
 @router.post("/profiles",status_code=201)
 def profile_upsert(x:ProfileIn,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx, "contact.manage")
     if not any((x.email,x.phone,x.external_id,x.customer_id)):raise HTTPException(422,"identifier_required")
     clauses=[]
     for key,val in ((Profile.email,x.email),(Profile.phone,x.phone),(Profile.external_id,x.external_id),(Profile.customer_id,x.customer_id)):
@@ -139,6 +141,7 @@ def event_replay(existing, x):
 
 
 def ingest_event(x: EventIn, ctx, s):
+    require_permission(ctx, "contact.manage")
     get_profile(s, ctx["tenant"], x.profile_id)
     if x.occurred_at is not None and x.occurred_at.tzinfo is None:
         raise HTTPException(422, "occurred_at_timezone_required")
@@ -184,6 +187,7 @@ def event_header_key(x, key):
 @router.post("/events", status_code=202)
 def ingest(x: EventIn, ctx=Depends(auth), s: Session=Depends(db),
            idempotency_key: Optional[str]=Header(None, min_length=1, max_length=200)):
+    require_permission(ctx, "contact.manage")
     e, replayed = ingest_event(event_header_key(x, idempotency_key), ctx, s)
     s.commit()
     return {"id": e.id, "accepted": True, "replayed": replayed}
@@ -192,6 +196,7 @@ def ingest(x: EventIn, ctx=Depends(auth), s: Session=Depends(db),
 @router.post("/events/batch", status_code=207)
 def ingest_batch(x: EventBatchIn, ctx=Depends(auth), s: Session=Depends(db),
                  idempotency_key: Optional[str]=Header(None, min_length=1, max_length=200)):
+    require_permission(ctx, "contact.manage")
     results = []
     for index, item in enumerate(x.events):
         try:

@@ -60,13 +60,13 @@ def test_overlapping_event_retries_recover_winner(event_database, conflict):
             try:
                 item = EventIn(profile_id="profile", name="changed" if conflict and index else "created",
                                idempotency_key="same-key")
-                result, replayed = ingest_event(item, {"tenant": "tenant"}, session)
+                result, replayed = ingest_event(item, {"tenant": "tenant", "permissions": ["contact.manage"]}, session)
                 session.commit()
                 return result.id, replayed
             except HTTPException as error:
                 assert error.status_code == 409
                 # The savepoint kept the surrounding transaction usable.
-                other, _ = ingest_event(EventIn(profile_id="profile", name="unrelated"), {"tenant": "tenant"}, session)
+                other, _ = ingest_event(EventIn(profile_id="profile", name="unrelated"), {"tenant": "tenant", "permissions": ["contact.manage"]}, session)
                 session.commit()
                 return "conflict", other.id
 
