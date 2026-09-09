@@ -236,7 +236,9 @@ def test_non_atomic_bulk_idempotency_is_truthfully_described():
 def test_optional_invoice_idempotency_remains_optional_and_explicit():
     schema = app.openapi()
     assert OPTIONAL_IDEMPOTENCY == {
-        ("post", "/v1/billing/invoices")
+        ("post", "/v1/billing/invoices"),
+        ("post", "/v1/events"),
+        ("post", "/v1/events/batch"),
     }
     operation = schema["paths"]["/v1/billing/invoices"]["post"]
     assert operation["x-durable-idempotency"] is True

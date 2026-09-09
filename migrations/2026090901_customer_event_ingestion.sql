@@ -3,9 +3,11 @@
 -- all writers have stopped using source/idempotency_key and retention has elapsed.
 ALTER TABLE customer_events ADD COLUMN IF NOT EXISTS source VARCHAR NOT NULL DEFAULT 'api';
 ALTER TABLE customer_events ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR;
+ALTER TABLE customer_events ADD COLUMN IF NOT EXISTS request_hash VARCHAR(64);
 ALTER TABLE customer_events ADD COLUMN IF NOT EXISTS received_at TIMESTAMP WITH TIME ZONE;
 
 UPDATE customer_events SET received_at = occurred_at WHERE received_at IS NULL;
+ALTER TABLE customer_events ALTER COLUMN received_at SET DEFAULT now();
 ALTER TABLE customer_events ALTER COLUMN received_at SET NOT NULL;
 
 CREATE INDEX IF NOT EXISTS ix_customer_events_source ON customer_events (source);

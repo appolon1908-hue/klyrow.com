@@ -3,9 +3,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import dns.resolver
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .main import Audit, Base, Domain, Event, Message, Suppression, Tenant, User, audit, auth, db, require
@@ -16,7 +17,7 @@ now=lambda: datetime.now(timezone.utc)
 class Profile(Base):
     __tablename__="profiles"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); email:Mapped[Optional[str]]=mapped_column(String,index=True,nullable=True); phone:Mapped[Optional[str]]=mapped_column(String,nullable=True); external_id:Mapped[Optional[str]]=mapped_column(String,index=True,nullable=True); customer_id:Mapped[Optional[str]]=mapped_column(String,index=True,nullable=True); attributes_json:Mapped[str]=mapped_column(Text,default="{}"); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class CustomerEvent(Base):
-    __tablename__="customer_events"; __table_args__=(UniqueConstraint("tenant_id","source","idempotency_key",name="uq_customer_events_tenant_source_idempotency"),); id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); profile_id:Mapped[str]=mapped_column(ForeignKey("profiles.id"),index=True); name:Mapped[str]=mapped_column(String,index=True); source:Mapped[str]=mapped_column(String,default="api",index=True); idempotency_key:Mapped[Optional[str]]=mapped_column(String,nullable=True); properties_json:Mapped[str]=mapped_column(Text,default="{}"); occurred_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True); received_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
+    __tablename__="customer_events"; __table_args__=(UniqueConstraint("tenant_id","source","idempotency_key",name="uq_customer_events_tenant_source_idempotency"),); id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); profile_id:Mapped[str]=mapped_column(ForeignKey("profiles.id"),index=True); name:Mapped[str]=mapped_column(String,index=True); source:Mapped[str]=mapped_column(String,default="api",index=True); idempotency_key:Mapped[Optional[str]]=mapped_column(String,nullable=True); request_hash:Mapped[Optional[str]]=mapped_column(String(64),nullable=True); properties_json:Mapped[str]=mapped_column(Text,default="{}"); occurred_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True); received_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,server_default=func.now(),index=True)
 class Consent(Base):
     __tablename__="consents"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); profile_id:Mapped[str]=mapped_column(ForeignKey("profiles.id"),index=True); topic:Mapped[str]=mapped_column(String,default="marketing"); status:Mapped[str]=mapped_column(String); source:Mapped[str]=mapped_column(String); version:Mapped[str]=mapped_column(String); occurred_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); proof_json:Mapped[str]=mapped_column(Text,default="{}")
 class Preference(Base):
@@ -114,37 +115,102 @@ def profile_lookup(email:Optional[str]=None,phone:Optional[str]=None,external_id
     return {"id":profile.id,"email":profile.email,"phone":profile.phone,"external_id":profile.external_id,"customer_id":profile.customer_id,"attributes":attrs(profile)}
 @router.get("/profiles/{pid}")
 def profile_get(pid:str,ctx=Depends(auth),s:Session=Depends(db)): p=get_profile(s,ctx["tenant"],pid); return {"id":p.id,"email":p.email,"phone":p.phone,"external_id":p.external_id,"customer_id":p.customer_id,"attributes":attrs(p)}
-def ingest_event(x:EventIn,ctx,s):
-    get_profile(s,ctx["tenant"],x.profile_id)
+def event_request_hash(x):
+    payload = x.model_dump(mode="json", exclude={"idempotency_key"})
+    payload["occurred_at"] = (
+        x.occurred_at.astimezone(timezone.utc).isoformat() if x.occurred_at else None
+    )
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def event_replay(existing, x):
+    if existing.request_hash is not None:
+        if existing.request_hash != event_request_hash(x):
+            raise HTTPException(409, "event_idempotency_conflict")
+        return existing, True
+    timestamp = existing.occurred_at
+    if timestamp.tzinfo is None:  # SQLite returns UTC timestamps without tzinfo.
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    if (existing.profile_id != x.profile_id or existing.name != x.name
+        or existing.properties_json != json.dumps(x.properties, sort_keys=True, separators=(",", ":"))
+        or (x.occurred_at is not None and timestamp != x.occurred_at)):
+        raise HTTPException(409, "event_idempotency_conflict")
+    return existing, True
+
+
+def ingest_event(x: EventIn, ctx, s):
+    get_profile(s, ctx["tenant"], x.profile_id)
     if x.occurred_at is not None and x.occurred_at.tzinfo is None:
-        raise HTTPException(422,"occurred_at_timezone_required")
+        raise HTTPException(422, "occurred_at_timezone_required")
+    lookup = select(CustomerEvent).where(
+        CustomerEvent.tenant_id == ctx["tenant"], CustomerEvent.source == x.source,
+        CustomerEvent.idempotency_key == x.idempotency_key,
+    )
     if x.idempotency_key:
-        existing=s.scalar(select(CustomerEvent).where(CustomerEvent.tenant_id==ctx["tenant"],CustomerEvent.source==x.source,CustomerEvent.idempotency_key==x.idempotency_key))
+        existing = s.scalar(lookup)
         if existing:
-            if existing.profile_id!=x.profile_id or existing.name!=x.name or existing.properties_json!=json.dumps(x.properties,sort_keys=True,separators=(",",":")):
-                raise HTTPException(409,"event_idempotency_conflict")
-            return existing,True
-    e=CustomerEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],profile_id=x.profile_id,name=x.name,source=x.source,idempotency_key=x.idempotency_key,properties_json=json.dumps(x.properties,sort_keys=True,separators=(",",":")),occurred_at=x.occurred_at or now(),received_at=now()); s.add(e)
+            return event_replay(existing, x)
+    e = CustomerEvent(
+        id=str(uuid.uuid4()), tenant_id=ctx["tenant"], profile_id=x.profile_id,
+        name=x.name, source=x.source, idempotency_key=x.idempotency_key,
+        request_hash=event_request_hash(x),
+        properties_json=json.dumps(x.properties, sort_keys=True, separators=(",", ":")),
+        occurred_at=x.occurred_at or now(), received_at=now(),
+    )
+    try:
+        # Isolate a concurrent key collision before applying any journey effects.
+        with s.begin_nested():
+            s.add(e)
+            s.flush()
+    except IntegrityError:
+        existing = s.scalar(lookup) if x.idempotency_key else None
+        if existing is None:
+            raise
+        return event_replay(existing, x)
     for run in s.scalars(select(JourneyRun).where(JourneyRun.tenant_id==ctx["tenant"],JourneyRun.profile_id==x.profile_id,JourneyRun.status=="running")).all():
         j=s.get(Journey,run.journey_id)
         if j and j.goal_event==x.name:run.converted=True;run.status="completed";run.history_json=json.dumps(json.loads(run.history_json)+[{"event":"goal","name":x.name,"at":now().isoformat()}])
-    return e,False
+    return e, False
 
-@router.post("/events",status_code=202)
-def ingest(x:EventIn,ctx=Depends(auth),s:Session=Depends(db)):
-    e,replayed=ingest_event(x,ctx,s);s.commit();return {"id":e.id,"accepted":True,"replayed":replayed}
 
-@router.post("/events/batch",status_code=207)
-def ingest_batch(x:EventBatchIn,ctx=Depends(auth),s:Session=Depends(db)):
-    results=[]
-    for index,item in enumerate(x.events):
+def event_header_key(x, key):
+    if key is not None:
+        if x.idempotency_key is not None and x.idempotency_key != key:
+            raise HTTPException(422, "idempotency_key_mismatch")
+        return x.model_copy(update={"idempotency_key": key})
+    return x
+
+
+@router.post("/events", status_code=202)
+def ingest(x: EventIn, ctx=Depends(auth), s: Session=Depends(db),
+           idempotency_key: Optional[str]=Header(None, min_length=1, max_length=200)):
+    e, replayed = ingest_event(event_header_key(x, idempotency_key), ctx, s)
+    s.commit()
+    return {"id": e.id, "accepted": True, "replayed": replayed}
+
+
+@router.post("/events/batch", status_code=207)
+def ingest_batch(x: EventBatchIn, ctx=Depends(auth), s: Session=Depends(db),
+                 idempotency_key: Optional[str]=Header(None, min_length=1, max_length=200)):
+    results = []
+    for index, item in enumerate(x.events):
         try:
+            # Explicit per-item keys remain authoritative. Otherwise a batch
+            # header binds each position; retries must preserve item ordering.
+            if idempotency_key is not None and item.idempotency_key is None:
+                key = "batch:" + hashlib.sha256(
+                    json.dumps([idempotency_key, index], separators=(",", ":")).encode()
+                ).hexdigest()
+                item = event_header_key(item, key)
             with s.begin_nested():
-                event,replayed=ingest_event(item,ctx,s);s.flush()
-            results.append({"index":index,"status":"accepted","id":event.id,"replayed":replayed})
+                event, replayed = ingest_event(item, ctx, s)
+                s.flush()
+            results.append({"index": index, "status": "accepted", "id": event.id, "replayed": replayed})
         except HTTPException as exc:
-            results.append({"index":index,"status":"rejected","code":exc.detail})
-    s.commit();return {"accepted":sum(r["status"]=="accepted" for r in results),"rejected":sum(r["status"]=="rejected" for r in results),"results":results}
+            results.append({"index": index, "status": "rejected", "code": exc.detail})
+    s.commit()
+    return {"accepted": sum(r["status"] == "accepted" for r in results),
+            "rejected": sum(r["status"] == "rejected" for r in results), "results": results}
 
 @router.get("/profiles/{pid}/timeline")
 def timeline(pid:str,ctx=Depends(auth),s:Session=Depends(db)): get_profile(s,ctx["tenant"],pid); return s.scalars(select(CustomerEvent).where(CustomerEvent.tenant_id==ctx["tenant"],CustomerEvent.profile_id==pid).order_by(CustomerEvent.occurred_at.desc())).all()

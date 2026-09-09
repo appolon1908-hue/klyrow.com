@@ -101,3 +101,40 @@ def test_event_requires_timezone_and_lookup_is_tenant_scoped():
     assert found.json()["id"] == profile_id
     assert client.get("/v1/profiles/lookup", headers=headers("other"), params={"external_id": "crm-lookup-tenant"}).status_code == 404
     assert client.get("/v1/profiles/lookup", headers=headers("lookup-tenant"), params={"external_id": "x", "phone": "y"}).status_code == 422
+
+
+def test_header_replay_binds_complete_timestamp_payload():
+    pid = profile()
+    h = {**headers(), "Idempotency-Key": "header-timestamp"}
+    payload = {"profile_id": pid, "name": "clock", "occurred_at": "2026-01-01T00:00:00Z"}
+    first = client.post("/v1/events", headers=h, json=payload)
+    assert first.status_code == 202, first.text
+    replay = client.post("/v1/events", headers=h, json={**payload, "occurred_at": "2025-12-31T19:00:00-05:00"})
+    assert replay.json()["replayed"] is True
+    assert replay.json()["id"] == first.json()["id"]
+    assert client.post("/v1/events", headers=h, json={**payload, "occurred_at": "2026-01-02T00:00:00Z"}).status_code == 409
+    assert client.post("/v1/events", headers=h, json={"profile_id": pid, "name": "clock"}).status_code == 409
+    assert client.post("/v1/events", headers=h, json={**payload, "idempotency_key": "different"}).status_code == 422
+
+
+def test_batch_header_replays_items_and_preserves_partial_conflicts():
+    pid = profile()
+    h = {**headers(), "Idempotency-Key": "batch-header"}
+    items = [{"profile_id": pid, "name": "batch.first"}, {"profile_id": pid, "name": "batch.second"}]
+    first = client.post("/v1/events/batch", headers=h, json={"events": items})
+    replay = client.post("/v1/events/batch", headers=h, json={"events": items})
+    assert first.status_code == replay.status_code == 207
+    assert all(r["replayed"] for r in replay.json()["results"])
+    assert [r["id"] for r in first.json()["results"]] == [r["id"] for r in replay.json()["results"]]
+    changed = client.post("/v1/events/batch", headers=h, json={"events": [items[0], {**items[1], "name": "changed"}]})
+    assert changed.json()["accepted"] == changed.json()["rejected"] == 1
+    assert changed.json()["results"][1]["code"] == "event_idempotency_conflict"
+
+
+def test_event_openapi_describes_optional_header_and_non_atomic_batch():
+    schema = app.openapi()
+    for path, model in [("/v1/events", "OPTIONAL_REQUEST_SCOPED"), ("/v1/events/batch", "OPTIONAL_ITEM_SCOPED_NON_ATOMIC")]:
+        operation = schema["paths"][path]["post"]
+        assert operation["x-idempotency-required"] is False
+        assert operation["x-idempotency-model"] == model
+        assert any(p["name"].lower() == "idempotency-key" for p in operation["parameters"])
