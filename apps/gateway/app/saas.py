@@ -5,7 +5,7 @@ from typing import Any, Optional
 import dns.resolver
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func, select
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func, select
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .main import Audit, Base, Domain, Event, Message, Suppression, Tenant, User, audit, auth, db, require
@@ -16,7 +16,7 @@ now=lambda: datetime.now(timezone.utc)
 class Profile(Base):
     __tablename__="profiles"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); email:Mapped[Optional[str]]=mapped_column(String,index=True,nullable=True); phone:Mapped[Optional[str]]=mapped_column(String,nullable=True); external_id:Mapped[Optional[str]]=mapped_column(String,index=True,nullable=True); customer_id:Mapped[Optional[str]]=mapped_column(String,index=True,nullable=True); attributes_json:Mapped[str]=mapped_column(Text,default="{}"); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 class CustomerEvent(Base):
-    __tablename__="customer_events"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); profile_id:Mapped[str]=mapped_column(ForeignKey("profiles.id"),index=True); name:Mapped[str]=mapped_column(String,index=True); properties_json:Mapped[str]=mapped_column(Text,default="{}"); occurred_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
+    __tablename__="customer_events"; __table_args__=(UniqueConstraint("tenant_id","source","idempotency_key",name="uq_customer_events_tenant_source_idempotency"),); id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); profile_id:Mapped[str]=mapped_column(ForeignKey("profiles.id"),index=True); name:Mapped[str]=mapped_column(String,index=True); source:Mapped[str]=mapped_column(String,default="api",index=True); idempotency_key:Mapped[Optional[str]]=mapped_column(String,nullable=True); properties_json:Mapped[str]=mapped_column(Text,default="{}"); occurred_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True); received_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now,index=True)
 class Consent(Base):
     __tablename__="consents"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); profile_id:Mapped[str]=mapped_column(ForeignKey("profiles.id"),index=True); topic:Mapped[str]=mapped_column(String,default="marketing"); status:Mapped[str]=mapped_column(String); source:Mapped[str]=mapped_column(String); version:Mapped[str]=mapped_column(String); occurred_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); proof_json:Mapped[str]=mapped_column(Text,default="{}")
 class Preference(Base):
@@ -53,7 +53,8 @@ class UsageLedger(Base):
     __tablename__="usage_ledger"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); kind:Mapped[str]=mapped_column(String); quantity:Mapped[int]=mapped_column(Integer); reference:Mapped[Optional[str]]=mapped_column(String,nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
 
 class ProfileIn(BaseModel): email:Optional[str]=None; phone:Optional[str]=None; external_id:Optional[str]=None; customer_id:Optional[str]=None; attributes:dict[str,Any]=Field(default_factory=dict)
-class EventIn(BaseModel): profile_id:str; name:str=Field(min_length=1,max_length=100); properties:dict[str,Any]=Field(default_factory=dict); occurred_at:Optional[datetime]=None
+class EventIn(BaseModel): profile_id:str; name:str=Field(min_length=1,max_length=100); source:str=Field(default="api",min_length=1,max_length=64,pattern=r"^[a-zA-Z0-9_.:-]+$"); idempotency_key:Optional[str]=Field(default=None,min_length=1,max_length=200); properties:dict[str,Any]=Field(default_factory=dict); occurred_at:Optional[datetime]=None
+class EventBatchIn(BaseModel): events:list[EventIn]=Field(min_length=1,max_length=1000)
 class ConsentIn(BaseModel): profile_id:str; topic:str="marketing"; status:str=Field(pattern="^(granted|revoked|pending)$"); source:str; version:str; proof:dict[str,Any]=Field(default_factory=dict)
 class PreferenceIn(BaseModel): topic:str; subscribed:bool
 class SegmentIn(BaseModel): name:str; rules:dict[str,Any]; kind:str=Field(default="dynamic",pattern="^(dynamic|manual|exclusion)$")
@@ -103,15 +104,48 @@ def profile_upsert(x:ProfileIn,ctx=Depends(auth),s:Session=Depends(db)):
         for ev in s.scalars(select(CustomerEvent).where(CustomerEvent.profile_id==duplicate.id)).all():ev.profile_id=p.id
         s.delete(duplicate)
     p.email=x.email.lower() if x.email else p.email; p.phone=x.phone or p.phone; p.external_id=x.external_id or p.external_id; p.customer_id=x.customer_id or p.customer_id; p.attributes_json=json.dumps({**attrs(p),**x.attributes}); p.updated_at=now(); s.add(p); audit(s,ctx,"profile.upserted"); s.commit(); return {"id":p.id,"email":p.email,"attributes":attrs(p),"merged":len(matches)>1}
+@router.get("/profiles/lookup")
+def profile_lookup(email:Optional[str]=None,phone:Optional[str]=None,external_id:Optional[str]=None,customer_id:Optional[str]=None,ctx=Depends(auth),s:Session=Depends(db)):
+    supplied=[value for value in (email,phone,external_id,customer_id) if value]
+    if len(supplied)!=1:raise HTTPException(422,"exactly_one_identifier_required")
+    field,value=(Profile.email,email.lower()) if email else (Profile.phone,phone) if phone else (Profile.external_id,external_id) if external_id else (Profile.customer_id,customer_id)
+    profile=s.scalar(select(Profile).where(Profile.tenant_id==ctx["tenant"],field==value))
+    if not profile:raise HTTPException(404,"profile_not_found")
+    return {"id":profile.id,"email":profile.email,"phone":profile.phone,"external_id":profile.external_id,"customer_id":profile.customer_id,"attributes":attrs(profile)}
 @router.get("/profiles/{pid}")
 def profile_get(pid:str,ctx=Depends(auth),s:Session=Depends(db)): p=get_profile(s,ctx["tenant"],pid); return {"id":p.id,"email":p.email,"phone":p.phone,"external_id":p.external_id,"customer_id":p.customer_id,"attributes":attrs(p)}
-@router.post("/events",status_code=202)
-def ingest(x:EventIn,ctx=Depends(auth),s:Session=Depends(db)):
-    get_profile(s,ctx["tenant"],x.profile_id); e=CustomerEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],profile_id=x.profile_id,name=x.name,properties_json=json.dumps(x.properties),occurred_at=x.occurred_at or now()); s.add(e)
+def ingest_event(x:EventIn,ctx,s):
+    get_profile(s,ctx["tenant"],x.profile_id)
+    if x.occurred_at is not None and x.occurred_at.tzinfo is None:
+        raise HTTPException(422,"occurred_at_timezone_required")
+    if x.idempotency_key:
+        existing=s.scalar(select(CustomerEvent).where(CustomerEvent.tenant_id==ctx["tenant"],CustomerEvent.source==x.source,CustomerEvent.idempotency_key==x.idempotency_key))
+        if existing:
+            if existing.profile_id!=x.profile_id or existing.name!=x.name or existing.properties_json!=json.dumps(x.properties,sort_keys=True,separators=(",",":")):
+                raise HTTPException(409,"event_idempotency_conflict")
+            return existing,True
+    e=CustomerEvent(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],profile_id=x.profile_id,name=x.name,source=x.source,idempotency_key=x.idempotency_key,properties_json=json.dumps(x.properties,sort_keys=True,separators=(",",":")),occurred_at=x.occurred_at or now(),received_at=now()); s.add(e)
     for run in s.scalars(select(JourneyRun).where(JourneyRun.tenant_id==ctx["tenant"],JourneyRun.profile_id==x.profile_id,JourneyRun.status=="running")).all():
         j=s.get(Journey,run.journey_id)
         if j and j.goal_event==x.name:run.converted=True;run.status="completed";run.history_json=json.dumps(json.loads(run.history_json)+[{"event":"goal","name":x.name,"at":now().isoformat()}])
-    s.commit(); return {"id":e.id,"accepted":True}
+    return e,False
+
+@router.post("/events",status_code=202)
+def ingest(x:EventIn,ctx=Depends(auth),s:Session=Depends(db)):
+    e,replayed=ingest_event(x,ctx,s);s.commit();return {"id":e.id,"accepted":True,"replayed":replayed}
+
+@router.post("/events/batch",status_code=207)
+def ingest_batch(x:EventBatchIn,ctx=Depends(auth),s:Session=Depends(db)):
+    results=[]
+    for index,item in enumerate(x.events):
+        try:
+            with s.begin_nested():
+                event,replayed=ingest_event(item,ctx,s);s.flush()
+            results.append({"index":index,"status":"accepted","id":event.id,"replayed":replayed})
+        except HTTPException as exc:
+            results.append({"index":index,"status":"rejected","code":exc.detail})
+    s.commit();return {"accepted":sum(r["status"]=="accepted" for r in results),"rejected":sum(r["status"]=="rejected" for r in results),"results":results}
+
 @router.get("/profiles/{pid}/timeline")
 def timeline(pid:str,ctx=Depends(auth),s:Session=Depends(db)): get_profile(s,ctx["tenant"],pid); return s.scalars(select(CustomerEvent).where(CustomerEvent.tenant_id==ctx["tenant"],CustomerEvent.profile_id==pid).order_by(CustomerEvent.occurred_at.desc())).all()
 
