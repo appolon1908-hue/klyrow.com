@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""Exercise a candidate on disposable Docker resources with no external network."""
+import argparse
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+import time
+import uuid
+
+ROOT = Path(__file__).resolve().parents[1]
+DATABASE = 'mirror.gcr.io/library/mariadb@sha256:611a2fcc5fa7c6ceb8644c6f74b25ede004ff6c3a6b38c8f8c23d3bbf6c26430'
+GENERATED_SECRETS = []
+
+
+def redact(diagnostic):
+    for value in (*GENERATED_SECRETS, 'ci-only-mautic-password', 'ci-only-database-root',
+                  'ci-only-mautic-installation-key', 'ci-only-installer-password',
+                  'ci-only-sensitive-value', 'obsolete-value-must-be-overridden'):
+        diagnostic = diagnostic.replace(value, '[REDACTED]')
+    return diagnostic
+
+
+def docker(*args, check=True, timeout=240):
+    result = subprocess.run(['docker', *args], text=True, capture_output=True, timeout=timeout)
+    if check and result.returncode:
+        # This isolated rehearsal uses synthetic credentials only. Keep even
+        # those credentials out of command/exception output.
+        diagnostic = redact((result.stdout + result.stderr)[-4000:])
+        raise RuntimeError('Disposable Docker rehearsal command failed: ' + args[0] + '\n' + diagnostic)
+    return result
+
+
+def wait_ready(command, timeout=180):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if command().returncode == 0:
+            return
+        time.sleep(2)
+    raise RuntimeError('Disposable runtime did not become ready')
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--image', required=True)
+    parser.add_argument('--source-sha', required=True)
+    args = parser.parse_args()
+    prefix = 'klyrow-mautic-ci-' + uuid.uuid4().hex[:12]
+    containers = []
+    network = prefix + '-network'
+    db = prefix + '-db'
+    image_info = json.loads(docker('image', 'inspect', args.image).stdout)[0]
+    assert image_info['Config']['User'] == '33:33'
+    assert not image_info['Config'].get('Volumes')
+    assert image_info['Config']['Labels']['org.opencontainers.image.revision'] == args.source_sha
+    docker('pull', DATABASE)
+    docker('network', 'create', '--internal', network)
+    try:
+        with tempfile.TemporaryDirectory(prefix=prefix) as directory:
+            base = Path(directory)
+            base.chmod(0o755)
+            for name in ('config', 'secrets', 'logs', 'files', 'images'):
+                (base / name).mkdir(mode=0o777)
+                (base / name).chmod(0o777 if name in ('logs', 'files', 'images') else 0o755)
+            (base / 'bootstrap-output').mkdir(mode=0o777)
+            (base / 'bootstrap-output').chmod(0o777)
+            # Deliberately synthetic, confined to the disposable internal network.
+            for name, value in {'db': 'ci-only-mautic-password', 'root': 'ci-only-database-root',
+                                'mailer': 'null://null', 'key': 'ci-only-mautic-installation-key'}.items():
+                (base / 'secrets' / name).write_text(value)
+                (base / 'secrets' / name).chmod(0o444)
+            (base / 'config/local.php').write_text("""<?php
+$parameters = [
+    'db_driver' => 'pdo_mysql', 'db_host' => 'database', 'db_port' => 3306,
+    'db_name' => 'mautic', 'db_user' => 'mautic', 'db_table_prefix' => '',
+    'site_url' => 'http://localhost:8080',
+    'messenger_dsn_email' => 'doctrine://default?queue_name=email&auto_setup=false',
+    'messenger_dsn_hit' => 'doctrine://default?queue_name=hit&auto_setup=false',
+    'messenger_dsn_failed' => 'doctrine://default?queue_name=failed&auto_setup=false',
+    'db_password' => 'obsolete-value-must-be-overridden',
+    'mailer_dsn' => 'smtp://must-never-be-used.invalid',
+    'secret_key' => 'obsolete-value-must-be-overridden',
+];
+""")
+            (base / 'config/local.php').chmod(0o444)
+            mounts = ['--mount', f'type=bind,src={base}/config,dst=/var/lib/klyrow-mautic/config,readonly',
+                      '--mount', f'type=bind,src={base}/secrets,dst=/run/secrets,readonly']
+            env = ['--env', 'MAUTIC_DB_PASSWORD_FILE=/run/secrets/db',
+                   '--env', 'MAUTIC_MAILER_DSN_FILE=/run/secrets/mailer',
+                   '--env', 'MAUTIC_SECRET_KEY_FILE=/run/secrets/key']
+            containers.append(db)
+            docker('run', '--detach', '--name', db, '--network', network,
+                   '--network-alias', 'database', '--mount', mounts[3],
+                   '--env', 'MARIADB_ROOT_PASSWORD_FILE=/run/secrets/root',
+                   '--env', 'MARIADB_PASSWORD_FILE=/run/secrets/db',
+                   '--env', 'MARIADB_DATABASE=mautic', '--env', 'MARIADB_USER=mautic', DATABASE)
+            db_ready = lambda: docker('exec', db, 'healthcheck.sh', '--connect',
+                                      '--innodb_initialized', check=False)
+            wait_ready(db_ready)
+
+            # The only installer invocation is this disposable rehearsal. It has
+            # a writable ephemeral config and filesystem and cannot reach Postal,
+            # Middleware, the Internet, or any production database.
+            installation = docker('run', '--rm', '--user', '0:0', '--network', network, *mounts, *env,
+                   '--tmpfs', '/var/www/html/config:rw', '--mount',
+                   f'type=bind,src={ROOT}/docker/mautic-runtime/local.php,dst=/ci/bootstrap.php,readonly',
+                   '--mount', f'type=bind,src={base}/bootstrap-output,dst=/ci/bootstrap-output',
+                   '--entrypoint', 'sh', args.image, '-ceu',
+                   'cp /ci/bootstrap.php /var/www/html/config/local.php; '
+                   'printf \'\\nunset($parameters["site_url"]);\\n\' >> /var/www/html/config/local.php; '
+                   'php bin/console mautic:install --force --no-interaction '
+                   '--admin_username ciadmin --admin_email ci@example.invalid '
+                   '--admin_password ci-only-installer-password http://localhost:8080; '
+                   'php bin/console messenger:setup-transports --no-interaction; '
+                   'php -r \'require "config/local.php"; '
+                   'if (!copy("config/local.php", "/ci/bootstrap-output/local.php") || '
+                   'file_put_contents("/ci/bootstrap-output/key", $parameters["secret_key"]) === false) {exit(1);} '
+                   'chmod("/ci/bootstrap-output/local.php", 0644); chmod("/ci/bootstrap-output/key", 0644);\'',
+                   timeout=360)
+            if 'Install complete' not in installation.stdout:
+                # Upstream also returns zero when requirements cancel step zero.
+                raise RuntimeError('Disposable installation did not complete:\n' +
+                                   redact(installation.stdout + installation.stderr))
+            installed_key = (base / 'bootstrap-output/key').read_text()
+            assert installed_key
+            GENERATED_SECRETS.append(installed_key)
+            (base / 'secrets/key').chmod(0o644)
+            (base / 'secrets/key').write_text(installed_key)
+            (base / 'secrets/key').chmod(0o444)
+            # Retain every installer-generated setting while deliberately making
+            # the legacy credentials wrong, to exercise file authority.
+            (base / 'config/local.php').chmod(0o644)
+            installed_config = (base / 'bootstrap-output/local.php').read_text()
+            assert installed_config.lstrip().startswith('<?php') and '?>' not in installed_config
+            (base / 'config/local.php').write_text(installed_config +
+                '\n$parameters["db_password"] = "obsolete-value-must-be-overridden";\n' +
+                '$parameters["mailer_dsn"] = "smtp://must-never-be-used.invalid";\n' +
+                '$parameters["secret_key"] = "obsolete-value-must-be-overridden";\n')
+            (base / 'config/local.php').chmod(0o444)
+            print('Fresh schema, admin fixture and original installation key established.', flush=True)
+            docker('run', '--rm', '--user', '0:0', '--network', network, *mounts, *env,
+                   '--entrypoint', 'php', args.image, 'bin/console', 'doctrine:query:sql',
+                   'CREATE TABLE klyrow_runtime_rehearsal (id INT PRIMARY KEY)')
+            docker('run', '--rm', '--user', '0:0', '--network', network, *mounts, *env,
+                   '--entrypoint', 'php', args.image, 'bin/console', 'doctrine:query:sql',
+                   'INSERT INTO klyrow_runtime_rehearsal (id) VALUES (1)')
+
+            effective = docker('run', '--rm', '--network', 'none', *mounts, *env,
+                               '--entrypoint', 'php', args.image, '-r',
+                               'require "config/local.php"; '
+                               'foreach (["db_password"=>"db","mailer_dsn"=>"mailer","secret_key"=>"key"] '
+                               'as $parameter=>$file) {if (!hash_equals(file_get_contents("/run/secrets/".$file),'
+                               '$parameters[$parameter])) {exit(1);}} echo "file authority verified";')
+            assert effective.stdout == 'file authority verified'
+            for name, data in {'empty': b'', 'multiline': b'ci-only-sensitive-value\nsecond',
+                               'oversized': b'x' * 65537}.items():
+                (base / 'secrets' / name).write_bytes(data)
+                (base / 'secrets' / name).chmod(0o444)
+            (base / 'secrets' / 'linked').symlink_to('db')
+            for bad_env in ('MAUTIC_DB_PASSWORD_FILE=/run/secrets/missing',
+                            'MAUTIC_DB_PASSWORD_FILE=/run/secrets/empty',
+                            'MAUTIC_DB_PASSWORD_FILE=/run/secrets/multiline',
+                            'MAUTIC_DB_PASSWORD_FILE=/run/secrets/oversized',
+                            'MAUTIC_DB_PASSWORD_FILE=/run/secrets/linked',
+                            'MAUTIC_DB_PASSWORD_FILE=/run/secrets/../escape',
+                            'MAUTIC_DB_PASSWORD=ci-only-sensitive-value'):
+                failed = docker('run', '--rm', '--network', 'none', *mounts, *env, '--env', bad_env,
+                                '--entrypoint', 'php', args.image, '-r',
+                                'require "config/local.php";', check=False)
+                assert failed.returncode != 0
+                assert 'ci-only-sensitive-value' not in failed.stdout + failed.stderr
+
+            for role in ('mautic_web', 'mautic_cron', 'mautic_worker'):
+                name = prefix + '-' + role
+                containers.append(name)
+                restricted = ['--network', network,
+                       '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+                       '--pids-limit', '128', '--memory', '1g', *mounts, *env,
+                       '--tmpfs', '/tmp:rw,nosuid,nodev,uid=33,gid=33,mode=1770',
+                       '--tmpfs', '/var/www/html/var/cache:rw,nosuid,nodev,uid=33,gid=33',
+                       '--tmpfs', '/var/www/html/var/tmp:rw,nosuid,nodev,uid=33,gid=33',
+                       '--mount', f'type=bind,src={base}/logs,dst=/var/www/html/var/logs',
+                       '--mount', f'type=bind,src={base}/files,dst=/var/www/html/docroot/media/files',
+                       '--mount', f'type=bind,src={base}/images,dst=/var/www/html/docroot/media/images',
+                       '--env', 'DOCKER_MAUTIC_ROLE=' + role,
+                       '--env', 'KLYROW_MAUTIC_JOBS_ENABLED=true']
+                # Read-only bootstrap diagnostics use the same restrictions and
+                # synthetic data, with errors redacted by docker().
+                docker('run', '--rm', *restricted, '--entrypoint', 'php', args.image,
+                       'bin/console', '--no-interaction', '--no-debug', 'doctrine:query:sql', 'SELECT 1')
+                docker('run', '--detach', '--name', name, *restricted, args.image)
+                try:
+                    wait_ready(lambda: docker('exec', name, '/usr/local/bin/klyrow-mautic',
+                                              'healthcheck', check=False), timeout=60)
+                except RuntimeError:
+                    # This is a disposable synthetic fixture, never live logs.
+                    result = docker('logs', '--tail', '20', name, check=False)
+                    print(redact(result.stdout + result.stderr))
+                    result = docker('exec', name, 'python3', '-c',
+                        'from pathlib import Path; '
+                        'files=sorted(Path("/var/www/html/var/logs").glob("*"))[-5:]; '
+                        '[print(p.name, p.read_text(errors="replace")[-8000:]) '
+                        'for p in files if p.is_file()]', check=False)
+                    print(redact(result.stdout + result.stderr))
+                    result = docker('exec', name, 'curl', '--max-time', '10', '--silent',
+                                    '--output', '/dev/null', '--write-out', '%{http_code}',
+                                    'http://127.0.0.1:8080/s/login', check=False)
+                    print('Local HTTP status:', result.stdout)
+                    raise
+                inspected = json.loads(docker('inspect', name).stdout)[0]
+                assert inspected['Image'] == image_info['Id']
+                assert inspected['HostConfig']['ReadonlyRootfs']
+                docker('exec', name, 'sh', '-ceu',
+                       'test "$(id -u)" = 33; test ! -w /var/www/html/composer.lock; '
+                       'test ! -w /var/www/html/config/local.php; '
+                       'test "$(awk \'/^CapEff:/ {print $2}\' /proc/1/status)" = 0000000000000000')
+                print(role + ': same image, non-root, read-only, healthy', flush=True)
+                if role == 'mautic_web':
+                    (base / 'images/probe.php').write_text('<?php echo "must-not-execute";')
+                    (base / 'files/probe.php').write_text('<?php echo "must-not-execute";')
+                    (base / 'images/.htaccess').write_text('Require all granted\n')
+                    for path in ('/media/images/probe.php', '/media/files/probe.php'):
+                        result = docker('exec', name, 'curl', '--silent', '--output', '/dev/null',
+                                        '--write-out', '%{http_code}', 'http://127.0.0.1:8080' + path)
+                        assert result.stdout == '403'
+
+            for name in containers[1:]:
+                docker('stop', '--time', '35', name)
+                assert json.loads(docker('inspect', name).stdout)[0]['State']['ExitCode'] == 0
+                docker('start', name)
+                wait_ready(lambda: docker('exec', name, '/usr/local/bin/klyrow-mautic',
+                                          'healthcheck', check=False))
+            # Dependency failure must never keep a role healthy. Consumers may
+            # exit on connection loss; recovery is an explicit container restart.
+            docker('stop', '--time', '30', db)
+            for name in containers[1:]:
+                assert docker('exec', name, '/usr/local/bin/klyrow-mautic',
+                              'healthcheck', check=False).returncode != 0
+            docker('start', db)
+            wait_ready(db_ready)
+            for name in containers[1:]:
+                docker('restart', '--time', '35', name)
+                wait_ready(lambda: docker('exec', name, '/usr/local/bin/klyrow-mautic',
+                                          'healthcheck', check=False))
+            result = docker('exec', containers[1], 'php', '-r',
+                   'require "config/local.php"; '
+                   '$dsn=sprintf("mysql:host=%s;port=%s;dbname=%s", $parameters["db_host"], '
+                   '$parameters["db_port"], $parameters["db_name"]); '
+                   '$db=new PDO($dsn,$parameters["db_user"],$parameters["db_password"]); '
+                   'if ($db->query("SELECT COUNT(*) FROM klyrow_runtime_rehearsal WHERE id=1")'
+                   '->fetchColumn() != 1) {exit(1);} echo "persistent fixture verified";')
+            assert result.stdout == 'persistent fixture verified'
+            print('Database failure, role restart, and persistent fixture readback passed.', flush=True)
+    finally:
+        for name in reversed(containers):
+            docker('rm', '--force', '--volumes', name, check=False)
+        docker('network', 'rm', network, check=False)
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,141 @@
+name: Klyrow Mautic runtime CI
+
+on:
+  pull_request:
+    paths:
+      - docker/mautic.Dockerfile
+      - docker/mautic-runtime/**
+      - scripts/mautic-runtime-rehearsal
+      - tests/test_mautic_runtime.py
+      - docs/runtime/MAUTIC_HARDENED_RUNTIME.md
+      - .github/workflows/mautic-runtime-ci.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  KLYROW_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+concurrency:
+  group: mautic-runtime-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: mautic-contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.KLYROW_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check pytest
+      - run: python -m pytest -q tests/test_mautic_runtime.py
+
+  image:
+    name: mautic-image
+    needs: contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.KLYROW_SOURCE_SHA }}
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - id: source
+        name: Bind the candidate to source and reproducible epoch
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$KLYROW_SOURCE_SHA"
+          test -z "$(git status --porcelain)"
+          echo "epoch=$(git log -1 --pretty=%ct)" >> "$GITHUB_OUTPUT"
+      - name: Build the non-publishing Mautic candidate
+        id: candidate
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/mautic.Dockerfile
+          target: mautic-runtime
+          load: true
+          push: false
+          tags: klyrow-mautic:${{ env.KLYROW_SOURCE_SHA }}
+          build-args: |
+            SOURCE_COMMIT_SHA=${{ env.KLYROW_SOURCE_SHA }}
+            SOURCE_DATE_EPOCH=${{ steps.source.outputs.epoch }}
+          provenance: false
+          sbom: false
+      - name: Audit the actual locked Composer resolution
+        run: |
+          set -Eeuo pipefail
+          docker run --rm --read-only --tmpfs /tmp:rw,uid=33,gid=33 \
+            --entrypoint composer "klyrow-mautic:${KLYROW_SOURCE_SHA}" \
+            audit --locked --no-dev --abandoned=ignore --no-plugins --format=json > composer-mautic-audit.json
+      - name: Rehearse all roles, secret authority, failure and restart
+        run: python3 scripts/mautic-runtime-rehearsal --image "klyrow-mautic:${KLYROW_SOURCE_SHA}" --source-sha "$KLYROW_SOURCE_SHA"
+      - name: Retain complete HIGH/CRITICAL vulnerability inventory
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: klyrow-mautic:${{ env.KLYROW_SOURCE_SHA }}
+          format: sarif
+          output: trivy-mautic-all.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: '0'
+          ignore-unfixed: false
+      - name: Enforce the protected-main fixable HIGH/CRITICAL policy
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: klyrow-mautic:${{ env.KLYROW_SOURCE_SHA }}
+          format: sarif
+          output: trivy-mautic.sarif
+          severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
+          exit-code: '1'
+          ignore-unfixed: true
+      - name: Generate the Mautic CycloneDX SBOM
+        if: ${{ !cancelled() && steps.candidate.outcome == 'success' }}
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          image: klyrow-mautic:${{ env.KLYROW_SOURCE_SHA }}
+          format: cyclonedx-json
+          output-file: mautic.cdx.json
+          upload-artifact: false
+      - name: Compare two independent OCI builds
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.source.outputs.epoch }}
+        run: |
+          set -Eeuo pipefail
+          for copy in a b; do
+            docker buildx build --no-cache --provenance=false --sbom=false \
+              --target mautic-runtime \
+              --build-arg "SOURCE_COMMIT_SHA=${KLYROW_SOURCE_SHA}" \
+              --build-arg "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" \
+              --output "type=oci,dest=${RUNNER_TEMP}/mautic-${copy}.tar,rewrite-timestamp=true" \
+              --file docker/mautic.Dockerfile .
+          done
+          cmp "${RUNNER_TEMP}/mautic-a.tar" "${RUNNER_TEMP}/mautic-b.tar"
+          sha256sum "${RUNNER_TEMP}/mautic-a.tar" > mautic-oci.sha256
+      - name: Retain candidate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mautic-candidate-${{ env.KLYROW_SOURCE_SHA }}
+          path: |
+            composer-mautic-audit.json
+            trivy-mautic.sarif
+            trivy-mautic-all.sarif
+            mautic.cdx.json
+            mautic-oci.sha256
+          if-no-files-found: warn
+          retention-days: 30
