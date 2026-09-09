@@ -64,6 +64,10 @@ Include `compose.alert-routing.yaml`, its four required file references, and
 the rendered configuration in the protected release checksum. Verify the
 mounted client key is readable by Prometheus's existing non-root identity.
 The optional overlay is not automatically included in standard launchers.
+It attaches only Prometheus to a dedicated `alertmanager_egress` bridge, while
+retaining the internal `backend` network for scrapes. The host must route the
+reviewed private destination and permit its monitoring traffic through the host
+firewall. This attachment publishes no inbound ports; mTLS remains mandatory.
 
 After deployment, `/api/v1/alertmanagers` must report the expected active target.
 Read back the two actual Klyrow alert fingerprints in Alertmanager and their

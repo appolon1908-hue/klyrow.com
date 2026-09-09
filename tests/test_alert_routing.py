@@ -1,5 +1,9 @@
 import importlib.util
+import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 import yaml
@@ -26,3 +30,28 @@ def test_private_route_preserves_scrapes_and_requires_mtls():
 def test_public_or_invalid_targets_rejected(target):
     with pytest.raises(ValueError):
         module.render({}, target, "aler.codestra.media", "production")
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="Docker Compose unavailable")
+def test_routed_composition_retains_scrapes_and_has_cross_host_network(tmp_path):
+    base = tmp_path / "compose.yaml"
+    base.write_text(yaml.safe_dump({
+        "services": {"prometheus": {"image": "prom/prometheus:v3.5.0", "networks": ["backend"]}},
+        "networks": {"backend": {"internal": True}},
+    }))
+    env = {**os.environ, **{key: str(tmp_path / key) for key in (
+        "KLYROW_PROMETHEUS_ROUTED_CONFIG", "KLYROW_ALERTMANAGER_CA_FILE",
+        "KLYROW_ALERTMANAGER_CLIENT_CERT_FILE", "KLYROW_ALERTMANAGER_CLIENT_KEY_FILE",
+    )}}
+    result = subprocess.run([
+        "docker", "compose", "--project-name", "alert-routing-test", "-f", str(base),
+        "-f", str(ROOT / "compose.alert-routing.yaml"), "config", "--format", "json",
+    ], env=env, capture_output=True, text=True, check=True)
+    config = json.loads(result.stdout)
+    service = config["services"]["prometheus"]
+    attached = service["networks"]
+    assert "backend" in attached
+    assert config["networks"]["backend"]["internal"] is True
+    assert any(not config["networks"][name].get("internal", False) for name in attached)
+    assert not service.get("ports")
+    assert not service.get("privileged", False)
