@@ -45,6 +45,18 @@ Include it after the other overlays and use the exact same composition for confi
 validation, release-authority verification, and deployment. Standard launchers
 keep their disabled composition; this change does not silently activate it.
 
+Generate the checksum with that same Compose command, including the activation
+overlay and the selected environment file. Passing no arguments retains the
+standard disabled composition. Keep the resulting checksum in the approved
+`KLYROW_CONFIG_CHECKSUM_FILE` used by release verification:
+
+```bash
+scripts/config-checksum "${COMPOSE[@]}" > "$KLYROW_CONFIG_CHECKSUM_FILE"
+scripts/verify-release-authority pre-pull "${COMPOSE[@]}"
+```
+
+Only the checksum is emitted; rendered configuration values stay off stdout.
+
 `scripts/verify-release-authority` now validates the rendered configuration before
 the pre-pull and post-pull authority checks can succeed. Therefore `start`, `deploy`,
 and `update` all reject missing components, missing/invalid controls, partial
