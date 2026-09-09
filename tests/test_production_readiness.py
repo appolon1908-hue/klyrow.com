@@ -116,6 +116,7 @@ def test_deploy_requires_protected_source_config_and_rollback_authority():
     source = (ROOT / "scripts/verify-release-authority").read_text()
     validator = (ROOT / "scripts/verify-release-authority.py").read_text()
     assert "PUBLISH_SOURCE_SHA" in source and "PUBLISH_SHA256SUMS" in source
+    assert "python3 scripts/verify-email-activation" in source
     assert "git status --porcelain" in source
     assert "refs/remotes/origin/main" in source
     assert "Runtime configuration checksum mismatch" in source

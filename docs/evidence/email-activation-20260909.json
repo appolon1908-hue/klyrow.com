@@ -1,0 +1,98 @@
+{
+  "observed_at": "2026-09-09",
+  "host": "37.27.128.39",
+  "source": "SentinelX Docker inspect; whitelisted control values only",
+  "runtime_source_revision": "da9d85891a4e313748e309aed86662d6c03d26bb",
+  "configuration_changed": false,
+  "email_sent": false,
+  "postal_gate_source_read": "permission_denied",
+  "containers": [
+    {
+      "Name": "/klyrow-gateway-1",
+      "Config": {
+        "Env": [
+          "EXTERNAL_EMAIL_DELIVERY=true",
+          "KLYROW_PRODUCTION_GATE_APPROVED=true",
+          "KLYROW_SAFE_MODE=false",
+          "LIVE_EMAIL_DELIVERY=true",
+          "LIVE_SMS_DELIVERY=false",
+          "PRODUCTION_PROVIDER_ROUTING=true"
+        ]
+      },
+      "State": {
+        "Status": "running"
+      }
+    },
+    {
+      "Name": "/klyrow-worker-1",
+      "Config": {
+        "Env": [
+          "EXTERNAL_EMAIL_DELIVERY=true",
+          "KLYROW_PRODUCTION_GATE_APPROVED=true",
+          "KLYROW_SAFE_MODE=false",
+          "LIVE_EMAIL_DELIVERY=true",
+          "LIVE_SMS_DELIVERY=false",
+          "PRODUCTION_PROVIDER_ROUTING=true"
+        ]
+      },
+      "State": {
+        "Status": "running"
+      }
+    },
+    {
+      "Name": "/klyrow-smtp-relay-1",
+      "Config": {
+        "Env": [
+          "EXTERNAL_EMAIL_DELIVERY=true",
+          "KLYROW_PRODUCTION_GATE_APPROVED=true",
+          "KLYROW_SAFE_MODE=false",
+          "LIVE_EMAIL_DELIVERY=true",
+          "LIVE_SMS_DELIVERY=false",
+          "PRODUCTION_PROVIDER_ROUTING=true"
+        ]
+      },
+      "State": {
+        "Status": "running"
+      }
+    },
+    {
+      "Name": "/klyrow-postal-web-1",
+      "Config": {
+        "Env": [
+          "LIVE_EMAIL_DELIVERY=false",
+          "LIVE_PSTN_DIALING=false",
+          "LIVE_SMS_DELIVERY=false"
+        ]
+      },
+      "State": {
+        "Status": "running"
+      }
+    },
+    {
+      "Name": "/klyrow-postal-worker-1",
+      "Config": {
+        "Env": [
+          "LIVE_EMAIL_DELIVERY=false",
+          "LIVE_PSTN_DIALING=false",
+          "LIVE_SMS_DELIVERY=false"
+        ]
+      },
+      "State": {
+        "Status": "running"
+      }
+    },
+    {
+      "Name": "/klyrow-postal-smtp-1",
+      "Config": {
+        "Env": [
+          "LIVE_EMAIL_DELIVERY=false",
+          "LIVE_PSTN_DIALING=false",
+          "LIVE_SMS_DELIVERY=false"
+        ]
+      },
+      "State": {
+        "Status": "running"
+      }
+    }
+  ]
+}

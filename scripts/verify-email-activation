@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""Validate rendered Compose JSON or Docker inspect JSON from standard input."""
+
+import argparse
+import json
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from apps.gateway.app.email_activation_contract import validate_email_activation
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", choices=("compose", "inspect"), default="compose")
+    args = parser.parse_args()
+    try:
+        report = validate_email_activation(json.load(sys.stdin), source=args.source)
+    except (ValueError, TypeError):
+        # Parser exceptions may embed input. Never print raw Compose or inspect.
+        print(json.dumps({"configuration_consistent": False, "errors": ["invalid_activation_document"]}))
+        return 2
+    print(json.dumps(report, sort_keys=True))
+    return 0 if report["configuration_consistent"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

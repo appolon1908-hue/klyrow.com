@@ -9,6 +9,7 @@ from datetime import timedelta
 
 from sqlalchemy import select
 
+from .delivery_safety import email_activation_status
 from .main import DB, email_outbox_loop, postal_retry_loop, recover_middleware_commands
 from .billing import BillingEvent, BillingWorkItem, now
 from .mautic_adapter import dispatch_mautic_outbox
@@ -57,7 +58,12 @@ async def health(reader, writer):
     except Exception:
         pass
     body = json.dumps(
-        {"status": "ok", "service": "klyrow-" + ROLE, "role": ROLE}
+        {
+            "status": "ok",
+            "service": "klyrow-" + ROLE,
+            "role": ROLE,
+            "email_activation": email_activation_status(),
+        }
     ).encode()
     writer.write(
         b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
