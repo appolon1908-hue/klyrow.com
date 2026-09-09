@@ -1013,64 +1013,8 @@ def reconcile_provider_outbox_dead_letters(
 
 
 async def dispatch_provider_outbox(limit: int = 50) -> dict:
-    from .main import DB, SMTP_EVENT_MAP, emit_middleware
-    delivered = 0
-    failed = 0
-    with DB() as s:
-        stale = list(s.scalars(select(ProviderEvent).where(
-            ProviderEvent.state == "PROCESSING",
-            ProviderEvent.updated_at < now() - timedelta(minutes=5),
-        ).with_for_update(skip_locked=True).limit(limit)).all())
-        for event in stale:
-            event.state = "RETRY"
-            event.available_at = now()
-            event.last_error = "delivery_lease_expired"
-            event.updated_at = now()
-        events = list(s.scalars(select(ProviderEvent).where(ProviderEvent.state.in_(["PENDING", "RETRY"]),
-            ProviderEvent.available_at <= now()).order_by(ProviderEvent.created_at).with_for_update(skip_locked=True).limit(limit)).all())
-        snapshots=[]
-        for event in events:
-            event.state="PROCESSING";event.updated_at=now()
-            snapshots.append((event.id,event.kind,event.payload_json))
-        s.commit()
-    for event_id,event_kind,payload_json in snapshots:
-        payload = json.loads(payload_json)
-        canonical_event = SMTP_EVENT_MAP.get(event_kind)
-        ok = await emit_middleware(canonical_event, payload) if canonical_event else False
-        with DB() as s:
-            item = s.get(ProviderEvent, event_id)
-            if not item or item.state != "PROCESSING":
-                continue
-            item.attempts += 1
-            item.updated_at = now()
-            if ok:
-                item.state = "DELIVERED"
-                item.last_error = None
-                delivered += 1
-            else:
-                item.state = "DEAD_LETTER" if item.attempts >= 8 else "RETRY"
-                item.available_at = now() + timedelta(seconds=min(900, 2 ** item.attempts))
-                item.last_error = "server_a_delivery_failed"
-                failed += 1
-            s.commit()
-    with DB() as s:
-        usages = list(s.scalars(select(ProviderUsageEvent).where(ProviderUsageEvent.state.in_(["PENDING", "RETRY"]),
-            ProviderUsageEvent.available_at <= now()).limit(limit)).all())
-    for snapshot in usages:
-        ok = await emit_middleware("klyrow.usage.recorded", {"event_id": snapshot.id, "usage_event_id": snapshot.id,
-            "tenant_id": snapshot.tenant_id, "message_id": snapshot.message_id, "stream": snapshot.stream,
-            "billable_units": snapshot.billable_units, "timestamp": snapshot.created_at.isoformat(),
-            "provider_result_category": snapshot.result_category})
-        with DB() as s:
-            item = s.get(ProviderUsageEvent, snapshot.id)
-            if item and item.state in {"PENDING", "RETRY"}:
-                item.attempts += 1
-                item.state = "DELIVERED" if ok else ("DEAD_LETTER" if item.attempts >= 8 else "RETRY")
-                item.last_error = None if ok else "billing_control_plane_delivery_failed"
-                if not ok:
-                    item.available_at = now() + timedelta(seconds=min(900, 2 ** item.attempts))
-                s.commit()
-    return {"events_delivered": delivered, "events_failed": failed}
+    from .provider_outbox_delivery import dispatch
+    return await dispatch(limit)
 
 
 async def provider_worker_loop():
@@ -1766,9 +1710,11 @@ def consume_tracking_token(kind: str, token: str, s: Session = Depends(db)):
 
 @router.get("/operations/health")
 def operations_health(ctx=Depends(auth), s: Session = Depends(db)):
+    from .provider_outbox_delivery import status as outbox_status
     queued = s.scalar(select(func.count(ProviderMessage.id)).where(ProviderMessage.status == "QUEUED")) or 0
     dead = s.scalar(select(func.count(ProviderMessage.id)).where(ProviderMessage.status == "DEAD_LETTER")) or 0
-    return {"status": "ok", "queue_depth": queued, "dead_letter": dead, "safe_mode": True, "live_delivery": False}
+    return {"status": "ok", "queue_depth": queued, "dead_letter": dead, "safe_mode": True, "live_delivery": False,
+            "outbox": outbox_status(s, ctx["tenant"])}
 
 
 @router.post("/operations/messages/{message_id}/retry")

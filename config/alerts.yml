@@ -1,6 +1,11 @@
 groups:
   - name: klyrow-mail-engine
     rules:
+      - alert: KlyrowAlertRoutingUnavailable
+        expr: prometheus_notifications_alertmanagers_discovered{job="prometheus"} == 0 or absent(prometheus_notifications_alertmanagers_discovered{job="prometheus"})
+        for: 2m
+        labels: {severity: critical}
+        annotations: {summary: "Klyrow Prometheus has no discovered Alertmanager; inspect this alert locally until routing is restored"}
       - alert: KlyrowGatewayUnavailable
         expr: up{job="klyrow"} == 0
         for: 2m

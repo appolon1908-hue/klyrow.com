@@ -463,7 +463,8 @@ async def emit_middleware(event_type:str,payload:dict)->bool:
                 response.raise_for_status()
         return True
     except Exception as exc:
-        print(json.dumps({"level":"warning","system":"klyrow","event_id":event_id,"message_id":payload.get("message_id"),"event":"middleware_delivery_failed","error":type(exc).__name__}))
+        print(json.dumps({"level":"warning","system":"klyrow","event_id":event_id,"message_id":payload.get("message_id"),"event":"middleware_delivery_failed","error":type(exc).__name__,
+            "http_status":exc.response.status_code if isinstance(exc,httpx.HTTPStatusError) else None}))
         return False
 
 POSTAL_EVENTS={
@@ -778,9 +779,9 @@ def metrics(authorization:str=Header(default="")):
     with DB() as s:
         for status in ("QUEUED","PROCESSING","DEFERRED","FAILED","DEAD_LETTER"):
             PROVIDER_QUEUE.labels(status).set(s.scalar(select(func.count()).select_from(ProviderMessage).where(ProviderMessage.status==status)) or 0)
-        for state in ("PENDING","RETRY","DELIVERED","SKIPPED","DEAD_LETTER"):
+        for state in ("PENDING","PROCESSING","RETRY","DELIVERED","SKIPPED","DEAD_LETTER"):
             PROVIDER_EVENTS.labels(state).set(s.scalar(select(func.count()).select_from(ProviderEvent).where(ProviderEvent.state==state)) or 0)
-        for state in ("PENDING","RETRY","DELIVERED","DEAD_LETTER"):
+        for state in ("PENDING","PROCESSING","RETRY","DELIVERED","DEAD_LETTER"):
             PROVIDER_USAGE.labels(state).set(s.scalar(select(func.count()).select_from(ProviderUsageEvent).where(ProviderUsageEvent.state==state)) or 0)
         active=s.scalars(select(EmailOutbox).where(EmailOutbox.state.in_(("pending","sending","retry")))).all()
         ages=[]

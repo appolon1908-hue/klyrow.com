@@ -1,0 +1,8 @@
+# Include in the protected Compose checksum and release evidence before use.
+services:
+  prometheus:
+    volumes:
+      - ${KLYROW_PROMETHEUS_ROUTED_CONFIG:?set the validated rendered configuration}:/etc/prometheus/prometheus.yml:ro
+      - ${KLYROW_ALERTMANAGER_CA_FILE:?set the trusted Alertmanager CA}:/run/secrets/alertmanager-ca.crt:ro
+      - ${KLYROW_ALERTMANAGER_CLIENT_CERT_FILE:?set the Klyrow monitoring client certificate}:/run/secrets/alertmanager-client.crt:ro
+      - ${KLYROW_ALERTMANAGER_CLIENT_KEY_FILE:?set the protected Klyrow monitoring client key}:/run/secrets/alertmanager-client.key:ro
