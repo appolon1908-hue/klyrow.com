@@ -5,10 +5,10 @@ import pytest
 from fastapi import HTTPException
 
 from test_middleware_email_contract import gateway
-from apps.gateway.app import messaging, production_api, provider
+from apps.gateway.app import messaging, production_api, provider, saas
 
 
-MUTATIONS = [
+MUTATIONS = [(saas, name) for name in ("profile_upsert", "ingest", "ingest_batch")] + [
     (production_api, name) for name in ("list_create", "list_patch", "list_delete", "template_patch", "template_delete")
 ] + [
     (messaging, name) for name in ("domain_claim", "domain_verify", "dkim_rotate", "sender_create",
@@ -67,6 +67,9 @@ def test_domain_http_creation_requires_domain_capability(gateway, path):
 
 @pytest.mark.parametrize("method,path,payload,permission,expected", [
     ("POST", "/v1/lists", {"name": "Resolver contacts"}, "contact.manage", 201),
+    ("POST", "/v1/profiles", {"external_id": "resolver-profile"}, "contact.manage", 201),
+    ("POST", "/v1/events", {"profile_id": "absent", "name": "synthetic"}, "contact.manage", 404),
+    ("POST", "/v1/events/batch", {"events": [{"profile_id": "absent", "name": "synthetic"}]}, "contact.manage", 207),
     ("POST", "/v1/domains/claims", {"domain": "resolver.example"}, "domain.manage", 201),
     ("POST", "/v1/internal/email/domains/register", {"domain": "resolver.example"}, "domain.manage", 201),
     ("DELETE", "/v1/templates/foreign", None, "template.manage", 404),

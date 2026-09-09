@@ -16,6 +16,8 @@ def mutation_permission(method: str, path: str) -> str | None:
         ("/v1/senders", "sender.manage"),
         ("/v1/templates", "template.manage"),
         ("/v1/contacts", "contact.manage"),
+        ("/v1/profiles", "contact.manage"),
+        ("/v1/events", "contact.manage"),
         ("/v1/lists", "contact.manage"),
         ("/v1/suppressions", "contact.manage"),
         ("/v1/campaigns", "campaign.manage"),

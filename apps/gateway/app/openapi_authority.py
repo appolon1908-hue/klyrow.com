@@ -82,7 +82,10 @@ DURABLE_IDEMPOTENCY = {
 NON_ATOMIC_ITEM_IDEMPOTENCY = {
     ("post", "/v1/email/bulk"),
 }
+OPTIONAL_ITEM_IDEMPOTENCY = {("post", "/v1/events/batch")}
 OPTIONAL_IDEMPOTENCY = {
+    ("post", "/v1/events"),
+    *OPTIONAL_ITEM_IDEMPOTENCY,
     ("post", "/v1/billing/invoices"),
 }
 REQUIRED_IDEMPOTENCY = DURABLE_IDEMPOTENCY | NON_ATOMIC_ITEM_IDEMPOTENCY
@@ -442,6 +445,9 @@ def build_openapi(app: FastAPI) -> dict[str, Any]:
             elif operation_key in NON_ATOMIC_ITEM_IDEMPOTENCY:
                 operation["x-durable-idempotency"] = False
                 operation["x-idempotency-model"] = "ITEM_SCOPED_NON_ATOMIC"
+            elif operation_key in OPTIONAL_ITEM_IDEMPOTENCY:
+                operation["x-durable-idempotency"] = False
+                operation["x-idempotency-model"] = "OPTIONAL_ITEM_SCOPED_NON_ATOMIC"
             elif operation_key in OPTIONAL_IDEMPOTENCY:
                 operation["x-durable-idempotency"] = True
                 operation["x-idempotency-model"] = "OPTIONAL_REQUEST_SCOPED"
