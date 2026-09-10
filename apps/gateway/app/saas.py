@@ -263,7 +263,9 @@ def safe_object_reference(value:str)->str:
     """Accept only opaque object-store references, never arbitrary URLs or paths."""
     from urllib.parse import urlsplit
     parsed=urlsplit(value)
-    if parsed.scheme not in {"s3","b2"} or not parsed.netloc or parsed.username or parsed.password or not parsed.path or ".." in parsed.path.split("/") or any(ord(char)<32 for char in value):
+    from urllib.parse import unquote
+    decoded_path=unquote(parsed.path)
+    if parsed.scheme not in {"s3","b2"} or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment or not parsed.path or ".." in decoded_path.split("/") or any(ord(char)<32 for char in value):
         raise HTTPException(422,"invalid_object_reference")
     return value
 
@@ -344,7 +346,8 @@ def profile_deletion_schedule(x:ProfileDeletionIn,ctx=Depends(auth),s:Session=De
     if x.scheduled_for.tzinfo is None:raise HTTPException(422,"scheduled_for_timezone_required")
     if x.scheduled_for.astimezone(timezone.utc)<=now():raise HTTPException(422,"scheduled_for_must_be_future")
     get_profile(s,ctx["tenant"],x.profile_id)
-    duplicate=s.scalar(select(ProfileDeletionJob).where(ProfileDeletionJob.tenant_id==ctx["tenant"],ProfileDeletionJob.profile_id==x.profile_id,ProfileDeletionJob.state=="SCHEDULED"))
+    if s.scalar(select(Tenant).where(Tenant.id==ctx["tenant"]).with_for_update()) is None: raise HTTPException(404,"tenant_not_found")
+    duplicate=s.scalar(select(ProfileDeletionJob).where(ProfileDeletionJob.tenant_id==ctx["tenant"],ProfileDeletionJob.profile_id==x.profile_id,ProfileDeletionJob.state=="SCHEDULED").with_for_update())
     if duplicate:return {**deletion_payload(duplicate),"duplicate":True,"asynchronous":True}
     item=ProfileDeletionJob(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],profile_id=x.profile_id,requested_by=ctx["sub"],reason=x.reason,state="SCHEDULED",scheduled_for=x.scheduled_for.astimezone(timezone.utc));s.add(item);audit(s,ctx,"customer.profile_deletion.scheduled");s.commit();return {**deletion_payload(item),"duplicate":False,"asynchronous":True,"automatic_execution":False}
 
