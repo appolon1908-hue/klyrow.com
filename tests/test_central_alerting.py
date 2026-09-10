@@ -27,3 +27,13 @@ class CentralAlertingTests(unittest.TestCase):
         self.assertNotIn("ports", overlay["services"]["prometheus"])
         self.assertNotIn("image", overlay["services"]["prometheus"])
         self.assertTrue(all(":?" in item["file"] for item in overlay["secrets"].values()))
+
+    def test_overlay_retains_scraping_and_provides_private_host_egress(self):
+        base = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+        overlay = yaml.safe_load((ROOT / "compose.central-alerting.yml").read_text())
+        self.assertTrue(base["networks"]["backend"]["internal"])
+        networks = overlay["services"]["prometheus"]["networks"]
+        self.assertIn("backend", networks)
+        self.assertIn("alerting_egress", networks)
+        self.assertFalse(overlay["networks"]["alerting_egress"]["internal"])
+        self.assertNotIn("ports", overlay["services"]["prometheus"])
