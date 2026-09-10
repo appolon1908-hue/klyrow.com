@@ -116,8 +116,8 @@ async def submit(
     if command.stream == "operational":
         if (
             command.sender != "alerts@codestra.co"
-            or command.recipients != ["appolon@codestra.co"]
-            or command.reply_to != "appolon@codestra.co"
+            or command.recipients != ["appolon1908@gmail.com"]
+            or command.reply_to != "appolon1908@gmail.com"
             or command.classification != "operational-alert"
             or command.recipient_policy_id != "codestra-observability-admin-v1"
             or command.sender_policy_id != "codestra-alert-sender-v1"
