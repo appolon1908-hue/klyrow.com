@@ -12,6 +12,8 @@ import os
 from dataclasses import dataclass
 from typing import Mapping
 
+from email_validator import EmailNotValidError, validate_email
+
 CANONICAL_ISSUER = "https://auth.codestra.co/realms/codestra"
 MFA_POSSESSION_AMR_VALUES = frozenset(
     {"fido", "fido2", "hwk", "otp", "swk", "totp", "webauthn"}
@@ -46,16 +48,20 @@ class PlatformOwnerConfig:
         *,
         canonical_issuer: str = CANONICAL_ISSUER,
     ) -> "PlatformOwnerConfig":
-        issuer = str(values.get("KLYROW_PLATFORM_OWNER_ISSUER", "")).strip().rstrip("/")
+        issuer = str(values.get("KLYROW_PLATFORM_OWNER_ISSUER", "")).strip()
         subject = str(values.get("KLYROW_PLATFORM_OWNER_SUBJECT", "")).strip()
         email = str(values.get("KLYROW_PLATFORM_OWNER_EMAIL", "")).strip().lower()
         if not issuer or not subject or not email:
             raise PlatformOwnerError(503, "platform_owner_not_configured")
-        if issuer != canonical_issuer.rstrip("/"):
+        if issuer != canonical_issuer:
             raise PlatformOwnerError(503, "platform_owner_issuer_misconfigured")
         if len(subject) > 255 or any(char in subject for char in "\r\n"):
             raise PlatformOwnerError(503, "platform_owner_subject_misconfigured")
-        if len(email) > 254 or "@" not in email or any(char in email for char in "\r\n"):
+        try:
+            mailbox = validate_email(email, check_deliverability=False)
+        except EmailNotValidError as exc:
+            raise PlatformOwnerError(503, "platform_owner_email_misconfigured") from exc
+        if mailbox.normalized.lower() != email:
             raise PlatformOwnerError(503, "platform_owner_email_misconfigured")
 
         raw_age = str(
@@ -140,9 +146,9 @@ def validate_platform_owner_claims(
     it never creates or elevates a role by itself.
     """
 
-    if identity_issuer.rstrip("/") != config.issuer or identity_subject != config.subject:
+    if identity_issuer != config.issuer or identity_subject != config.subject:
         raise PlatformOwnerError(403, "platform_owner_identity_mismatch")
-    if str(claims.get("iss") or "").rstrip("/") != config.issuer:
+    if str(claims.get("iss") or "") != config.issuer:
         raise PlatformOwnerError(403, "platform_owner_identity_mismatch")
     if str(claims.get("sub") or "") != config.subject:
         raise PlatformOwnerError(403, "platform_owner_identity_mismatch")
