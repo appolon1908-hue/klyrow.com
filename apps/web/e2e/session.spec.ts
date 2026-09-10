@@ -80,3 +80,14 @@ test('an API session expiry retains the current workspace deep link', async ({ p
   await expect(page).toHaveURL(/\/login\?return_to=/)
   expect(new URL(page.url()).searchParams.get('return_to')).toBe('/app?view=messages#recent')
 })
+
+
+for (const boundary of ['session', 'api']) test(`disabled principal at ${boundary} uses the account-disabled view`, async ({ page }) => {
+  await page.route('**/auth/session', route => route.fulfill(boundary === 'session'
+    ? { status: 401, json: { detail: 'principal_disabled' } }
+    : { json: session }))
+  await page.route('**/app/api/dashboard', route => route.fulfill({ status: 401, json: { detail: 'principal_disabled' } }))
+  await page.goto('/app')
+  await expect(page).toHaveURL(/\/account-disabled$/)
+  await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+})

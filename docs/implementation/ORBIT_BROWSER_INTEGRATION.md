@@ -84,9 +84,9 @@ Commands run from `apps/web`:
 - `pnpm lint`: no errors; 36 existing Vue spacing warnings.
 - `pnpm build`: pass.
 - `pnpm exec playwright install chromium`: pass.
-- `pnpm test:e2e`: 13 passed; mobile/tablet/desktop auth accessibility,
+- `pnpm test:e2e`: 15 passed; mobile/tablet/desktop auth accessibility,
   keyboard focus, auth action failure handling, deep links, expiry, capability
-  presentation, send retry identity and multi-tab logout. API responses are
+  presentation, send retry identity, multi-tab logout and disabled-account handling. API responses are
   controlled browser fixtures, not a running Keycloak or provider assertion.
 
 Backend: isolated Python 3.12 environment with exact gateway requirements;
@@ -118,3 +118,8 @@ and CI enforces `pnpm audit --audit-level=high`. The low-severity Windows
 esbuild development-server advisory remains reported; it is not a browser
 runtime dependency or a production development-server configuration. No
 advisory is suppressed or added to an ignore list.
+
+PR review follow-up: distinguish `401 principal_disabled` from ordinary session
+expiry at both session lookup and API request boundaries. Disabled principals
+use the existing account-disabled view; expiry retains the protected return
+path. Both cases are covered by the 15 passing browser checks.

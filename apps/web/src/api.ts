@@ -34,6 +34,17 @@ export function startSessionSync(): () => void {
   }
 }
 
+async function authenticationFailure(response: Response): Promise<string> {
+  const body = await response.json().catch(() => ({})) as { detail?: string } | null
+  return body?.detail === 'principal_disabled' ? 'principal_disabled' : 'authentication_required'
+}
+
+function redirectAuthenticationFailure(reason: string): never {
+  invalidateSession()
+  location.assign(reason === 'principal_disabled' ? '/account-disabled' : loginLocation())
+  throw new Error(reason)
+}
+
 export async function getSession(): Promise<BrowserSession> {
   const generation = sessionGeneration
   csrfToken = ''
@@ -42,7 +53,11 @@ export async function getSession(): Promise<BrowserSession> {
     headers: { Accept: 'application/json' },
   })
   if (generation !== sessionGeneration) throw new Error('session_changed')
-  if (response.status === 401) return { authenticated: false }
+  if (response.status === 401) {
+    const reason = await authenticationFailure(response)
+    if (reason === 'principal_disabled') redirectAuthenticationFailure(reason)
+    return { authenticated: false }
+  }
   if (!response.ok) throw new Error('session_unavailable')
   const body = await response.json() as BrowserSession
   if (generation !== sessionGeneration) throw new Error('session_changed')
@@ -75,9 +90,7 @@ export async function appApi<T>(path: string, init: RequestInit = {}): Promise<T
   }
   const response = await fetch(path, { ...init, headers, credentials: 'same-origin', cache: 'no-store', redirect: 'error' })
   if (response.status === 401) {
-    invalidateSession()
-    location.assign(loginLocation())
-    throw new Error('authentication_required')
+    redirectAuthenticationFailure(await authenticationFailure(response))
   }
   if (!response.ok) {
     let detail = `request_failed_${response.status}`
