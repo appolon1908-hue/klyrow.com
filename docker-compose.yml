@@ -1,4 +1,12 @@
 name: klyrow
+# All general-email components declare the same disabled baseline. These flags
+# describe configuration; native Postal enforcement still requires certification.
+x-email-controls: &email-controls
+  KLYROW_SAFE_MODE: "true"
+  KLYROW_PRODUCTION_GATE_APPROVED: "false"
+  LIVE_EMAIL_DELIVERY: "false"
+  EXTERNAL_EMAIL_DELIVERY: "false"
+  PRODUCTION_PROVIDER_ROUTING: "false"
 services:
   gateway:
     image: '${KLYROW_GATEWAY_IMAGE:?set the exact protected gateway image by digest}'
@@ -194,6 +202,7 @@ services:
   smtp-relay:
     image: '${KLYROW_GATEWAY_IMAGE:?set the exact protected gateway image by digest}'
     environment:
+      <<: *email-controls
       KLYROW_DATABASE_URL: postgresql+psycopg://klyrow_runtime@postgres:5432/klyrow
       KLYROW_DATABASE_PASSWORD_FILE: /run/secrets/klyrow_database_runtime_password
       KLYROW_SMTP_PORT: "8025"
@@ -353,6 +362,7 @@ services:
       retries: 15
   postal-web:
     image: '${KLYROW_POSTAL_IMAGE:?set the approved Postal image by digest}'
+    environment: *email-controls
     command: postal web-server
     volumes: [./secrets/postal:/config:ro, postal_assets:/opt/postal/public]
     depends_on:
@@ -369,6 +379,7 @@ services:
       start_period: 60s
   postal-worker:
     image: '${KLYROW_POSTAL_IMAGE:?set the approved Postal image by digest}'
+    environment: *email-controls
     command: postal worker
     volumes: [./secrets/postal:/config:ro]
     depends_on:
@@ -383,6 +394,7 @@ services:
       retries: 5
   postal-smtp:
     image: '${KLYROW_POSTAL_IMAGE:?set the approved Postal image by digest}'
+    environment: *email-controls
     command: postal smtp-server
     volumes: [./secrets/postal:/config:ro]
     depends_on:

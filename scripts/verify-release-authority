@@ -23,6 +23,7 @@ git merge-base --is-ancestor "$source_sha" refs/remotes/origin/main || { echo "S
 (cd "$evidence_dir" && sha256sum -c PUBLISH_SHA256SUMS >/dev/null)
 
 rendered="$("$@" config --format json)"
+printf '%s' "$rendered" | python3 scripts/verify-email-activation
 computed_config="$(printf '%s\n' "$rendered" | python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
 expected_config="$(awk 'NR==1 {print $1}' "$config_checksum_file")"
 [[ "$expected_config" =~ ^[0-9a-f]{64}$ && "$computed_config" == "$expected_config" ]] || { echo "Runtime configuration checksum mismatch" >&2; exit 2; }

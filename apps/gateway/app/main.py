@@ -3,7 +3,7 @@ from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .delivery_safety import safe_mode_enabled
+from .delivery_safety import email_activation_status, safe_mode_enabled
 from .durable_results import read_control_response, seal_control_response
 from .durable_keys import keyring_ready
 from .capabilities import has_service_permission, mutation_permission
@@ -718,7 +718,13 @@ async def headers(request, call_next):
 @app.get("/v1/health")
 def health(s:Session=Depends(db)):
     s.execute(select(1));active=s.scalar(select(func.count()).select_from(EmailOutbox).where(EmailOutbox.state.in_(("pending","sending","retry"))))
-    return {"status":"ok","safe_mode":SAFE_MODE,"production_gate_approved":os.getenv("KLYROW_PRODUCTION_GATE_APPROVED","false").lower()=="true","production_gate_open":production_gate_open(s),"database":"healthy","outbox":"healthy","outbox_active":active}
+    activation = email_activation_status()
+    return {"status":"ok","safe_mode":SAFE_MODE,"production_gate_approved":activation["controls"]["KLYROW_PRODUCTION_GATE_APPROVED"] is True,"production_gate_open":production_gate_open(s),"database":"healthy","outbox":"healthy","outbox_active":active,"email_activation":activation}
+
+@app.get("/v1/admin/delivery/activation", tags=["Delivery controls"])
+def delivery_activation(ctx=Depends(require("platform_admin"))):
+    """Read general-email configuration; this route never enables or sends mail."""
+    return email_activation_status()
 @app.get("/health")
 def health_alias(s:Session=Depends(db)):
     """Stable orchestrator health alias with no credential or recipient data."""
@@ -751,11 +757,13 @@ def dependencies(s:Session=Depends(db)):
     }
 @app.get("/capabilities")
 def capabilities():
+    activation = email_activation_status()
     return {
         "service":"klyrow-gateway",
         "commands":sorted(MIDDLEWARE_ALLOWED_COMMANDS),
         "events":sorted({value for value in SMTP_EVENT_MAP.values()}),
-        "external_delivery_enabled":not SAFE_MODE and os.getenv("LIVE_EMAIL_DELIVERY","false").lower()=="true",
+        "external_delivery_enabled":not SAFE_MODE and activation["live_delivery_enabled"],
+        "email_activation":activation,
         "provider":"postal",
     }
 @app.get("/version")
