@@ -109,3 +109,12 @@ No data model, OpenAPI path/security, domain event, Middleware/Odoo/n8n contract
 Postal source, identity database or production policy changes. Existing metrics,
 alerts and runtime rollback procedures remain applicable. No secrets were
 printed or committed, and no external send or live activation was performed.
+
+Dependency follow-up: `pip-audit --requirement apps/gateway/requirements.txt`
+passed with no known findings. Frontend audit identified the pre-existing
+js-yaml 4.3.1 high advisory [GHSA-2883-xcg3-v3hh](https://github.com/advisories/GHSA-2883-xcg3-v3hh).
+The lockfile now selects patched 4.3.2 within the existing dependency range,
+and CI enforces `pnpm audit --audit-level=high`. The low-severity Windows
+esbuild development-server advisory remains reported; it is not a browser
+runtime dependency or a production development-server configuration. No
+advisory is suppressed or added to an ignore list.
