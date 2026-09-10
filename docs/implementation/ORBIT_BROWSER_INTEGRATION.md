@@ -84,7 +84,7 @@ Commands run from `apps/web`:
 - `pnpm lint`: no errors; 36 existing Vue spacing warnings.
 - `pnpm build`: pass.
 - `pnpm exec playwright install chromium`: pass.
-- `pnpm test:e2e`: 15 passed; mobile/tablet/desktop auth accessibility,
+- `pnpm test:e2e`: 16 passed; mobile/tablet/desktop auth accessibility,
   keyboard focus, auth action failure handling, deep links, expiry, capability
   presentation, send retry identity, multi-tab logout and disabled-account handling. API responses are
   controlled browser fixtures, not a running Keycloak or provider assertion.
@@ -122,4 +122,9 @@ advisory is suppressed or added to an ignore list.
 PR review follow-up: distinguish `401 principal_disabled` from ordinary session
 expiry at both session lookup and API request boundaries. Disabled principals
 use the existing account-disabled view; expiry retains the protected return
-path. Both cases are covered by the 15 passing browser checks.
+path. Both cases are covered by the 16 passing browser checks.
+
+The historical Webmail source gate now follows the executable route manifest
+instead of requiring the removed inline route selector. An authenticated
+Playwright case proves `/app/mail` mounts Webmail; the focused source gate
+passes. The final full-suite and image results are attached to the PR.

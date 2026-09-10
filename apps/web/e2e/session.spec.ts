@@ -91,3 +91,12 @@ for (const boundary of ['session', 'api']) test(`disabled principal at ${boundar
   await expect(page).toHaveURL(/\/account-disabled$/)
   await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
 })
+
+
+test('the route manifest mounts the authenticated webmail application', async ({ page }) => {
+  await page.route('**/auth/session', route => route.fulfill({ json: session }))
+  await page.route('**/app/api/mailboxes', route => route.fulfill({ json: [] }))
+  await page.goto('/app/mail')
+  await expect(page.getByRole('heading', { name: 'Your mail suite is ready to provision' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'K Klyrow Mail' })).toBeVisible()
+})
