@@ -4,6 +4,11 @@ source "$(dirname "$0")/lib.sh"
 umask 077
 archive="${1:?usage: scripts/archive-offhost ENCRYPTED_BACKUP.tar.gz.gpg}"
 checksum="$archive.sha256"
+case "${KLYROW_BACKUP_OFFHOST_BACKEND:-mounted}" in
+  b2) exec python3 "$ROOT/scripts/archive-backblaze.py" "$archive" ;;
+  mounted) ;;
+  *) echo "Unsupported backup backend" >&2; exit 2 ;;
+esac
 offhost_dir="${KLYROW_BACKUP_OFFHOST_DIR:-}"
 
 [[ -f "$archive" && -f "$checksum" ]] || { echo "Encrypted backup or checksum missing" >&2; exit 1; }
