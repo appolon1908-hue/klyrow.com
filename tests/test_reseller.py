@@ -1,3 +1,7 @@
+import pytest
+
+pytestmark = pytest.mark.usefixtures("canonical_api_owner")
+
 from fastapi.testclient import TestClient
 
 from apps.gateway.app.main import Base, DB, Tenant, User, app, engine, ph, rate_buckets
