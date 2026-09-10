@@ -138,3 +138,52 @@ def test_event_openapi_describes_optional_header_and_non_atomic_batch():
         assert operation["x-idempotency-required"] is False
         assert operation["x-idempotency-model"] == model
         assert any(p["name"].lower() == "idempotency-key" for p in operation["parameters"])
+
+
+def test_profile_list_is_cursor_paged_and_tenant_scoped():
+    first = profile("lookup-tenant")
+    second = client.post("/v1/profiles", headers=headers("lookup-tenant"), json={"email": "second@example.net"})
+    assert second.status_code == 201
+    page = client.get("/v1/profiles", headers=headers("lookup-tenant"), params={"limit": 1})
+    assert page.status_code == 200
+    assert len(page.json()["items"]) == 1
+    assert page.json()["next_cursor"]
+    next_page = client.get("/v1/profiles", headers=headers("lookup-tenant"), params={"limit": 1, "cursor": page.json()["next_cursor"]})
+    assert next_page.status_code == 200
+    assert next_page.json()["items"][0]["id"] in {first, second.json()["id"]}
+    assert client.get("/v1/profiles", headers=headers("other"), params={"limit": 200}).json()["items"] == []
+    assert client.get("/v1/profiles", headers=headers("lookup-tenant"), params={"cursor": "not-a-cursor"}).status_code == 422
+
+
+def test_secure_profile_import_export_jobs_and_idempotency():
+    import_headers = {**headers("batch-tenant"), "Idempotency-Key": "import-job-1"}
+    payload = {"object_reference": "b2://klyrow-imports/tenant/batch.csv", "object_sha256": "A" * 64, "row_count": 12}
+    first = client.post("/v1/profile-imports", headers=import_headers, json=payload)
+    replay = client.post("/v1/profile-imports", headers=import_headers, json=payload)
+    assert first.status_code == replay.status_code == 202
+    assert replay.json()["duplicate"] is True and replay.json()["id"] == first.json()["id"]
+    assert client.post("/v1/profile-imports", headers=import_headers, json={**payload, "object_sha256": "B" * 64}).status_code == 409
+    assert client.post("/v1/profile-imports", headers=headers("batch-tenant"), json={**payload, "object_reference": "https://example.net/input.csv"}).status_code == 422
+
+    export_headers = {**headers("batch-tenant"), "Idempotency-Key": "export-job-1"}
+    export_payload = {"fields": ["id", "email", "attributes"], "filters": {"email": "example.net"}}
+    export = client.post("/v1/profile-exports", headers=export_headers, json=export_payload)
+    assert export.status_code == 202 and export.json()["state"] == "PENDING"
+    assert client.post("/v1/profile-exports", headers=export_headers, json=export_payload).json()["duplicate"] is True
+    assert client.post("/v1/profile-exports", headers=headers("batch-tenant"), json={"fields": ["password"]}).status_code == 422
+    assert client.get("/v1/profile-imports/" + first.json()["id"], headers=headers("other")).status_code == 404
+
+
+def test_retention_and_deletion_are_tenant_scoped_and_fail_closed():
+    pid = profile("batch-tenant")
+    defaults = client.get("/v1/customer-data/retention", headers=headers("batch-tenant"))
+    assert defaults.status_code == 200 and defaults.json()["configured"] is False
+    configured = client.put("/v1/customer-data/retention", headers=headers("batch-tenant"), json={"profile_retention_days": 365, "event_retention_days": 180})
+    assert configured.status_code == 200 and configured.json()["profile_retention_days"] == 365
+    scheduled_for = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    deletion = client.post("/v1/customer-data/deletions", headers=headers("batch-tenant"), json={"profile_id": pid, "scheduled_for": scheduled_for, "reason": "customer request"})
+    assert deletion.status_code == 202 and deletion.json()["automatic_execution"] is False
+    assert client.post("/v1/customer-data/deletions", headers=headers("batch-tenant"), json={"profile_id": pid, "scheduled_for": scheduled_for, "reason": "customer request"}).json()["duplicate"] is True
+    assert client.post("/v1/customer-data/deletions/" + deletion.json()["id"] + "/cancel", headers=headers("other")).status_code == 404
+    assert client.post("/v1/customer-data/deletions/" + deletion.json()["id"] + "/cancel", headers=headers("batch-tenant")).status_code == 200
+    assert client.post("/v1/customer-data/deletions", headers=headers("batch-tenant"), json={"profile_id": pid, "scheduled_for": "2020-01-01T00:00:00Z", "reason": "too late"}).status_code == 422
