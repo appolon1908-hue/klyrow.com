@@ -1,0 +1,22 @@
+# Explicit release overlay. Defaults remain disabled; partial profiles are
+# rejected by scripts/verify-email-activation before a deployment may proceed.
+x-email-controls: &email-controls
+  KLYROW_SAFE_MODE: "${KLYROW_SAFE_MODE:-true}"
+  KLYROW_PRODUCTION_GATE_APPROVED: "${KLYROW_PRODUCTION_GATE_APPROVED:-false}"
+  LIVE_EMAIL_DELIVERY: "${LIVE_EMAIL_DELIVERY:-false}"
+  EXTERNAL_EMAIL_DELIVERY: "${EXTERNAL_EMAIL_DELIVERY:-false}"
+  PRODUCTION_PROVIDER_ROUTING: "${PRODUCTION_PROVIDER_ROUTING:-false}"
+
+services:
+  gateway:
+    environment: *email-controls
+  worker:
+    environment: *email-controls
+  smtp-relay:
+    environment: *email-controls
+  postal-web:
+    environment: *email-controls
+  postal-worker:
+    environment: *email-controls
+  postal-smtp:
+    environment: *email-controls
