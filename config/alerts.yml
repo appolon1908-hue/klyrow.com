@@ -1,6 +1,21 @@
 groups:
 - name: klyrow-mail-engine
   rules:
+  - alert: KlyrowAlertRoutingUnavailable
+    expr: prometheus_notifications_alertmanagers_discovered{job="prometheus"} == 0 or absent(prometheus_notifications_alertmanagers_discovered{job="prometheus"})
+    for: 2m
+    labels:
+      severity: critical
+      environment: production
+      service: klyrow
+      codestra_business: klyrow
+      owner: appolon1908-hue
+    annotations:
+      summary: Klyrow Prometheus has no discovered Alertmanager
+      description: Klyrow Prometheus has no discovered Alertmanager. Inspect this alert locally until routing is restored; verify the private Alertmanager transport before enabling queued delivery.
+      runbook_url: https://github.com/appolon1908-hue/klyrow.com/blob/main/docs/ALERT_ROUTING.md
+- name: klyrow-mail-engine
+  rules:
   - alert: KlyrowGatewayUnavailable
     expr: up{job="klyrow"} == 0
     for: 2m
