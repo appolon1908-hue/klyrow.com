@@ -1,3 +1,7 @@
+import pytest
+
+pytestmark = pytest.mark.usefixtures("canonical_api_owner")
+
 import os
 
 import pytest

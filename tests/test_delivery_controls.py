@@ -1,3 +1,7 @@
+import pytest
+
+pytestmark = pytest.mark.usefixtures("canonical_api_owner")
+
 from datetime import datetime, timezone
 
 from fastapi.testclient import TestClient

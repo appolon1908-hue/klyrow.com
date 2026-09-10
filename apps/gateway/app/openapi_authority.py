@@ -85,6 +85,8 @@ NON_ATOMIC_ITEM_IDEMPOTENCY = {
 OPTIONAL_ITEM_IDEMPOTENCY = {("post", "/v1/events/batch")}
 OPTIONAL_IDEMPOTENCY = {
     ("post", "/v1/events"),
+    ("post", "/v1/profile-imports"),
+    ("post", "/v1/profile-exports"),
     *OPTIONAL_ITEM_IDEMPOTENCY,
     ("post", "/v1/billing/invoices"),
 }
@@ -136,7 +138,9 @@ def operation_auth(
         if path in DEDICATED_SERVICE_PATHS:
             return [{"serviceBearer": []}], "DEDICATED_SERVICE_BEARER_ON_PRIVATE_ROUTE"
         return [{"bearerAuth": []}], "BEARER_JWT_OR_API_KEY_ON_PRIVATE_ROUTE"
-    if audience in {"ADMIN", "LEGACY"}:
+    if audience == "ADMIN":
+        return [{"bearerAuth": []}], "EXACT_PLATFORM_OWNER_OIDC_WITH_VERIFIED_EMAIL_AND_FRESH_MFA"
+    if audience == "LEGACY":
         return [{"bearerAuth": []}], "BEARER_JWT_OR_API_KEY_WITH_ROLE"
     if audience == "WEBHOOK":
         if path in POSTAL_SIGNATURE_PATHS:

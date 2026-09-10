@@ -6,7 +6,7 @@ import time
 from datetime import timezone
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.dependencies.utils import get_parameterless_sub_dependant
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
@@ -25,6 +25,7 @@ from .platform_owner_policy import (
     validate_platform_owner_claims,
 )
 from .tenancy import OidcIdentity, TenantMember
+from .platform_owner_api import OwnerAuthorityStatus, owner_authority_status
 
 router = APIRouter(tags=["Platform owner security"])
 # The middleware is defense in depth for every browser API request made with a
@@ -358,3 +359,21 @@ def platform_owner_step_up(
         detail="platform_owner_step_up_flow_binding_required",
         headers={"Cache-Control": "no-store"},
     )
+
+
+@router.get(
+    "/app/api/admin/security/platform-owner",
+    response_model=OwnerAuthorityStatus,
+    summary="Read the browser session's verified platform-owner authority",
+    responses={
+        401: {"description": "Missing or expired browser session"},
+        403: {"description": "Exact owner, role, verified email or fresh MFA required"},
+        503: {"description": "Protected owner configuration is incomplete or invalid"},
+    },
+)
+def browser_platform_owner_status(
+    request: Request,
+    response: Response,
+    _context: dict = Depends(browser_context),
+):
+    return owner_authority_status(request, response, browser=True)

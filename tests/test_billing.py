@@ -1,3 +1,7 @@
+import pytest
+
+pytestmark = pytest.mark.usefixtures("canonical_api_owner")
+
 from datetime import datetime, timedelta, timezone
 
 from apps.gateway.app.main import Base, DB, Tenant, User, app, engine, ph, rate_buckets

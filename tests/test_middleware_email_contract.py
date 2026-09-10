@@ -186,6 +186,6 @@ def test_read_only_and_non_service_principals_cannot_send(gateway):
 def test_alert_recipient_policy_is_enforced_at_gateway(gateway):
     client, _, _ = gateway
     payload = document(stream="operational", classification="operational-alert",
-        sender="alerts@codestra.co", reply_to="appolon@codestra.co",
+        sender="alerts@codestra.co", reply_to="appolon1908@gmail.com",
         recipient_policy_id="codestra-observability-admin-v1", sender_policy_id="codestra-alert-sender-v1")
     assert client.post("/v1/email/messages", json=payload, headers=HEADERS).status_code == 403
