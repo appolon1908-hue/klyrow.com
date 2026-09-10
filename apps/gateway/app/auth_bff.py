@@ -218,6 +218,18 @@ def _authorization_url(request: Request, s: Session, mode: str, return_to: Optio
     return endpoint + "?" + urlencode(params)
 
 
+def _post_oidc_token(data: dict) -> dict:
+    response = httpx.post(
+        _canonical_issuer() + "/protocol/openid-connect/token", data=data,
+        timeout=8, follow_redirects=False, trust_env=False,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("oidc_token_response_must_be_an_object")
+    return payload
+
+
 def _exchange_code(code: str, verifier: str, request: Request) -> dict:
     data = {
         "grant_type": "authorization_code",
@@ -230,11 +242,9 @@ def _exchange_code(code: str, verifier: str, request: Request) -> dict:
     if secret:
         data["client_secret"] = secret
     try:
-        response = httpx.post(_canonical_issuer() + "/protocol/openid-connect/token", data=data, timeout=8, follow_redirects=False)
-        response.raise_for_status()
+        payload = _post_oidc_token(data)
     except (httpx.HTTPError, ValueError) as exc:
         raise HTTPException(502, "oidc_token_exchange_failed") from exc
-    payload = response.json()
     if not payload.get("id_token"):
         raise HTTPException(502, "oidc_id_token_missing")
     return payload
@@ -478,9 +488,7 @@ def refresh_session(request: Request, current: BrowserSession = Depends(csrf_gua
     if secret:
         data["client_secret"] = secret
     try:
-        response = httpx.post(_canonical_issuer() + "/protocol/openid-connect/token", data=data, timeout=8, follow_redirects=False)
-        response.raise_for_status()
-        tokens = response.json()
+        tokens = _post_oidc_token(data)
     except (httpx.HTTPError, ValueError) as exc:
         current.revoked_at = now()
         s.commit()
