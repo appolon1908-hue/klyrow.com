@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { maskEmail, passwordScore, routeFromLocation, serverError, type AuthView } from './auth'
 import { AuthActionError, requestAuthAction, safeAuthRedirect } from './authActions'
+import { safeReturnPath } from './session'
 import { messages, type Locale, type MessageKey } from './i18n'
 
 const locale = ref<Locale>((new URLSearchParams(location.search).get('lang') === 'es' || navigator.language.startsWith('es')) ? 'es' : 'en')
@@ -13,7 +14,9 @@ const heading = ref<HTMLElement>()
 const t = (key: MessageKey) => messages[locale.value][key]
 const score = computed(() => passwordScore(password.value))
 const strength = computed(() => score.value < 3 ? t('weak') : score.value < 5 ? t('fair') : t('strong'))
-const initiation = computed(() => view.value === 'signup' ? '/auth/signup' : '/auth/login')
+const requestedReturnTo = new URLSearchParams(location.search).get('return_to')
+const returnTo = computed(() => safeReturnPath(requestedReturnTo, view.value === 'signup' ? '/onboarding' : '/app'))
+const initiation = computed(() => `${view.value === 'signup' ? '/auth/signup' : '/auth/login'}?return_to=${encodeURIComponent(returnTo.value)}`)
 
 const content: Partial<Record<AuthView, [MessageKey, MessageKey]>> = {
   'verify-email':['verifyTitle','verifyBody'], 'verification-expired':['expiredVerifyTitle','expiredVerifyBody'], 'verification-success':['verifiedTitle','verifiedBody'],
@@ -29,7 +32,10 @@ const body = computed(() => {
 })
 
 function go(next: AuthView) {
-  history.pushState({}, '', `/${next}${locale.value === 'es' ? '?lang=es' : ''}`); view.value = next; clearState()
+  const query = new URLSearchParams()
+  if (requestedReturnTo) query.set('return_to', returnTo.value)
+  if (locale.value === 'es') query.set('lang', 'es')
+  history.pushState({}, '', `/${next}${query.size ? '?' + query : ''}`); view.value = next; clearState()
 }
 function clearState() { errors.value = {}; formError.value = ''; notice.value = ''; busy.value = false }
 function setLocale(next: Locale) { locale.value = next; document.documentElement.lang = next }
@@ -88,10 +94,10 @@ async function submit(kind: 'login'|'signup'|'forgot'|'reset'|'invite') {
   }
   // Identity credentials are submitted only to Keycloak through same-origin initiation endpoints.
   busy.value = true
-  location.assign(`${kind === 'signup' ? '/auth/signup' : '/auth/login'}?return_to=${encodeURIComponent(kind === 'signup' ? '/onboarding' : '/app')}`)
+  location.assign(`${kind === 'signup' ? '/auth/signup' : '/auth/login'}?return_to=${encodeURIComponent(returnTo.value)}`)
 }
 function resend() { return executeAction('/auth/actions/verify-email') }
-function google() { location.assign(`/auth/google?return_to=${encodeURIComponent(view.value === 'signup' ? '/onboarding' : '/app')}`) }
+function google() { location.assign(`/auth/google?return_to=${encodeURIComponent(returnTo.value)}`) }
 watch(view, async () => { await nextTick(); heading.value?.focus() })
 onMounted(() => { document.documentElement.lang = locale.value; addEventListener('popstate', () => view.value = routeFromLocation(location.pathname, location.search)) })
 </script>

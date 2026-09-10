@@ -10,7 +10,8 @@
     "test:a11y": "vitest run src/__tests__/accessibility.test.ts",
     "typecheck": "vue-tsc --noEmit",
     "lint": "eslint .",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:routes": "vitest run src/__tests__/routeManifest.test.ts"
   },
   "dependencies": {
     "@vitejs/plugin-vue": "6.0.8",
