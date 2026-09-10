@@ -85,6 +85,8 @@ NON_ATOMIC_ITEM_IDEMPOTENCY = {
 OPTIONAL_ITEM_IDEMPOTENCY = {("post", "/v1/events/batch")}
 OPTIONAL_IDEMPOTENCY = {
     ("post", "/v1/events"),
+    ("post", "/v1/profile-imports"),
+    ("post", "/v1/profile-exports"),
     *OPTIONAL_ITEM_IDEMPOTENCY,
     ("post", "/v1/billing/invoices"),
 }

@@ -3,9 +3,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import dns.resolver
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func, select
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -53,10 +53,24 @@ class Subscription(Base):
     __tablename__="subscriptions"; tenant_id:Mapped[str]=mapped_column(String,primary_key=True); plan_id:Mapped[str]=mapped_column(String); status:Mapped[str]=mapped_column(String,default="trial"); provider:Mapped[Optional[str]]=mapped_column(String,nullable=True); external_ref:Mapped[Optional[str]]=mapped_column(String,nullable=True)
 class UsageLedger(Base):
     __tablename__="usage_ledger"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); kind:Mapped[str]=mapped_column(String); quantity:Mapped[int]=mapped_column(Integer); reference:Mapped[Optional[str]]=mapped_column(String,nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+class ProfileMergeAudit(Base):
+    __tablename__="profile_merge_audits"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); source_profile_id:Mapped[str]=mapped_column(String,index=True); target_profile_id:Mapped[str]=mapped_column(String,index=True); matched_identifiers_json:Mapped[str]=mapped_column(Text,default="[]"); actor:Mapped[str]=mapped_column(String); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+class ProfileImportJob(Base):
+    __tablename__="customer_profile_import_jobs"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); requested_by:Mapped[str]=mapped_column(String); object_reference:Mapped[str]=mapped_column(String); object_sha256:Mapped[str]=mapped_column(String(64)); idempotency_key:Mapped[Optional[str]]=mapped_column(String,nullable=True); state:Mapped[str]=mapped_column(String,default="PENDING",index=True); row_count:Mapped[int]=mapped_column(Integer,default=0); accepted_count:Mapped[int]=mapped_column(Integer,default=0); rejected_count:Mapped[int]=mapped_column(Integer,default=0); error_report_json:Mapped[str]=mapped_column(Text,default="[]"); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); completed_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); __table_args__=(UniqueConstraint("tenant_id","object_reference","object_sha256",name="uq_customer_profile_import_object"),)
+class ProfileExportJob(Base):
+    __tablename__="customer_profile_export_jobs"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); requested_by:Mapped[str]=mapped_column(String); fields_json:Mapped[str]=mapped_column(Text); filters_json:Mapped[str]=mapped_column(Text,default="{}"); format:Mapped[str]=mapped_column(String,default="csv"); idempotency_key:Mapped[Optional[str]]=mapped_column(String,nullable=True); state:Mapped[str]=mapped_column(String,default="PENDING",index=True); object_reference:Mapped[Optional[str]]=mapped_column(String,nullable=True); expires_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); row_count:Mapped[Optional[int]]=mapped_column(Integer,nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); completed_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True)
+class CustomerDataRetention(Base):
+    __tablename__="customer_data_retention"; tenant_id:Mapped[str]=mapped_column(String,primary_key=True); profile_retention_days:Mapped[int]=mapped_column(Integer,default=730); event_retention_days:Mapped[int]=mapped_column(Integer,default=730); updated_by:Mapped[str]=mapped_column(String); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now)
+class ProfileDeletionJob(Base):
+    __tablename__="customer_profile_deletion_jobs"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); profile_id:Mapped[str]=mapped_column(String,index=True); requested_by:Mapped[str]=mapped_column(String); reason:Mapped[str]=mapped_column(String); state:Mapped[str]=mapped_column(String,default="SCHEDULED",index=True); scheduled_for:Mapped[datetime]=mapped_column(DateTime(timezone=True),index=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=now); cancelled_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); completed_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True)
 
 class ProfileIn(BaseModel): email:Optional[str]=None; phone:Optional[str]=None; external_id:Optional[str]=None; customer_id:Optional[str]=None; attributes:dict[str,Any]=Field(default_factory=dict)
 class EventIn(BaseModel): profile_id:str; name:str=Field(min_length=1,max_length=100); source:str=Field(default="api",min_length=1,max_length=64,pattern=r"^[a-zA-Z0-9_.:-]+$"); idempotency_key:Optional[str]=Field(default=None,min_length=1,max_length=200); properties:dict[str,Any]=Field(default_factory=dict); occurred_at:Optional[datetime]=None
 class EventBatchIn(BaseModel): events:list[EventIn]=Field(min_length=1,max_length=1000)
+class ProfileImportIn(BaseModel): object_reference:str=Field(min_length=8,max_length=512); object_sha256:str=Field(pattern=r"^[0-9a-fA-F]{64}$"); row_count:int=Field(default=0,ge=0,le=5_000_000)
+class ProfileExportIn(BaseModel): fields:list[str]=Field(default_factory=lambda:["id","email","phone","external_id","customer_id","attributes"],min_length=1,max_length=20); filters:dict[str,Any]=Field(default_factory=dict); format:str=Field(default="csv",pattern="^csv$"); expires_in_hours:int=Field(default=24,ge=1,le=168)
+class CustomerDataRetentionIn(BaseModel): profile_retention_days:int=Field(default=730,ge=30,le=3650); event_retention_days:int=Field(default=730,ge=30,le=3650)
+class ProfileDeletionIn(BaseModel): profile_id:str=Field(min_length=1,max_length=200); scheduled_for:datetime; reason:str=Field(min_length=3,max_length=300)
 class ConsentIn(BaseModel): profile_id:str; topic:str="marketing"; status:str=Field(pattern="^(granted|revoked|pending)$"); source:str; version:str; proof:dict[str,Any]=Field(default_factory=dict)
 class PreferenceIn(BaseModel): topic:str; subscribed:bool
 class SegmentIn(BaseModel): name:str; rules:dict[str,Any]; kind:str=Field(default="dynamic",pattern="^(dynamic|manual|exclusion)$")
@@ -75,6 +89,18 @@ def get_profile(s,tenant,pid):
     if not p: raise HTTPException(404,"profile_not_found")
     return p
 def attrs(p): return json.loads(p.attributes_json or "{}")
+def profile_payload(p):
+    return {"id":p.id,"email":p.email,"phone":p.phone,"external_id":p.external_id,"customer_id":p.customer_id,"attributes":attrs(p),"created_at":p.created_at,"updated_at":p.updated_at}
+def encode_profile_cursor(p):
+    raw=json.dumps({"id":p.id,"created_at":p.created_at.astimezone(timezone.utc).isoformat()},separators=(",",":"))
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+def decode_profile_cursor(raw):
+    try:
+        padded=raw+"="*((4-len(raw)%4)%4); value=json.loads(base64.urlsafe_b64decode(padded).decode()); created=datetime.fromisoformat(value["created_at"]); pid=value["id"]
+        if created.tzinfo is None or not isinstance(pid,str) or not pid: raise ValueError
+        return created,pid
+    except (ValueError,TypeError,KeyError,json.JSONDecodeError,UnicodeDecodeError):
+        raise HTTPException(422,"invalid_profile_cursor") from None
 def match_rule(s,p,rule):
     if "all" in rule:return all(match_rule(s,p,r) for r in rule["all"])
     if "any" in rule:return any(match_rule(s,p,r) for r in rule["any"])
@@ -101,12 +127,25 @@ def profile_upsert(x:ProfileIn,ctx=Depends(auth),s:Session=Depends(db)):
     clauses=[]
     for key,val in ((Profile.email,x.email),(Profile.phone,x.phone),(Profile.external_id,x.external_id),(Profile.customer_id,x.customer_id)):
         if val:clauses.append(key==val.lower() if key==Profile.email else key==val)
-    from sqlalchemy import or_
-    matches=s.scalars(select(Profile).where(Profile.tenant_id==ctx["tenant"],or_(*clauses))).all(); p=matches[0] if matches else Profile(id=str(uuid.uuid4()),tenant_id=ctx["tenant"])
+    # Lock the tenant row so concurrent requests resolve identifiers to one
+    # deterministic survivor before either request can insert a duplicate.
+    if s.scalar(select(Tenant).where(Tenant.id==ctx["tenant"]).with_for_update()) is None: raise HTTPException(404,"tenant_not_found")
+    matches=s.scalars(select(Profile).where(Profile.tenant_id==ctx["tenant"],or_(*clauses)).order_by(Profile.created_at,Profile.id).with_for_update()).all(); p=matches[0] if matches else Profile(id=str(uuid.uuid4()),tenant_id=ctx["tenant"])
+    merge_ids=[]
     for duplicate in matches[1:]:
         for ev in s.scalars(select(CustomerEvent).where(CustomerEvent.profile_id==duplicate.id)).all():ev.profile_id=p.id
+        s.add(ProfileMergeAudit(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],source_profile_id=duplicate.id,target_profile_id=p.id,matched_identifiers_json=json.dumps([key.key for key,val in ((Profile.email,x.email),(Profile.phone,x.phone),(Profile.external_id,x.external_id),(Profile.customer_id,x.customer_id)) if val]),actor=ctx["sub"]))
+        merge_ids.append(duplicate.id)
         s.delete(duplicate)
-    p.email=x.email.lower() if x.email else p.email; p.phone=x.phone or p.phone; p.external_id=x.external_id or p.external_id; p.customer_id=x.customer_id or p.customer_id; p.attributes_json=json.dumps({**attrs(p),**x.attributes}); p.updated_at=now(); s.add(p); audit(s,ctx,"profile.upserted"); s.commit(); return {"id":p.id,"email":p.email,"attributes":attrs(p),"merged":len(matches)>1}
+    p.email=x.email.lower() if x.email else p.email; p.phone=x.phone or p.phone; p.external_id=x.external_id or p.external_id; p.customer_id=x.customer_id or p.customer_id; p.attributes_json=json.dumps({**attrs(p),**x.attributes}); p.updated_at=now(); s.add(p); audit(s,ctx,"profile.upserted"); s.commit(); return {"id":p.id,"email":p.email,"attributes":attrs(p),"merged":len(matches)>1,"merged_profile_ids":merge_ids}
+@router.get("/profiles")
+def profile_list(limit:int=Query(default=50,ge=1,le=200),cursor:Optional[str]=Query(default=None,max_length=512),ctx=Depends(auth),s:Session=Depends(db)):
+    query=select(Profile).where(Profile.tenant_id==ctx["tenant"]).order_by(Profile.created_at.desc(),Profile.id.desc())
+    if cursor:
+        created,pid=decode_profile_cursor(cursor)
+        query=query.where(or_(Profile.created_at<created,and_(Profile.created_at==created,Profile.id<pid)))
+    rows=s.scalars(query.limit(limit+1)).all(); has_next=len(rows)>limit; rows=rows[:limit]
+    return {"items":[profile_payload(p) for p in rows],"next_cursor":encode_profile_cursor(rows[-1]) if has_next and rows else None}
 @router.get("/profiles/lookup")
 def profile_lookup(email:Optional[str]=None,phone:Optional[str]=None,external_id:Optional[str]=None,customer_id:Optional[str]=None,ctx=Depends(auth),s:Session=Depends(db)):
     supplied=[value for value in (email,phone,external_id,customer_id) if value]
@@ -114,9 +153,9 @@ def profile_lookup(email:Optional[str]=None,phone:Optional[str]=None,external_id
     field,value=(Profile.email,email.lower()) if email else (Profile.phone,phone) if phone else (Profile.external_id,external_id) if external_id else (Profile.customer_id,customer_id)
     profile=s.scalar(select(Profile).where(Profile.tenant_id==ctx["tenant"],field==value))
     if not profile:raise HTTPException(404,"profile_not_found")
-    return {"id":profile.id,"email":profile.email,"phone":profile.phone,"external_id":profile.external_id,"customer_id":profile.customer_id,"attributes":attrs(profile)}
+    return profile_payload(profile)
 @router.get("/profiles/{pid}")
-def profile_get(pid:str,ctx=Depends(auth),s:Session=Depends(db)): p=get_profile(s,ctx["tenant"],pid); return {"id":p.id,"email":p.email,"phone":p.phone,"external_id":p.external_id,"customer_id":p.customer_id,"attributes":attrs(p)}
+def profile_get(pid:str,ctx=Depends(auth),s:Session=Depends(db)): return profile_payload(get_profile(s,ctx["tenant"],pid))
 def event_request_hash(x):
     payload = x.model_dump(mode="json", exclude={"idempotency_key"})
     payload["occurred_at"] = (
@@ -219,6 +258,110 @@ def ingest_batch(x: EventBatchIn, ctx=Depends(auth), s: Session=Depends(db),
 
 @router.get("/profiles/{pid}/timeline")
 def timeline(pid:str,ctx=Depends(auth),s:Session=Depends(db)): get_profile(s,ctx["tenant"],pid); return s.scalars(select(CustomerEvent).where(CustomerEvent.tenant_id==ctx["tenant"],CustomerEvent.profile_id==pid).order_by(CustomerEvent.occurred_at.desc())).all()
+
+def safe_object_reference(value:str)->str:
+    """Accept only opaque object-store references, never arbitrary URLs or paths."""
+    from urllib.parse import urlsplit
+    parsed=urlsplit(value)
+    from urllib.parse import unquote
+    decoded_path=unquote(parsed.path)
+    if parsed.scheme not in {"s3","b2"} or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment or not parsed.path or ".." in decoded_path.split("/") or any(ord(char)<32 for char in value):
+        raise HTTPException(422,"invalid_object_reference")
+    return value
+
+def import_payload(item:ProfileImportJob):
+    return {"id":item.id,"state":item.state,"object_reference":item.object_reference,"object_sha256":item.object_sha256,"row_count":item.row_count,"accepted_count":item.accepted_count,"rejected_count":item.rejected_count,"error_report":json.loads(item.error_report_json or "[]"),"created_at":item.created_at,"updated_at":item.updated_at,"completed_at":item.completed_at}
+
+@router.post("/profile-imports",status_code=202)
+def profile_import(x:ProfileImportIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(None,min_length=8,max_length=200)):
+    require_permission(ctx,"contact.manage")
+    reference=safe_object_reference(x.object_reference); digest=x.object_sha256.lower()
+    prior=None
+    if idempotency_key:
+        prior=s.scalar(select(ProfileImportJob).where(ProfileImportJob.tenant_id==ctx["tenant"],ProfileImportJob.idempotency_key==idempotency_key))
+        if prior and (prior.object_reference!=reference or prior.object_sha256!=digest): raise HTTPException(409,"profile_import_idempotency_conflict")
+    if prior is None: prior=s.scalar(select(ProfileImportJob).where(ProfileImportJob.tenant_id==ctx["tenant"],ProfileImportJob.object_reference==reference,ProfileImportJob.object_sha256==digest))
+    if prior: return {**import_payload(prior),"duplicate":True,"asynchronous":True}
+    item=ProfileImportJob(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],requested_by=ctx["sub"],object_reference=reference,object_sha256=digest,idempotency_key=idempotency_key,row_count=x.row_count)
+    s.add(item);audit(s,ctx,"customer.profile_import.requested");s.commit();return {**import_payload(item),"duplicate":False,"asynchronous":True}
+
+@router.get("/profile-imports")
+def profile_imports(ctx=Depends(auth),s:Session=Depends(db)):
+    return [import_payload(item) for item in s.scalars(select(ProfileImportJob).where(ProfileImportJob.tenant_id==ctx["tenant"]).order_by(ProfileImportJob.created_at.desc())).all()]
+
+@router.get("/profile-imports/{job_id}")
+def profile_import_get(job_id:str,ctx=Depends(auth),s:Session=Depends(db)):
+    item=s.scalar(select(ProfileImportJob).where(ProfileImportJob.id==job_id,ProfileImportJob.tenant_id==ctx["tenant"]))
+    if not item:raise HTTPException(404,"profile_import_not_found")
+    return import_payload(item)
+
+def export_payload(item:ProfileExportJob):
+    return {"id":item.id,"state":item.state,"fields":json.loads(item.fields_json),"filters":json.loads(item.filters_json or "{}"),"format":item.format,"object_reference":item.object_reference,"row_count":item.row_count,"expires_at":item.expires_at,"created_at":item.created_at,"completed_at":item.completed_at}
+
+@router.post("/profile-exports",status_code=202)
+def profile_export(x:ProfileExportIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(None,min_length=8,max_length=200)):
+    require_permission(ctx,"contact.manage")
+    allowed={"id","email","phone","external_id","customer_id","attributes","created_at","updated_at"}
+    if not set(x.fields)<=allowed:raise HTTPException(422,"invalid_profile_export_field")
+    if set(x.filters)-{"email","phone","external_id","customer_id"}:raise HTTPException(422,"invalid_profile_export_filter")
+    if idempotency_key:
+        prior=s.scalar(select(ProfileExportJob).where(ProfileExportJob.tenant_id==ctx["tenant"],ProfileExportJob.idempotency_key==idempotency_key))
+        if prior:
+            if prior.fields_json!=json.dumps(x.fields,separators=(",",":"),sort_keys=True) or prior.filters_json!=json.dumps(x.filters,separators=(",",":"),sort_keys=True):raise HTTPException(409,"profile_export_idempotency_conflict")
+            return {**export_payload(prior),"duplicate":True,"asynchronous":True}
+    item=ProfileExportJob(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],requested_by=ctx["sub"],fields_json=json.dumps(x.fields,separators=(",",":"),sort_keys=True),filters_json=json.dumps(x.filters,separators=(",",":"),sort_keys=True),format=x.format,idempotency_key=idempotency_key,expires_at=now()+timedelta(hours=x.expires_in_hours))
+    s.add(item);audit(s,ctx,"customer.profile_export.requested");s.commit();return {**export_payload(item),"duplicate":False,"asynchronous":True}
+
+@router.get("/profile-exports")
+def profile_exports(ctx=Depends(auth),s:Session=Depends(db)):
+    return [export_payload(item) for item in s.scalars(select(ProfileExportJob).where(ProfileExportJob.tenant_id==ctx["tenant"]).order_by(ProfileExportJob.created_at.desc())).all()]
+
+@router.get("/profile-exports/{job_id}")
+def profile_export_get(job_id:str,ctx=Depends(auth),s:Session=Depends(db)):
+    item=s.scalar(select(ProfileExportJob).where(ProfileExportJob.id==job_id,ProfileExportJob.tenant_id==ctx["tenant"]))
+    if not item:raise HTTPException(404,"profile_export_not_found")
+    return export_payload(item)
+
+def retention_payload(item:CustomerDataRetention,tenant:str):
+    return {"tenant_id":tenant,"profile_retention_days":item.profile_retention_days,"event_retention_days":item.event_retention_days,"updated_by":item.updated_by,"updated_at":item.updated_at}
+
+@router.get("/customer-data/retention")
+def customer_data_retention(ctx=Depends(auth),s:Session=Depends(db)):
+    item=s.get(CustomerDataRetention,ctx["tenant"])
+    if item is None:return {"tenant_id":ctx["tenant"],"profile_retention_days":730,"event_retention_days":730,"configured":False}
+    return {**retention_payload(item,ctx["tenant"]),"configured":True}
+
+@router.put("/customer-data/retention")
+def customer_data_retention_update(x:CustomerDataRetentionIn,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx,"contact.manage")
+    item=s.get(CustomerDataRetention,ctx["tenant"]) or CustomerDataRetention(tenant_id=ctx["tenant"],updated_by=ctx["sub"])
+    item.profile_retention_days=x.profile_retention_days;item.event_retention_days=x.event_retention_days;item.updated_by=ctx["sub"];item.updated_at=now();s.add(item);audit(s,ctx,"customer.retention.updated");s.commit();return {**retention_payload(item,ctx["tenant"]),"configured":True}
+
+def deletion_payload(item:ProfileDeletionJob):
+    return {"id":item.id,"profile_id":item.profile_id,"state":item.state,"reason":item.reason,"scheduled_for":item.scheduled_for,"created_at":item.created_at,"cancelled_at":item.cancelled_at,"completed_at":item.completed_at}
+
+@router.post("/customer-data/deletions",status_code=202)
+def profile_deletion_schedule(x:ProfileDeletionIn,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx,"contact.manage")
+    if x.scheduled_for.tzinfo is None:raise HTTPException(422,"scheduled_for_timezone_required")
+    if x.scheduled_for.astimezone(timezone.utc)<=now():raise HTTPException(422,"scheduled_for_must_be_future")
+    get_profile(s,ctx["tenant"],x.profile_id)
+    if s.scalar(select(Tenant).where(Tenant.id==ctx["tenant"]).with_for_update()) is None: raise HTTPException(404,"tenant_not_found")
+    duplicate=s.scalar(select(ProfileDeletionJob).where(ProfileDeletionJob.tenant_id==ctx["tenant"],ProfileDeletionJob.profile_id==x.profile_id,ProfileDeletionJob.state=="SCHEDULED").with_for_update())
+    if duplicate:return {**deletion_payload(duplicate),"duplicate":True,"asynchronous":True}
+    item=ProfileDeletionJob(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],profile_id=x.profile_id,requested_by=ctx["sub"],reason=x.reason,state="SCHEDULED",scheduled_for=x.scheduled_for.astimezone(timezone.utc));s.add(item);audit(s,ctx,"customer.profile_deletion.scheduled");s.commit();return {**deletion_payload(item),"duplicate":False,"asynchronous":True,"automatic_execution":False}
+
+@router.get("/customer-data/deletions")
+def profile_deletions(ctx=Depends(auth),s:Session=Depends(db)):
+    return [deletion_payload(item) for item in s.scalars(select(ProfileDeletionJob).where(ProfileDeletionJob.tenant_id==ctx["tenant"]).order_by(ProfileDeletionJob.created_at.desc())).all()]
+
+@router.post("/customer-data/deletions/{job_id}/cancel")
+def profile_deletion_cancel(job_id:str,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx,"contact.manage")
+    item=s.scalar(select(ProfileDeletionJob).where(ProfileDeletionJob.id==job_id,ProfileDeletionJob.tenant_id==ctx["tenant"]))
+    if not item:raise HTTPException(404,"profile_deletion_not_found")
+    if item.state!="SCHEDULED":raise HTTPException(409,"profile_deletion_not_cancellable")
+    item.state="CANCELLED";item.cancelled_at=now();audit(s,ctx,"customer.profile_deletion.cancelled");s.commit();return deletion_payload(item)
 
 @router.post("/consents",status_code=201)
 def consent(x:ConsentIn,ctx=Depends(auth),s:Session=Depends(db)):
