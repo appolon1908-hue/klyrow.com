@@ -139,7 +139,7 @@ def test_signed_oidc_service_type_comes_from_registered_identity(monkeypatch, id
     monkeypatch.setattr(core, "runtime_secret", lambda name: "")
     monkeypatch.setitem(core._jwks_clients, issuer, SimpleNamespace(
         get_signing_key_from_jwt=lambda raw: SimpleNamespace(key=private.public_key())))
-    records = iter([SimpleNamespace(user_id="service-a", default_tenant_id="tenant-a",
+    records = iter([SimpleNamespace(id="registered-identity-a", user_id="service-a", default_tenant_id="tenant-a",
                                     identity_type=identity_type), SimpleNamespace(role="OWNER")])
     tenants = Tenants()
     tenants.scalar = lambda query: next(records)

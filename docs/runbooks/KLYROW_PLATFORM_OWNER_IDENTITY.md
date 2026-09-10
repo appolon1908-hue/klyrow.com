@@ -83,18 +83,24 @@ is unknown or changes.
 Only sanitized result codes may be captured as evidence. Do not record ID
 tokens, access tokens, cookies, credentials or recovery codes.
 
-## Step-up prerequisite
+## Current browser step-up flow
 
-`/auth/step-up` intentionally returns
-`503 platform_owner_step_up_flow_binding_required` in this foundation. Starting
-a fresh authorization transaction before it is bound to the initiating browser
-would leave it open to login-CSRF/session-swap attacks.
+The production ASGI composition installs the browser-bound /auth/step-up
+implementation from browser_security_fixes.py before the historical fallback
+route. It uses one-use state, PKCE, nonce and host-only per-flow cookies.
+browser_step_up_identity.py restricts the callback to the initiating identity,
+and browser_step_up_deadline.py preserves the original absolute session limit.
+The standalone historical fallback still denies access when that composition
+is absent.
 
-Issue #83 must first add the secure, host-only
-`__Host-klyrow_oidc_flow` binding with one-time state, PKCE, nonce, origin/host,
-expiry, replay, concurrent-tab and successful-clear coverage. After that lands,
-a focused PR may enable the fresh-login redirect and configure only realm-
-evidenced ACR values.
+Fresh step-up does not assign platform_admin. The protected owner binding,
+current user/membership, verified mailbox and MFA must still pass on the next
+administrative request. Requesting an ACR label does not itself prove MFA.
+
+Use GET /app/api/admin/security/platform-owner for browser readback or
+GET /v1/admin/security/platform-owner with a canonical signed owner token.
+Successful responses contain no owner subject, mailbox or tokens. Legacy local
+tokens and resolver roles without independently verified owner proof are denied.
 
 ## Recovery / break glass
 
@@ -113,7 +119,7 @@ evidenced ACR values.
 ## Activation boundary
 
 Source merge does not activate the owner. Real subject/mailbox values remain
-blank in Git, the step-up redirect remains disabled, and issue #22 remains open
+blank in Git, and issue #22 remains open
 until protected staging proves the exact identity, MFA/step-up behavior,
 recovery procedure, all browser and non-browser privileged-operation coverage,
 and redacted evidence. No production effect follows from merging this source.
