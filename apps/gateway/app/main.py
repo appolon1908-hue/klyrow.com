@@ -207,6 +207,7 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
     raw=authorization[7:]
     if x_klyrow_tenant_id and x_tenant_id and x_klyrow_tenant_id!=x_tenant_id:raise HTTPException(403,"tenant_header_mismatch")
     requested_tenant=x_klyrow_tenant_id or x_tenant_id
+    owner_claims=None;owner_identity_id=None
     try:
         resolver=os.getenv("KLYROW_TENANT_RESOLVER_URL","").strip()
         if resolver:
@@ -271,9 +272,16 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
                     tenant_id=requested_tenant or identity.default_tenant_id
                     membership=s.scalar(select(TenantMember).where(TenantMember.tenant_id==tenant_id,TenantMember.user_id==identity.user_id,TenantMember.active==True)) if tenant_id else None
                     if not membership:raise HTTPException(403,"tenant_membership_required")
+                    owner_claims=claims;owner_identity_id=identity.id
                     ctx={"sub":identity.user_id,"oidc_sub":claims["sub"],"tenant":tenant_id,"role":membership.role,"identity_type":identity.identity_type,"service":str(identity.identity_type).upper() in {"SERVICE","SERVICE_ACCOUNT"},"scopes":set(str(claims.get("scope","")).split())}
                 tenant=s.get(Tenant,ctx["tenant"])
                 if not tenant or not tenant.enabled:raise HTTPException(403,"account_suspended")
+        if str(ctx.get("role") or "").lower()=="platform_admin":
+            from .platform_owner_api import resolve_api_owner_proof, validate_api_owner
+            if resolver and owner_claims is None:
+                owner_claims,owner_identity_id=resolve_api_owner_proof(s,ctx,raw)
+            validate_api_owner(s,ctx,claims=owner_claims,identity_id=owner_identity_id)
+            request.state.klyrow_platform_owner_api_validated=True
     except HTTPException: raise
     except Exception: raise HTTPException(401,"invalid_credentials")
     now=time.time(); q=rate_buckets[ctx["tenant"]]
@@ -1251,6 +1259,8 @@ from .middleware_email import router as middleware_email_router
 app.include_router(middleware_email_router)
 from .reseller import router as reseller_router
 app.include_router(reseller_router)
+from .platform_owner_api import router as platform_owner_api_router
+app.include_router(platform_owner_api_router)
 from .delivery_controls import router as delivery_controls_router
 app.include_router(delivery_controls_router)
 from .preferences import router as preferences_router
