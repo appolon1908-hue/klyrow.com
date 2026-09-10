@@ -97,6 +97,7 @@ def canonical_api_owner(monkeypatch, request):
     # the dedicated negative authorization tests retain their actual tokens.
     module = request.module
     helper_names = {
+        "test_agent_mailboxes": ("hdr", None),
         "test_billing": ("login", "root@example.com"),
         "test_operations": ("h", None),
         "test_delivery_controls": ("h", None),
