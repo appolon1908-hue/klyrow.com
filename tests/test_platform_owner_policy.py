@@ -169,3 +169,24 @@ def test_incomplete_or_noncanonical_configuration_fails_closed() -> None:
         PlatformOwnerConfig.from_mapping({})
     with pytest.raises(PlatformOwnerError, match="platform_owner_issuer_misconfigured"):
         config(KLYROW_PLATFORM_OWNER_ISSUER="https://example.invalid/realms/codestra")
+
+
+@pytest.mark.parametrize("mailbox", [
+    "owner@gmail", "@example.com", "owner@", "owner@@example.com",
+    "owner name@example.com", "Owner <owner@example.com>", "owner@example..com",
+    "owner@example.com\\r\\nBcc:other@example.com",
+])
+def test_owner_configuration_requires_a_complete_mailbox(mailbox):
+    with pytest.raises(PlatformOwnerError, match="platform_owner_email_misconfigured"):
+        config(KLYROW_PLATFORM_OWNER_EMAIL=mailbox)
+
+
+@pytest.mark.parametrize("field", ["identity_issuer", "token_issuer"])
+def test_owner_issuer_comparison_is_exact(field):
+    identity = {"identity_issuer": CANONICAL_ISSUER}
+    token = claims()
+    if field == "identity_issuer":
+        identity["identity_issuer"] += "/"
+    else:
+        token["iss"] = CANONICAL_ISSUER + "/"
+    assert failure_detail(lambda: validate(token, **identity)) == "platform_owner_identity_mismatch"

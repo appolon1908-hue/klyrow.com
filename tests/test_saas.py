@@ -1,3 +1,7 @@
+import pytest
+
+pytestmark = pytest.mark.usefixtures("canonical_api_owner")
+
 import os
 os.environ.update(KLYROW_DATABASE_URL="sqlite:///./saas-test.db",KLYROW_SESSION_SECRET="test-session-secret-at-least-32-bytes",KLYROW_WEBHOOK_SECRET="hook-secret",KLYROW_SAFE_MODE="true",KLYROW_ADMIN_EMAIL="admin@example.com",KLYROW_ADMIN_PASSWORD="correct-horse-battery-staple",KLYROW_AI_ENABLED="false",KLYROW_RATE_PER_MINUTE="1000",KLYROW_AUTH_RATE_PER_MINUTE="1000")
 from fastapi.testclient import TestClient
