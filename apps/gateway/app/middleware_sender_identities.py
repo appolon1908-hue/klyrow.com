@@ -13,6 +13,8 @@ introducing a parallel identity concept.
 """
 from __future__ import annotations
 
+import os
+import time
 import uuid
 from typing import Optional
 
@@ -21,7 +23,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .main import AllowedSender, audit, auth, db
+from .main import AllowedSender, audit, auth, db, rate_buckets
 from .messaging import STREAMS, DomainClaim, SenderIdentity
 
 router = APIRouter(tags=["Middleware sender identities"])
@@ -30,6 +32,26 @@ router = APIRouter(tags=["Middleware sender identities"])
 def _authorize(ctx: dict) -> None:
     if not ctx.get("service"):
         raise HTTPException(403, "middleware_service_identity_required")
+
+
+def _sender_identity_rate_limit(ctx: dict, action: str) -> None:
+    """Same bucket/limiter shape as main.auth_rate, keyed by tenant+action.
+
+    This route is service-authenticated (a single Middleware caller, not a
+    browser), so the key is the tenant rather than a client IP - bounding
+    how fast any one tenant's sender-identity data can be enumerated or
+    churned, independent of Middleware's own per-caller rate limit on the
+    same operations (defense in depth, not a replacement for it).
+    """
+    identity = ctx.get("tenant", "unknown")
+    now = time.time()
+    bucket = rate_buckets[("sender-identity", action, identity)]
+    while bucket and bucket[0] < now - 60:
+        bucket.popleft()
+    limit = int(os.getenv("KLYROW_SENDER_IDENTITY_RATE_PER_MINUTE", "30"))
+    if len(bucket) >= limit:
+        raise HTTPException(429, "rate_limit_exceeded")
+    bucket.append(now)
 
 
 class SenderIdentityIn(BaseModel):
@@ -58,6 +80,7 @@ def create_sender_identity(
     s: Session = Depends(db),
 ) -> dict:
     _authorize(ctx)
+    _sender_identity_rate_limit(ctx, "create")
     claim = s.get(DomainClaim, body.domain_claim_id)
     if not claim or claim.tenant_id != ctx["tenant"]:
         raise HTTPException(404, "domain_claim_not_found")
@@ -114,9 +137,12 @@ def get_sender_identity(
     item_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
 ) -> dict:
     _authorize(ctx)
+    _sender_identity_rate_limit(ctx, "read")
     item = s.get(SenderIdentity, item_id)
     if not item or item.tenant_id != ctx["tenant"]:
         raise HTTPException(404, "not_found")
+    audit(s, ctx, "sender_identity.read")
+    s.commit()
     return _serialize(item)
 
 
@@ -125,6 +151,7 @@ def disable_sender_identity(
     item_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
 ) -> dict:
     _authorize(ctx)
+    _sender_identity_rate_limit(ctx, "disable")
     item = s.get(SenderIdentity, item_id)
     if not item or item.tenant_id != ctx["tenant"]:
         raise HTTPException(404, "not_found")

@@ -132,3 +132,31 @@ def test_non_service_caller_is_rejected(gateway):
     response = client.post("/v1/internal/sender-identities", json=body())
     assert response.status_code == 403
     assert response.json()["detail"] == "middleware_service_identity_required"
+
+
+def test_read_sender_identity_is_audited(gateway):
+    client, sessions, ctx = gateway
+    created = client.post("/v1/internal/sender-identities", json=body()).json()
+    client.get(f"/v1/internal/sender-identities/{created['id']}")
+    with sessions() as session:
+        rows = session.query(core.Audit).filter(
+            core.Audit.action == "sender_identity.read",
+            core.Audit.tenant_id == ctx["tenant"],
+        ).all()
+    assert len(rows) >= 1
+    assert rows[0].actor == ctx["sub"]
+
+
+def test_sender_identity_reads_are_rate_limited(gateway, monkeypatch):
+    client, _sessions, _ctx = gateway
+    monkeypatch.setenv("KLYROW_SENDER_IDENTITY_RATE_PER_MINUTE", "3")
+    core.rate_buckets.clear()
+    created = client.post("/v1/internal/sender-identities", json=body()).json()
+
+    for _ in range(3):
+        response = client.get(f"/v1/internal/sender-identities/{created['id']}")
+        assert response.status_code == 200
+
+    limited = client.get(f"/v1/internal/sender-identities/{created['id']}")
+    assert limited.status_code == 429
+    assert limited.json()["detail"] == "rate_limit_exceeded"
