@@ -78,6 +78,7 @@ DURABLE_IDEMPOTENCY = {
     ("post", "/v1/integrations/mautic/operations/{operation_id}/reconcile"),
     ("post", "/v1/integrations/mautic/commands"),
     ("post", "/v1/commands"),
+    ("post", "/v1/internal/integrations/odoo/reconcile"),
 }
 NON_ATOMIC_ITEM_IDEMPOTENCY = {
     ("post", "/v1/email/bulk"),
