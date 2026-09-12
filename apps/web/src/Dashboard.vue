@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { appApi, getSession, idempotencyKey, type BrowserSession } from './api'
+import { computed, onMounted, ref, watch } from 'vue'
+import { hasCapability } from './session'
+import { appApi, requireSession, idempotencyKey, type BrowserSession } from './api'
 
 type MetricKey = 'sent_24h'|'messages_total'|'quota'|'delivered'|'bounced'|'delivery_rate'|'contacts'|'campaigns'|'suppressions'|'outbox_active'|'outbox_failed'
 interface DashboardData {
@@ -17,14 +18,16 @@ const dashboard = ref<DashboardData | null>(null)
 const team = ref<TeamMember[]>([])
 const loading = ref(true), error = ref(''), sendStatus = ref(''), sending = ref(false)
 const recipient = ref(''), sender = ref(''), subject = ref(''), text = ref('')
+const canSend = computed(() => hasCapability(session.value, 'mail.send'))
+const sendKey = ref('')
+watch([recipient, sender, subject, text], () => { sendKey.value = '' })
 const active = ref<'overview'|'messages'|'domains'|'team'|'send'>('overview')
 const usage = computed(() => dashboard.value ? Math.min(100, Math.round((dashboard.value.metrics.sent_24h / Math.max(1, dashboard.value.metrics.quota)) * 100)) : 0)
 
 async function load() {
   loading.value = true; error.value = ''
   try {
-    session.value = await getSession()
-    if (!session.value.authenticated) { location.assign('/login?return_to=/app'); return }
+    session.value = await requireSession()
     dashboard.value = await appApi<DashboardData>('/app/api/dashboard')
     team.value = await appApi<TeamMember[]>('/app/api/team')
     sender.value = dashboard.value.senders[0]?.address || ''
@@ -32,13 +35,16 @@ async function load() {
   finally { loading.value = false }
 }
 async function sendEmail() {
+  if (!canSend.value || sending.value) return
+  if (!sendKey.value) sendKey.value = idempotencyKey('dashboard-send')
   sending.value = true; sendStatus.value = ''
   try {
     const result = await appApi<{ id: string; status: string }>('/app/api/email/send', {
       method: 'POST',
-      headers: { 'Idempotency-Key': idempotencyKey('dashboard-send') },
+      headers: { 'Idempotency-Key': sendKey.value },
       body: JSON.stringify({ to: recipient.value, sender: sender.value, subject: subject.value, text: text.value, html: `<p>${text.value.replace(/[&<>]/g, value => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[value] || value))}</p>`, stream: 'transactional' }),
     })
+    sendKey.value = ''
     sendStatus.value = `Accepted as ${result.id}`
     recipient.value = ''; subject.value = ''; text.value = ''
     await load()
@@ -46,7 +52,7 @@ async function sendEmail() {
   finally { sending.value = false }
 }
 async function logout() {
-  const current = await getSession()
+  const current = await requireSession()
   const result = await appApi<{ end_session_url?: string }>('/auth/logout', { method: 'POST' })
   if (current.authenticated && result.end_session_url) location.assign(result.end_session_url)
   else location.assign('/logged-out')
@@ -85,7 +91,7 @@ onMounted(load)
         <section v-else-if="active==='messages'" class="panel"><div class="panel-title"><div><p class="eyebrow">MESSAGE LOG</p><h2>Recent email</h2></div></div><div class="table-wrap"><table><thead><tr><th>Recipient</th><th>Sender</th><th>Subject</th><th>Status</th><th>Created</th></tr></thead><tbody><tr v-for="message in dashboard.recent_messages" :key="message.id"><td>{{ message.recipient }}</td><td>{{ message.sender }}</td><td>{{ message.subject }}</td><td><span class="status">{{ message.status }}</span></td><td>{{ new Date(message.created_at).toLocaleString() }}</td></tr></tbody></table></div></section>
         <section v-else-if="active==='domains'" class="panel"><p class="eyebrow">DELIVERABILITY</p><h2>Sending domains</h2><div class="domain-list"><article v-for="domain in dashboard.domains" :key="domain.id"><div><strong>{{ domain.domain }}</strong><small>DKIM/SPF verification identity</small></div><span class="status" :data-status="domain.verified?'verified':'pending'">{{ domain.verified ? 'Verified' : 'Needs verification' }}</span></article><p v-if="!dashboard.domains.length" class="empty">No domains configured. Add a domain through the API or setup flow.</p></div></section>
         <section v-else-if="active==='team'" class="panel"><p class="eyebrow">ACCESS</p><h2>Workspace team</h2><div class="team-list"><article v-for="member in team" :key="member.user_id"><div><strong>{{ member.email || member.user_id }}</strong><small>Joined {{ new Date(member.created_at).toLocaleDateString() }}</small></div><span>{{ member.role }}</span></article></div></section>
-        <section v-else class="panel compose"><p class="eyebrow">TRANSACTIONAL</p><h2>Send a message</h2><p class="muted">This uses the same backend policy engine, verified-domain checks, sender authorization, idempotency and outbox as the public API.</p><form @submit.prevent="sendEmail"><label>From<select v-model="sender" required><option v-for="item in dashboard.senders" :key="item.id" :value="item.address">{{ item.address }}</option></select></label><label>To<input v-model="recipient" type="email" required autocomplete="off"></label><label>Subject<input v-model="subject" required maxlength="200"></label><label>Message<textarea v-model="text" required rows="8"></textarea></label><button class="primary" :disabled="sending || !dashboard.senders.length">{{ sending ? 'Sending…' : 'Send email' }}</button><p v-if="sendStatus" role="status" class="send-status">{{ sendStatus }}</p></form></section>
+        <section v-else class="panel compose"><p class="eyebrow">TRANSACTIONAL</p><h2>Send a message</h2><p class="muted">This uses the same backend policy engine, verified-domain checks, sender authorization, idempotency and outbox as the public API.</p><p v-if="!canSend" role="status">Your current workspace access does not allow sending email.</p><form @submit.prevent="sendEmail"><label>From<select v-model="sender" required><option v-for="item in dashboard.senders" :key="item.id" :value="item.address">{{ item.address }}</option></select></label><label>To<input v-model="recipient" type="email" required autocomplete="off"></label><label>Subject<input v-model="subject" required maxlength="200"></label><label>Message<textarea v-model="text" required rows="8"></textarea></label><button class="primary" :disabled="sending || !canSend || !dashboard.senders.length">{{ sending ? 'Sending…' : 'Send email' }}</button><p v-if="sendStatus" role="status" class="send-status">{{ sendStatus }}</p></form></section>
       </template>
     </main>
   </div>
