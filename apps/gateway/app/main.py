@@ -1258,6 +1258,8 @@ from .production_api import router as production_api_router
 app.include_router(production_api_router)
 from .middleware_email import router as middleware_email_router
 app.include_router(middleware_email_router)
+from .middleware_sender_identities import router as middleware_sender_identities_router
+app.include_router(middleware_sender_identities_router)
 from .reseller import router as reseller_router
 app.include_router(reseller_router)
 from .platform_owner_api import router as platform_owner_api_router
