@@ -36,7 +36,9 @@ def test_web_candidate_contains_the_reviewed_webmail_application():
     dashboard = (ROOT / "apps/web/src/Dashboard.vue").read_text(encoding="utf-8")
     webmail = (ROOT / "apps/web/src/Webmail.vue").read_text(encoding="utf-8")
     assert "import Webmail from './Webmail.vue'" in entrypoint
-    assert "path === '/app/mail'" in entrypoint
+    route_manifest = (ROOT / "apps/web/src/routeManifest.ts").read_text(encoding="utf-8")
+    assert "browserRoute(path)" in entrypoint
+    assert "path: '/app/mail', descendants: true, view: 'Webmail'" in route_manifest
     assert 'href="/app/mail"' in dashboard
     assert "'/app/api/mailboxes'" in webmail
     assert "Idempotency-Key" in webmail

@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { appApi, getSession } from './api'
+import { appApi, requireSession } from './api'
 
 interface OnboardingState { step:number; use_case?:string; checklist:Record<string,boolean>; completed:boolean }
 const state=ref<OnboardingState>({step:1,checklist:{},completed:false}), loading=ref(true), error=ref(''), saving=ref(false)
 const useCase=ref('transactional'), company=ref(''), teamSize=ref('1-5')
 const steps=[['profile','Tell us about your team'],['domain','Add a sending domain'],['sender','Verify a sender'],['api','Create an API credential'],['test','Send a test message']]
-async function load(){try{const session=await getSession();if(!session.authenticated){location.assign('/login?return_to=/onboarding');return}state.value=await appApi<OnboardingState>('/app/api/onboarding');useCase.value=state.value.use_case||'transactional'}catch(err){error.value=err instanceof Error?err.message:'setup_unavailable'}finally{loading.value=false}}
+async function load(){try{await requireSession();state.value=await appApi<OnboardingState>('/app/api/onboarding');useCase.value=state.value.use_case||'transactional'}catch(err){error.value=err instanceof Error?err.message:'setup_unavailable'}finally{loading.value=false}}
 async function saveStep(key:string,index:number){saving.value=true;error.value='';try{state.value=await appApi<OnboardingState>('/app/api/onboarding',{method:'PATCH',body:JSON.stringify({step:index+2,use_case:useCase.value,checklist:{[key]:true}})})}catch(err){error.value=err instanceof Error?err.message:'save_failed'}finally{saving.value=false}}
 async function complete(){saving.value=true;try{await appApi('/app/api/onboarding/complete',{method:'POST'});location.assign('/app')}catch(err){error.value=err instanceof Error?err.message:'completion_failed'}finally{saving.value=false}}
 onMounted(load)

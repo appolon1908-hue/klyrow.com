@@ -1,4 +1,4 @@
-import { createApp } from 'vue'
+import { createApp, type Component } from 'vue'
 import AuthApp from './App.vue'
 import Dashboard from './Dashboard.vue'
 import Onboarding from './Onboarding.vue'
@@ -6,19 +6,14 @@ import AdminDashboard from './AdminDashboard.vue'
 import Provisioning from './Provisioning.vue'
 import Webmail from './Webmail.vue'
 import './styles.css'
+import { browserRoute, type RootView } from './routeManifest'
+import { startSessionSync } from './api'
 
 const path = location.pathname
-const Root = path === '/app/provisioning' || path === '/admin/provisioning'
-  ? Provisioning
-  : path === '/app/mail' || path.startsWith('/app/mail/')
-    ? Webmail
-  : path === '/admin' || path.startsWith('/admin/')
-    ? AdminDashboard
-    : path === '/onboarding'
-      ? Onboarding
-      : path === '/app' || path.startsWith('/app/')
-        ? Dashboard
-        : AuthApp
+const views = { App: AuthApp, Dashboard, AdminDashboard, Onboarding, Provisioning, Webmail } satisfies Record<RootView, Component>
+const route = browserRoute(path)
+const Root = views[route?.view || 'App']
+if (route?.access === 'session') startSessionSync()
 
 createApp(Root).mount('#app')
 

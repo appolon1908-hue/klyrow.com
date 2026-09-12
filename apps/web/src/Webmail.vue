@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { appApi, getSession, idempotencyKey, type BrowserSession } from './api'
+import { appApi, requireSession, idempotencyKey, type BrowserSession } from './api'
 
 type Folder = 'INBOX'|'STARRED'|'SENT'|'DRAFTS'|'ARCHIVE'|'SPAM'|'TRASH'
 interface Mailbox { id:string; address:string; domain:string; display_name:string; sending_enabled:boolean; receiving_enabled:boolean; counts:Record<string,number> }
@@ -31,7 +31,7 @@ async function loadMessages(){
   try{const result=await appApi<{items:MessageSummary[]}>(`/app/api/mailboxes/${selectedMailboxId.value}/messages?folder=${folder.value}&q=${encodeURIComponent(query.value)}`);messages.value=result.items;if(selected.value&&!messages.value.some(item=>item.id===selected.value?.id))selected.value=null}
   catch(err){error.value=err instanceof Error?err.message:'mailbox_unavailable'}finally{listLoading.value=false}
 }
-async function boot(){loading.value=true;try{session.value=await getSession();if(!session.value.authenticated){location.assign('/login?return_to=/app/mail');return}await loadMailboxes();await loadMessages()}catch(err){error.value=err instanceof Error?err.message:'webmail_unavailable'}finally{loading.value=false}}
+async function boot(){loading.value=true;try{session.value=await requireSession();await loadMailboxes();await loadMessages()}catch(err){error.value=err instanceof Error?err.message:'webmail_unavailable'}finally{loading.value=false}}
 async function syncMailboxes(){try{const result=await appApi<{created:number;send_ready:number;pending_send:number;receive_ready:number;pending_receive:number}>('/app/api/mailboxes/sync',{method:'POST'});notice.value=`${result.created} mailboxes added · ${result.send_ready} ready to send · ${result.receive_ready} ready to receive · ${result.pending_receive} awaiting inbound DNS/routes`;await loadMailboxes();await loadMessages()}catch(err){error.value=err instanceof Error?err.message:'mailbox_sync_failed'}}
 async function activateInboxes(){try{const result=await appApi<{activated_domains:number;activated_routes:number}>('/app/api/mailboxes/inbound/activate',{method:'POST'});notice.value=`Inbound activated for ${result.activated_domains} domains and ${result.activated_routes} exact routes`;await loadMailboxes(false);await loadMessages()}catch(err){error.value=err instanceof Error?err.message:'inbound_activation_failed'}}
 async function chooseMailbox(id:string){selectedMailboxId.value=id;selected.value=null;await loadMessages()}
