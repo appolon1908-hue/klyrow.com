@@ -26,5 +26,10 @@ def test_full_history_suppressions_are_exact_reviewed_fingerprints():
         "95301ef4f2a709c50d2297f022f17af37c8aae90:apps/web/e2e/auth.spec.ts:generic-api-key:35",
         "e5b8791d0d9c652b084943c5b5fb765b2b32e811:apps/web/e2e/auth.spec.ts:generic-api-key:35",
         "c5b36f73929d7078d4633e80498fce5be921fa57:apps/web/e2e/auth.spec.ts:generic-api-key:35",
+        "6f8bf1f52e8abf4baf50e2ff266e6c33e5f92072:tests/test_m06_api_completion.py:generic-api-key:73",
+        "6f8bf1f52e8abf4baf50e2ff266e6c33e5f92072:tests/test_m06_api_completion.py:generic-api-key:76",
+        "6f8bf1f52e8abf4baf50e2ff266e6c33e5f92072:tests/test_m06_api_completion.py:generic-api-key:78",
+        "6f8bf1f52e8abf4baf50e2ff266e6c33e5f92072:tests/test_m06_api_completion.py:generic-api-key:79",
+        "6f8bf1f52e8abf4baf50e2ff266e6c33e5f92072:tests/test_m06_api_completion.py:generic-api-key:81",
     ]
     assert all(len(line.split(":", 1)[0]) == 40 for line in fingerprints)
