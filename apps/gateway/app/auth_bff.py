@@ -23,7 +23,7 @@ from sqlalchemy import DateTime, String, Text, select
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .main import Base, SECRET, Tenant, User, db, sha
-from .tenancy import OidcIdentity, TenantMember
+from .tenancy import ROLE_PERMISSIONS, OidcIdentity, TenantMember
 
 SESSION_COOKIE = "__Host-klyrow_session"
 ISSUER = "https://auth.codestra.co/realms/codestra"
@@ -418,7 +418,12 @@ def _session_body(s: Session, item: BrowserSession, csrf: Optional[str] = None) 
         "email": user.email if user else None,
         "tenant_id": item.tenant_id,
         "role": item.role,
-        "expires_at": item.expires_at.isoformat(),
+        "expires_at": (
+            item.expires_at
+            if item.expires_at.tzinfo
+            else item.expires_at.replace(tzinfo=timezone.utc)
+        ).isoformat(),
+        "capabilities": sorted(ROLE_PERMISSIONS.get(str(item.role or "").upper(), set())),
         "workspaces": [{"tenant_id": row.tenant_id, "role": row.role} for row in memberships],
     }
     if csrf:

@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { appApi, getSession } from './api'
+import { appApi, requireSession } from './api'
 
 type Status={tenant_id:string;state:string;provider_mode?:string|null;organization?:string|null;server?:string|null;credential_fingerprint?:string|null;last_error?:string|null;attempts:number;updated_at?:string|null}
 const status=ref<Status|null>(null), failures=ref<Status[]>([]), loading=ref(true), error=ref(''), working=ref(false)
 const admin=computed(()=>location.pathname.startsWith('/admin/'))
-async function load(){loading.value=true;error.value='';try{const session=await getSession();if(!session.authenticated){location.assign('/login?return_to='+encodeURIComponent(location.pathname));return}if(admin.value)failures.value=await appApi<Status[]>('/app/api/admin/provisioning/postal');else status.value=await appApi<Status>('/app/api/provisioning/postal')}catch(err){error.value=err instanceof Error?err.message:'provisioning_unavailable'}finally{loading.value=false}}
+async function load(){loading.value=true;error.value='';try{await requireSession();if(admin.value)failures.value=await appApi<Status[]>('/app/api/admin/provisioning/postal');else status.value=await appApi<Status>('/app/api/provisioning/postal')}catch(err){error.value=err instanceof Error?err.message:'provisioning_unavailable'}finally{loading.value=false}}
 async function request(){working.value=true;try{status.value=await appApi<Status>('/app/api/provisioning/postal',{method:'POST'})}catch(err){error.value=err instanceof Error?err.message:'request_failed'}finally{working.value=false}}
 async function retry(tenantId?:string){working.value=true;try{if(admin.value&&tenantId)await appApi(`/app/api/admin/provisioning/postal/${tenantId}/retry`,{method:'POST'});else status.value=await appApi<Status>('/app/api/provisioning/postal/retry',{method:'POST'});await load()}catch(err){error.value=err instanceof Error?err.message:'retry_failed'}finally{working.value=false}}
 onMounted(load)

@@ -33,8 +33,10 @@ jobs:
           cache: pnpm
           cache-dependency-path: apps/web/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
+      - run: pnpm audit --audit-level=high
       - run: pnpm lint
       - run: pnpm typecheck
+      - run: pnpm test:routes
       - run: pnpm test
       - run: pnpm build
       - run: pnpm exec playwright install --with-deps chromium
