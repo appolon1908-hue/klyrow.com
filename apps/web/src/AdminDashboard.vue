@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { appApi, getSession } from './api'
+import { appApi, requireSession } from './api'
 
 interface PlatformMetrics {
   tenants: number
@@ -21,11 +21,7 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const session = await getSession()
-    if (!session.authenticated) {
-      location.assign('/login?return_to=/admin')
-      return
-    }
+    await requireSession()
     metrics.value = await appApi<PlatformMetrics>('/app/api/admin/dashboard')
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'admin_dashboard_unavailable'

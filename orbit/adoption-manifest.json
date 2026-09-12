@@ -1,0 +1,23 @@
+{
+  "schemaVersion": "2.0.0",
+  "repository": "appolon1908-hue/klyrow.com",
+  "classification": "first-party-ui",
+  "targetBranch": "codex/codestra-orbit-v2-klyrow-com",
+  "adoptionMode": "full-shell",
+  "domain": "klyrow.com",
+  "domainStatus": "registered",
+  "requirements": {
+    "immutablePackages": false,
+    "sharedShell": false,
+    "sessionAdapter": true,
+    "routeInventory": true,
+    "fullRouteCoverage": false,
+    "runtimeCertification": false
+  },
+  "status": "blocked",
+  "blockers": [
+    "SDK-repository@a194b5154a5b313c8fc4b9150abd17a4cc6612ae orbit/release/orbit-v2.0.0.json is superseded-source-candidate with installAllowed=false.",
+    "Full shared-shell adoption and missing route/state surfaces require a protected immutable installable release.",
+    "Running Keycloak staging, independent review, immutable artifact and rollback evidence remain required."
+  ]
+}
