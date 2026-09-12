@@ -151,6 +151,8 @@ def test_membership_role_changes_are_reloaded_for_existing_sessions():
     response = seeded["client"].get("/auth/session")
     assert response.status_code == 200
     assert response.json()["role"] == "READ_ONLY"
+    assert response.json()["capabilities"] == ["analytics.read", "billing.read", "mail.read"]
+    assert "mail.send" not in response.json()["capabilities"]
 
 
 def test_idle_session_is_revoked_before_last_seen_is_touched(monkeypatch):
@@ -216,3 +218,23 @@ def test_logout_all_revokes_sessions_for_every_identity_of_the_user():
     with DB() as session:
         assert session.get(BrowserSession, seeded["session_id"]).revoked_at is not None
         assert session.get(BrowserSession, seeded["other_session_id"]).revoked_at is not None
+
+
+def test_session_projection_uses_canonical_capabilities_and_explicit_utc():
+    from apps.gateway.app.tenancy import ROLE_PERMISSIONS
+    from datetime import datetime
+
+    seeded = _seed_session()
+    for role in ["OWNER", "ADMIN", "DEVELOPER", "MARKETING", "BILLING", "SUPPORT", "UNKNOWN"]:
+        with DB() as session:
+            session.get(TenantMember, seeded["member_id"]).role = role
+            session.commit()
+        response = seeded["client"].get("/auth/session")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["capabilities"] == sorted(ROLE_PERMISSIONS.get(role, set()))
+        assert body["identity_id"] == seeded["identity_id"]
+        assert body["tenant_id"] == seeded["tenant_id"]
+        assert datetime.fromisoformat(body["expires_at"]).utcoffset() == timedelta(0)
+        assert response.headers["cache-control"] == "no-store"
+        assert not {"access_token", "refresh_token", "id_token"}.intersection(body)
