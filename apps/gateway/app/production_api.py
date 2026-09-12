@@ -646,7 +646,37 @@ def template_detail(template_id: str, ctx: dict = Depends(auth), s: Session = De
             TemplateVersion.tenant_id == ctx["tenant"],
         )
     )
-    return {"template": item, "version": version}
+    return jsonable_encoder({"template": item, "version": version})
+
+
+@router.get("/v1/templates/{template_id}/versions")
+def template_versions(
+    template_id: str, ctx: dict = Depends(auth), s: Session = Depends(db)
+) -> dict[str, Any]:
+    item = _tenant_item(s, Template, template_id, ctx["tenant"])
+    rows = s.scalars(
+        select(TemplateVersion)
+        .where(TemplateVersion.template_id == item.id, TemplateVersion.tenant_id == ctx["tenant"])
+        .order_by(TemplateVersion.version.desc())
+    ).all()
+    return {"items": jsonable_encoder(rows)}
+
+
+@router.get("/v1/templates/{template_id}/versions/{version_id}")
+def template_version_detail(
+    template_id: str, version_id: int, ctx: dict = Depends(auth), s: Session = Depends(db)
+) -> Any:
+    item = _tenant_item(s, Template, template_id, ctx["tenant"])
+    version = s.scalar(
+        select(TemplateVersion).where(
+            TemplateVersion.template_id == item.id,
+            TemplateVersion.version == version_id,
+            TemplateVersion.tenant_id == ctx["tenant"],
+        )
+    )
+    if version is None:
+        raise HTTPException(404, "not_found")
+    return jsonable_encoder(version)
 
 
 @router.patch("/v1/templates/{template_id}")
@@ -825,6 +855,33 @@ def campaign_cancel(
     return result
 
 
+@router.post("/v1/campaigns/{campaign_id}/test")
+def campaign_test(
+    campaign_id: str,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=200),
+) -> dict[str, Any]:
+    from .main import Campaign
+
+    _require_permission(ctx, "campaign.manage")
+    item = _tenant_item_for_update(s, Campaign, campaign_id, ctx["tenant"])
+    prior, storage_key, request_hash = _idempotency_begin(
+        s, ctx, idempotency_key, action="campaign.test", resource=campaign_id, semantic_payload={}
+    )
+    if prior is not None:
+        return prior
+    if item.status in {"completed", "cancelled"}:
+        raise HTTPException(409, "campaign_terminal")
+    audit(s, ctx, "campaign.test_fixture_completed")
+    result = {"id": item.id, "status": item.status, "provider_submission": False, "internal_sink": True}
+    _idempotency_complete(
+        s, ctx, storage_key=storage_key, request_hash=request_hash, resource=campaign_id, response=result
+    )
+    s.commit()
+    return result
+
+
 @router.get("/v1/tracking/events")
 def tracking_events(ctx: dict = Depends(auth), s: Session = Depends(db), limit: int = 100) -> dict[str, Any]:
     limit = max(1, min(limit, 500))
@@ -859,7 +916,7 @@ def suppression_create(
     s.add(item)
     audit(s, ctx, "suppression.upserted")
     s.commit()
-    return item
+    return jsonable_encoder(item)
 
 
 @router.delete("/v1/suppressions/{suppression_id}", status_code=204)
@@ -872,6 +929,17 @@ def suppression_delete(
     audit(s, ctx, "suppression.deleted")
     s.commit()
     return Response(status_code=204)
+
+
+@router.get("/v1/suppressions/check")
+def suppression_check(
+    email: EmailStr, ctx: dict = Depends(auth), s: Session = Depends(db)
+) -> dict[str, Any]:
+    value = str(email).lower()
+    item = s.scalar(
+        select(Suppression).where(Suppression.tenant_id == ctx["tenant"], Suppression.email == value)
+    )
+    return {"email": value, "suppressed": item is not None, "reason": item.reason if item else None}
 
 
 def _outcome_events(kind: str, ctx: dict, s: Session) -> dict[str, Any]:
