@@ -260,8 +260,8 @@ def auth(request:Request,authorization:str=Header(default=""),x_klyrow_tenant_id
                     session=s.get(SessionRecord,ctx.get("sid")) if ctx.get("sid") else None
                     if ctx.get("sid") and (not session or session.revoked):raise HTTPException(401,"session_revoked")
                 else:
-                    issuer="https://auth.codestra.co/realms/codestra"
-                    if os.getenv("KLYROW_OIDC_ISSUER",issuer)!=issuer:raise HTTPException(503,"canonical_oidc_misconfigured")
+                    from .identity_profile import canonical_issuer
+                    issuer=canonical_issuer()
                     client=_jwks_clients.setdefault(issuer,PyJWKClient(issuer+"/protocol/openid-connect/certs",cache_keys=True,lifespan=300))
                     signing_key=client.get_signing_key_from_jwt(raw)
                     audience=os.getenv("KLYROW_OIDC_AUDIENCE","klyrow-api")
