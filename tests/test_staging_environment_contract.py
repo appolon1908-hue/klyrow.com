@@ -11,9 +11,11 @@ STAGING = ROOT / "deploy" / "staging"
 
 def test_staging_images_are_required_as_immutable_digests():
     script = (ROOT / "scripts" / "staging-preflight").read_text()
+    example = (STAGING / "staging.env.example").read_text()
     assert "@sha256:" in script
-    for image in ("GATEWAY", "WEB", "MIGRATE", "SEARCH", "CADDY", "POSTGRES", "PROMETHEUS", "GRAFANA"):
+    for image in ("GATEWAY", "WEB", "MIGRATE", "SEARCH", "CADDY", "POSTGRES", "PROMETHEUS", "GRAFANA", "NODE_EXPORTER"):
         assert f"KLYROW_{image}_IMAGE" in script
+        assert f"KLYROW_{image}_IMAGE=" in example
 
 
 def test_only_caddy_publishes_public_ports():
@@ -27,6 +29,9 @@ def test_only_caddy_publishes_public_ports():
     caddy = (STAGING / "Caddyfile").read_text()
     assert "grafana:" not in caddy
     assert "prometheus:" not in caddy
+    assert "header_up Host app.klyrow.com" in caddy
+    for header in ("Client", "Tenant", "Role"):
+        assert f"request_header -X-Authenticated-{header}" in caddy
 
 
 def test_staging_is_fail_closed_for_external_delivery():
@@ -39,12 +44,15 @@ def test_staging_is_fail_closed_for_external_delivery():
     assert env["LIVE_EMAIL_DELIVERY"] == "false"
     assert env["EXTERNAL_EMAIL_DELIVERY"] == "false"
     assert env["PRODUCTION_PROVIDER_ROUTING"] == "false"
+    assert env["KLYROW_EMAIL_EVENT_URL"] == "${KLYROW_EMAIL_EVENT_URL:?required}"
+    assert env["KLYROW_PROVIDER_CREDENTIAL_KEY_FILE"] == "/run/secrets/provider_credential_key"
 
 
-def test_keycloak_realm_requires_pkce_and_disables_password_grant():
-    realm = json.loads((STAGING / "keycloak" / "kyyow-realm.json").read_text())
-    client = next(item for item in realm["clients"] if item["clientId"] == "kyyow-portal")
-    assert realm["realm"] == "kyyow"
+def test_keycloak_client_requires_pkce_and_disables_password_grant():
+    realm = json.loads((STAGING / "keycloak" / "klyrow-staging-client.json").read_text())
+    client = next(item for item in realm["clients"] if item["clientId"] == "klyrow-staging-portal")
+    assert realm["realm"] == "codestra"
+    assert realm["status"] == "prepared-not-applied"
     assert client["publicClient"] is True
     assert client["standardFlowEnabled"] is True
     assert client["directAccessGrantsEnabled"] is False
@@ -63,10 +71,26 @@ def test_staging_dependencies_are_declared():
         variable = service["image"].split("${", 1)[1].split(":", 1)[0]
         assert variable + "=" in template
     gateway = compose["services"]["gateway"]
-    for name in ("webhook_secret", "middleware_ca", "middleware_cert", "middleware_key"):
+    for name in ("webhook_secret", "provider_credential_key", "middleware_ca", "middleware_cert", "middleware_key"):
         assert name in gateway["secrets"]
         assert name in compose["secrets"]
     prometheus = compose["services"]["prometheus"]
     assert {"source": "metrics_token", "target": "klyrow_metrics_token"} in prometheus["secrets"]
     assert any("/etc/prometheus/alerts.yml" in value for value in prometheus["volumes"])
     assert "header_up Host app.klyrow.com" in (STAGING / "Caddyfile").read_text()
+
+
+def test_search_bridges_its_file_backed_secret_to_the_supported_setting():
+    compose = yaml.safe_load((STAGING / "compose.yml").read_text())
+    search = compose["services"]["search"]
+    assert "MEILI_MASTER_KEY_FILE" not in search.get("environment", {})
+    assert "cat /run/secrets/search_key" in search["command"][0]
+
+
+def test_node_exporter_reads_the_host_without_publishing_its_native_port():
+    compose = yaml.safe_load((STAGING / "compose.yml").read_text())
+    exporter = compose["services"]["node-exporter"]
+    assert exporter["command"] == ["--path.rootfs=/host"]
+    assert "/:/host:ro,rslave" in exporter["volumes"]
+    assert exporter["networks"] == ["observability"]
+    assert "ports" not in exporter

@@ -4,7 +4,7 @@ from fastapi import HTTPException
 
 PROFILES = {
     "production": ("https://auth.codestra.co/realms/codestra", "https://app.klyrow.com"),
-    "staging": ("https://auth-staging.codestra.co/realms/kyyow", "https://staging.klyrow.com"),
+    "staging": ("https://auth.codestra.co/realms/codestra", "https://staging.klyrow.com"),
 }
 
 

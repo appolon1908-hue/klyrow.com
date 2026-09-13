@@ -5,6 +5,9 @@
 
 {$KLYROW_STAGING_HOST} {
 	encode zstd gzip
+	request_header -X-Authenticated-Client
+	request_header -X-Authenticated-Tenant
+	request_header -X-Authenticated-Role
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options nosniff
@@ -24,6 +27,7 @@
 	handle {
 		reverse_proxy web:8080 {
 			header_up Host app.klyrow.com
+			header_up X-Forwarded-Host {$KLYROW_STAGING_HOST}
 		}
 	}
 }

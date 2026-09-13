@@ -8,16 +8,16 @@ This repository now supplies a fail-closed staging topology and operator gates. 
 
 Use only the exact digests produced by protected `main` after tests, HIGH/CRITICAL scanning, SBOM generation, provenance and signature verification pass. Copy `deploy/staging/staging.env.example` to a root-owned `staging.env` outside Git and replace every placeholder. `scripts/staging-preflight` rejects tags and non-exact source revisions.
 
-The public edge exposes only TCP 80/443. PostgreSQL, search, Prometheus and Grafana remain on internal Docker networks. Grafana has no Caddy route and no native monitoring or search port is published; operators must use the approved private access path.
+The public edge exposes only TCP 80/443. PostgreSQL, search, Prometheus, Grafana and node-exporter remain on internal Docker networks. Grafana has no Caddy route and no native monitoring or search port is published; operators must use the approved private access path.
 
 ## External authority gates
 
 These gates are owned by their respective repositories and must be proven before `scripts/staging-deploy` is run:
 
-1. Apply `deploy/staging/keycloak/kyyow-realm.json` through the reviewed Keycloak deployment path. Verify authorization-code flow with PKCE S256, exact redirects, MFA policy, realm roles and disabled Direct Access Grants.
+1. Apply the `klyrow-staging-portal` client from `deploy/staging/keycloak/klyrow-staging-client.json` to the canonical Codestra realm through the reviewed Keycloak deployment path. Verify authorization-code flow with PKCE S256, the exact staging redirect, MFA policy and disabled Direct Access Grants. The separate Kyyow realm is not a Klyrow deployment dependency.
 2. Provision the files listed by the staging Compose secret declarations with the OpenBao agent. Apply `deploy/staging/openbao/klyrow-staging.hcl` to the Klyrow workload identity. Prove that Middleware can read its Odoo writer credential and Klyrow/telemetry identities are denied.
 3. At the exact `KLYROW_MIDDLEWARE_SOURCE_SHA`, prove migration `0061` is present in the Middleware ledger and applied once to staging.
-4. At the exact `KLYROW_ODOO_SOURCE_SHA`, install or upgrade `codestra_klyrow_observability`, restart only the staging Odoo workers through the governed deployment, and read back the installed module version.
+4. At the exact `KLYROW_ODOO_SOURCE_SHA`, install or upgrade `codestra_observability_integration`, restart only the staging Odoo workers through the governed deployment, and read back the installed module version.
 5. Create the staging DNS record, verify it resolves to the intended edge, then allow Caddy to obtain TLS. Do not publish Grafana, Prometheus, Alertmanager, Loki, Tempo, OpenBao, PostgreSQL, Redis or search native ports.
 
 ## Deploy
@@ -55,15 +55,19 @@ Keep the previous digest set and database backup. On failure, stop admission at 
 
 Staging uses `KLYROW_ENV=production` to retain production authentication,
 invitation, cookie, secret-file and migration enforcement. The closed
-`KLYROW_IDENTITY_PROFILE=staging` selects only the registered staging issuer
-and public origin; the default profile retains production authorities. The
-portal client and callback must match the supplied realm. This does not enable
-email delivery or confer platform-owner authority on staging identities.
+`KLYROW_IDENTITY_PROFILE=staging` selects the canonical Codestra issuer and
+only the registered Klyrow staging public origin; the default profile retains
+the production Klyrow origin. The portal client and callback must match the
+supplied realm. This does not enable email delivery or confer platform-owner
+authority on staging identities. The Kyyow realm has its own issuer, clients,
+audiences and public origin and must not be repurposed for Klyrow.
 
-Render `webhook-secret`, `middleware-ca.pem`, `middleware-client.pem` and
-`middleware-client-key.pem` with the other root-owned OpenBao files. Prometheus
-receives its metrics token and alert rules. Caddy selects the web image's
-registered virtual host. Supply every image digest in the environment template.
+Render `webhook-secret`, `provider-credential-key`, `middleware-ca.pem`,
+`middleware-client.pem` and `middleware-client-key.pem` with the other
+root-owned OpenBao files. Prometheus receives its metrics token and alert rules,
+and scrapes a private node-exporter with a read-only host mount. Caddy strips
+untrusted identity headers and selects the web image's registered virtual host.
+Supply every image digest in the environment template.
 Preflight rejects a source SHA different from the clean checkout; deployment
 also checks gateway, web and migration image revision labels after pulling and
 before starting services. Image signing/provenance and external runtime evidence
