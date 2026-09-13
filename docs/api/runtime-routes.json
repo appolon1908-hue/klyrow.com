@@ -2311,6 +2311,12 @@
   },
   {
     "documented": true,
+    "handler": "campaign_dispatch_configuration",
+    "method": "PUT",
+    "path": "/v1/campaigns/{campaign_id}/dispatch-configuration"
+  },
+  {
+    "documented": true,
     "handler": "customer_data_retention_update",
     "method": "PUT",
     "path": "/v1/customer-data/retention"

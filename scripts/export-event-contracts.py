@@ -11,7 +11,6 @@ sys.path.insert(0, str(ROOT))
 from apps.gateway.app.business_events import (  # noqa: E402
     EventEnvelope,
     KLYROW_EVENT_DATA_MODELS,
-    SOURCES,
 )
 from apps.gateway.app.api_standard import components  # noqa: E402
 
@@ -94,34 +93,9 @@ def asyncapi_payload(schema):
 
 def documents():
     envelope = klyrow_envelope_schema()
-    contract = {
-        "asyncapi": "3.0.0",
-        "info": {"title": "Codestra business events", "version": "1.0.0"},
-        "defaultContentType": "application/json",
-        "channels": {},
-        "operations": {},
-        "components": {"messages": {}},
-    }
-    for source in SOURCES:
-        payload = asyncapi_payload(envelope) if source == "klyrow" else copy.deepcopy(envelope)
-        payload.pop("$id", None)
-        payload["properties"]["source"] = {"const": source}
-        if source != "klyrow":
-            payload["properties"]["type"] = {
-                "type": "string", "pattern": rf"^{source}\.[a-z][a-z0-9_.]+$", "maxLength": 120
-            }
-            payload.pop("allOf", None)
-            payload["properties"]["data"] = {"type": "object"}
-        contract["channels"][source] = {
-            "address": f"codestra.{source}.events",
-            "messages": {"event": {"$ref": f"#/components/messages/{source}"}},
-        }
-        contract["components"]["messages"][source] = {
-            "name": source + "BusinessEvent", "payload": payload,
-        }
-        contract["operations"]["receive_" + source] = {
-            "action": "receive", "channel": {"$ref": "#/channels/" + source},
-        }
+    payload = asyncapi_payload(envelope)
+    payload.pop("$id", None)
+    payload["properties"]["source"] = {"const": "klyrow"}
     klyrow_contract = {
         "asyncapi": "3.0.0",
         "info": {"title": "Klyrow to Middleware business events", "version": "1.0.0"},
@@ -134,13 +108,22 @@ def documents():
                 "description": "Environment-specific internal Middleware endpoint",
             }
         },
-        "channels": {"klyrow": contract["channels"]["klyrow"]},
+        "channels": {
+            "klyrow": {
+                "address": "codestra.klyrow.events",
+                "messages": {"event": {"$ref": "#/components/messages/klyrow"}},
+            }
+        },
         "operations": {
             "publishKlyrowBusinessEvent": {
                 "action": "send", "channel": {"$ref": "#/channels/klyrow"},
             }
         },
-        "components": {"messages": {"klyrow": contract["components"]["messages"]["klyrow"]}},
+        "components": {
+            "messages": {
+                "klyrow": {"name": "klyrowBusinessEventV1", "payload": payload}
+            }
+        },
     }
     output = {
         "contracts/openapi/codestra-components.yaml": {
@@ -149,10 +132,8 @@ def documents():
             "paths": {},
             "components": components(),
         },
-        "schemas/json-schema/event-envelope.json": envelope,
-        "schemas/examples/usage-daily.json": event_example("klyrow.usage.daily"),
-        "schemas/asyncapi/codestra-events.yaml": contract,
-        "schemas/asyncapi/klyrow-events.yaml": klyrow_contract,
+        "schemas/json-schema/klyrow-business-event.v1.json": envelope,
+        "schemas/asyncapi/klyrow-business-events-v1.yaml": klyrow_contract,
     }
     for event_type, model in KLYROW_EVENT_DATA_MODELS.items():
         schema = model.model_json_schema()
@@ -160,9 +141,6 @@ def documents():
         schema["$id"] = "https://schemas.codestra.co/events/" + event_type.replace(".", "-") + ".v1.data.schema.json"
         output["schemas/json-schema/" + event_type.replace(".", "-") + ".v1.data.json"] = schema
         output["schemas/examples/" + event_type.replace(".", "-") + ".v1.json"] = event_example(event_type)
-    output["schemas/json-schema/usage-summary.json"] = output[
-        "schemas/json-schema/klyrow-usage-daily.v1.data.json"
-    ]
     return output
 
 

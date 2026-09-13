@@ -419,7 +419,7 @@ class MailIn(BaseModel):
         return value
 class BulkMailIn(BaseModel): messages:list[MailIn]=Field(min_length=1,max_length=100)
 class ContactIn(BaseModel): email:EmailStr; name:Optional[str]=Field(default=None,max_length=200); subscribed:bool=True; metadata:dict={}
-class CampaignIn(BaseModel): name:str=Field(min_length=1,max_length=200); subject:Optional[str]=Field(default=None,max_length=998); sender_id:Optional[str]=None; template_id:Optional[str]=None; segment_id:Optional[str]=None
+class CampaignIn(BaseModel): name:str=Field(min_length=1,max_length=200); subject:Optional[str]=Field(default=None,max_length=998)
 class TenantIn(BaseModel): name:str=Field(min_length=1,max_length=200); quota:int=Field(default=10000,ge=0,le=10000000)
 class QuotaIn(BaseModel): quota:int=Field(ge=0,le=10000000)
 class WebhookIn(BaseModel): url:str=Field(pattern=r"^https://")
@@ -1224,7 +1224,7 @@ async def campaign_create(x:CampaignIn,ctx=Depends(require("platform_admin","ten
     if prior:
         if prior.request_hash!=request_hash:raise HTTPException(409,"idempotency_key_payload_mismatch")
         return read_control_response(prior)
-    c=Campaign(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],name=x.name,subject=x.subject,sender_id=x.sender_id,template_id=x.template_id,segment_id=x.segment_id); result={"id":c.id,"name":c.name,"status":c.status}; s.add(c); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=c.id,response_json=seal_control_response(result,tenant_id=ctx["tenant"],storage_key=idempotency_key,request_hash=request_hash,resource_id=c.id))); audit(s,ctx,"campaign.created"); s.commit(); return result
+    c=Campaign(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],name=x.name,subject=x.subject); result={"id":c.id,"name":c.name,"status":c.status}; s.add(c); s.add(Idempotency(key=idempotency_key,tenant_id=ctx["tenant"],request_hash=request_hash,resource_id=c.id,response_json=seal_control_response(result,tenant_id=ctx["tenant"],storage_key=idempotency_key,request_hash=request_hash,resource_id=c.id))); audit(s,ctx,"campaign.created"); s.commit(); return result
 @app.get("/v1/campaigns/{cid}")
 def campaign_get(cid:str,ctx=Depends(auth),s:Session=Depends(db)):
     c=s.scalar(select(Campaign).where(Campaign.id==cid,Campaign.tenant_id==ctx["tenant"]));

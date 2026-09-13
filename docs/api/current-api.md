@@ -391,6 +391,7 @@ This inventories the composed platform, including hidden compatibility and brows
 | POST | `/v1/webhooks/postal-native` | WEBHOOK | POSTAL_RSA_SHA256_SIGNATURE_AND_TIMESTAMP | true | `postal_native_hook` |
 | POST | `/v1/webhooks/{wid}/rotate` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `webhook_rotate` |
 | PUT | `/app/api/mailboxes/{mailbox_id}/drafts/{message_id}` | BROWSER_BFF | BROWSER_SESSION_COOKIE_AND_REQUIRED_CSRF_HEADER | true | `update_draft` |
+| PUT | `/v1/campaigns/{campaign_id}/dispatch-configuration` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `campaign_dispatch_configuration` |
 | PUT | `/v1/customer-data/retention` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `customer_data_retention_update` |
 | PUT | `/v1/internal/email/policy` | INTERNAL | BEARER_JWT_OR_API_KEY_ON_PRIVATE_ROUTE | true | `policy_update` |
 | PUT | `/v1/onboarding` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `onboarding_put` |

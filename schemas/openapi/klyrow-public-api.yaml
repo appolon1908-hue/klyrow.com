@@ -129,6 +129,40 @@
         "title": "BulkMailIn",
         "type": "object"
       },
+      "CampaignDispatchConfiguration": {
+        "properties": {
+          "segment_id": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Segment Id"
+          },
+          "sender_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Sender Id",
+            "type": "string"
+          },
+          "template_id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Template Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sender_id",
+          "template_id"
+        ],
+        "title": "CampaignDispatchConfiguration",
+        "type": "object"
+      },
       "CampaignPatch": {
         "properties": {
           "name": {
@@ -144,28 +178,6 @@
             ],
             "title": "Name"
           },
-          "segment_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Segment Id"
-          },
-          "sender_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Sender Id"
-          },
           "subject": {
             "anyOf": [
               {
@@ -177,17 +189,6 @@
               }
             ],
             "title": "Subject"
-          },
-          "template_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Template Id"
           }
         },
         "title": "CampaignPatch",
@@ -2633,28 +2634,6 @@
             "title": "Name",
             "type": "string"
           },
-          "segment_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Segment Id"
-          },
-          "sender_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Sender Id"
-          },
           "subject": {
             "anyOf": [
               {
@@ -2666,17 +2645,6 @@
               }
             ],
             "title": "Subject"
-          },
-          "template_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Template Id"
           }
         },
         "required": [
@@ -8641,6 +8609,112 @@
         ]
       }
     },
+    "/v1/campaigns/{campaign_id}/dispatch-configuration": {
+      "put": {
+        "operationId": "campaign_dispatch_configuration_v1_campaigns__campaign_id__dispatch_configuration_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "campaign_id",
+            "required": true,
+            "schema": {
+              "title": "Campaign Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-klyrow-tenant-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Klyrow-Tenant-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Tenant-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CampaignDispatchConfiguration"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Campaign Dispatch Configuration V1 Campaigns  Campaign Id  Dispatch Configuration Put",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Campaign Dispatch Configuration",
+        "tags": [
+          "Production API"
+        ],
+        "x-klyrow-audience": "PUBLIC",
+        "x-klyrow-auth-model": "BEARER_JWT_OR_API_KEY",
+        "x-klyrow-enforced-auth-dependencies": [
+          "auth"
+        ]
+      }
+    },
     "/v1/campaigns/{campaign_id}/pause": {
       "post": {
         "operationId": "campaign_pause_v1_campaigns__campaign_id__pause_post",
@@ -8950,6 +9024,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "409": {
+            "description": "Campaign dispatcher unavailable; scheduling is not accepted."
           },
           "422": {
             "content": {

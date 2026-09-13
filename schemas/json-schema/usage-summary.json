@@ -1,5 +1,5 @@
 {
-  "$id": "https://schemas.codestra.co/events/klyrow-usage-daily.v1.data.schema.json",
+  "$id": "https://schemas.codestra.co/events/usage-daily.v1.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -30,6 +30,6 @@
     "quantity",
     "snapshot_at"
   ],
-  "title": "DailyUsageData",
+  "title": "DailyUsage",
   "type": "object"
 }

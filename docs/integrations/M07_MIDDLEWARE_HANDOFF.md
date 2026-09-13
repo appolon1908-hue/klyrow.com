@@ -56,9 +56,9 @@ Every request body is a version-1 envelope:
 
 Unknown envelope fields, unsupported event types, invalid UTC timestamps, and data that does not match the selected event type are rejected by Klyrow before publication. The canonical schemas are:
 
-- `schemas/json-schema/event-envelope.json`
+- `schemas/json-schema/klyrow-business-event.v1.json`
 - `schemas/json-schema/klyrow-*.v1.data.json`
-- `schemas/asyncapi/klyrow-events.yaml`
+- `schemas/asyncapi/klyrow-business-events-v1.yaml`
 
 `payload_hash` is a Klyrow persistence invariant: lowercase SHA-256 of the canonical JSON request body. It is not an additional envelope field and Middleware must calculate its own inbox hash from the received bytes/canonical document.
 
