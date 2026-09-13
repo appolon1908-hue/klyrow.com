@@ -313,6 +313,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/api-keys/{kid}/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Rotate Key */
+        post: operations["rotate_key_v1_api_keys__kid__rotate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/audit": {
         parameters: {
             query?: never;
@@ -1116,6 +1133,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/campaigns/{campaign_id}/dispatch-configuration": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Campaign Dispatch Configuration */
+        put: operations["campaign_dispatch_configuration_v1_campaigns__campaign_id__dispatch_configuration_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/campaigns/{campaign_id}/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Campaign Pause */
+        post: operations["campaign_pause_v1_campaigns__campaign_id__pause_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/campaigns/{campaign_id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Campaign Resume */
+        post: operations["campaign_resume_v1_campaigns__campaign_id__resume_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/campaigns/{campaign_id}/schedule": {
         parameters: {
             query?: never;
@@ -1423,6 +1491,23 @@ export interface paths {
         post?: never;
         /** Api Key Revoke */
         delete: operations["api_key_revoke_v1_developer_api_keys__item_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/developer/api-keys/{item_id}/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Api Key Rotate */
+        post: operations["api_key_rotate_v1_developer_api_keys__item_id__rotate_post"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -2721,6 +2806,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/secret-responses/{response_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Secret Response Get */
+        get: operations["secret_response_get_v1_secret_responses__response_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/segments": {
         parameters: {
             query?: never;
@@ -3283,6 +3385,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/webhooks/{wid}/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Webhook Rotate */
+        post: operations["webhook_rotate_v1_webhooks__wid__rotate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/version": {
         parameters: {
             query?: never;
@@ -3348,6 +3467,15 @@ export interface components {
         BulkMailIn: {
             /** Messages */
             messages: components["schemas"]["MailIn"][];
+        };
+        /** CampaignDispatchConfiguration */
+        CampaignDispatchConfiguration: {
+            /** Segment Id */
+            segment_id?: string | null;
+            /** Sender Id */
+            sender_id: string;
+            /** Template Id */
+            template_id: string;
         };
         /** CampaignPatch */
         CampaignPatch: {
@@ -4986,6 +5114,41 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rotate_key_v1_api_keys__kid__rotate_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+                "x-klyrow-tenant-id"?: string | null;
+                "X-Tenant-ID"?: string | null;
+            };
+            path: {
+                kid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
             };
             /** @description Validation Error */
             422: {
@@ -6796,6 +6959,123 @@ export interface operations {
             };
         };
     };
+    campaign_dispatch_configuration_v1_campaigns__campaign_id__dispatch_configuration_put: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+                "x-klyrow-tenant-id"?: string | null;
+                "X-Tenant-ID"?: string | null;
+            };
+            path: {
+                campaign_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CampaignDispatchConfiguration"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    campaign_pause_v1_campaigns__campaign_id__pause_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                authorization?: string;
+                "x-klyrow-tenant-id"?: string | null;
+                "X-Tenant-ID"?: string | null;
+            };
+            path: {
+                campaign_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    campaign_resume_v1_campaigns__campaign_id__resume_post: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+                authorization?: string;
+                "x-klyrow-tenant-id"?: string | null;
+                "X-Tenant-ID"?: string | null;
+            };
+            path: {
+                campaign_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     campaign_schedule_v1_campaigns__campaign_id__schedule_post: {
         parameters: {
             query?: never;
@@ -7652,6 +7932,41 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    api_key_rotate_v1_developer_api_keys__item_id__rotate_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+                "x-klyrow-tenant-id"?: string | null;
+                "X-Tenant-ID"?: string | null;
+            };
+            path: {
+                item_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
             };
             /** @description Validation Error */
             422: {
@@ -11000,6 +11315,41 @@ export interface operations {
             };
         };
     };
+    secret_response_get_v1_secret_responses__response_id__get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+                "x-klyrow-tenant-id"?: string | null;
+                "X-Tenant-ID"?: string | null;
+            };
+            path: {
+                response_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     segment_create_v1_segments_post: {
         parameters: {
             query?: never;
@@ -12646,6 +12996,41 @@ export interface operations {
                 "application/json": components["schemas"]["apps__gateway__app__main__WebhookIn"];
             };
         };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    webhook_rotate_v1_webhooks__wid__rotate_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string;
+                "x-klyrow-tenant-id"?: string | null;
+                "X-Tenant-ID"?: string | null;
+            };
+            path: {
+                wid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
         responses: {
             /** @description Successful Response */
             200: {

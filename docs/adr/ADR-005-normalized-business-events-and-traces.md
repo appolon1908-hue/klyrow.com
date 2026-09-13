@@ -40,7 +40,8 @@ follows the [OpenTelemetry Python exporter interface](https://opentelemetry.io/d
    `klyrow.events.write:any-tenant` permission for this multi-tenant publisher.
 2. Complete the private authenticated replay test. Render short-lived JWTs and
    TLS material from OpenBao. Klyrow receives no Odoo credential.
-3. Apply Klyrow migration `2026091301_outbox_trace_context.sql` before starting
+3. Apply Klyrow migration `2026091302_m07_business_event_runtime.sql` (which follows
+   `2026091301_outbox_trace_context.sql`) before starting
    the new image. The column is additive and defaults to `{}` for old writers.
 4. Apply `deploy/docker-compose.business-events.yml` with the private endpoint,
    token file, TLS directory and `business-events` profile. It exposes no host

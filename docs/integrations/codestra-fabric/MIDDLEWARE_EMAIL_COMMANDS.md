@@ -33,6 +33,14 @@ digest, category, policy version, change ID, validity window, provider and exact
 Middleware release. Campaign mode, an expired/revoked authority, a closed kill
 switch, a changed command binding, and malformed or extra fields fail closed.
 
+The recipient digest uses SHA-256 over UTF-8 compact JSON of the sorted,
+trimmed, lowercase addresses. Duplicate addresses are retained in the digest.
+The current single-recipient Middleware transport remains compatible; batch
+transport still needs a coordinated producer contract before activation.
+All policy timestamps and the execution clock require a defined timezone
+offset and are compared as UTC instants. The validity window includes
+`validFrom` and excludes `validUntil`; naive timestamps are rejected.
+
 Middleware is the sole production-policy authority; Klyrow does not store or
 mutate a second policy. Klyrow persists the validated attestation with the
 outbox intent and checks it again immediately before Postal submission. The

@@ -11,10 +11,9 @@ from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session
 
 from apps.gateway.app.platform import app  # compose legacy module dependencies
-from apps.gateway.app.business_events import daily_snapshot
+from apps.gateway.app.business_events import BusinessEventOutbox, daily_snapshot
 from apps.gateway.app.billing import UsageEvent
 from apps.gateway.app.main import Tenant
-from apps.gateway.app.operations import IntegrationOutbox
 
 pytestmark = pytest.mark.skipif(not os.getenv("KLYROW_CONTRACT_POSTGRES_URL"), reason="Requires disposable PostgreSQL")
 
@@ -27,7 +26,7 @@ def database():
     with admin.begin() as c:
         c.execute(text(f'CREATE SCHEMA "{schema}"'))
     engine = create_engine(url, connect_args={"options": f"-csearch_path={schema}"})
-    for model in (Tenant, UsageEvent, IntegrationOutbox):
+    for model in (Tenant, UsageEvent, BusinessEventOutbox):
         model.__table__.create(engine)
     with Session(engine) as s:
         s.add(Tenant(id="a", name="Synthetic"))
@@ -56,7 +55,7 @@ def test_concurrent_snapshot_publishers_create_one_immutable_fact(database):
         ids = list(pool.map(publish, range(2)))
     assert ids[0] == ids[1]
     with Session(database) as s:
-        assert s.scalar(select(func.count()).select_from(IntegrationOutbox)) == 1
+        assert s.scalar(select(func.count()).select_from(BusinessEventOutbox)) == 1
 
 
 def test_trace_migration_is_repeatable_and_preserves_old_writers(database):

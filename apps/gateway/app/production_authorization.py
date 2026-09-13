@@ -51,11 +51,23 @@ class MiddlewareProductionAuthorization(BaseModel):
 
 
 def _recipients_sha256(recipients: list[str]) -> str:
+    """Hash canonical addresses independently of order, retaining duplicates."""
     return hashlib.sha256(
         json.dumps(
-            [value.lower() for value in recipients], separators=(",", ":")
+            sorted(value.strip().lower() for value in recipients),
+            separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _utc_datetime(value: datetime, error: str) -> datetime:
+    """Reject undefined offsets and compare instants without host-local time."""
+    try:
+        if isinstance(value, datetime) and value.utcoffset() is not None:
+            return value.astimezone(timezone.utc)
+    except (OverflowError, TypeError, ValueError):
+        pass
+    raise ProductionAuthorizationError(error)
 
 
 def validate_production_authorization(
@@ -75,19 +87,25 @@ def validate_production_authorization(
     except ValidationError as exc:
         raise ProductionAuthorizationError("production_authorization_invalid") from exc
 
-    current = now or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        raise ProductionAuthorizationError("production_authorization_clock_invalid")
-    if authority.validFrom.tzinfo is None or authority.validUntil.tzinfo is None:
-        raise ProductionAuthorizationError("production_authorization_window_invalid")
-    if not authority.validFrom <= current < authority.validUntil:
+    current = _utc_datetime(
+        now if now is not None else datetime.now(timezone.utc),
+        "production_authorization_clock_invalid",
+    )
+    valid_from = _utc_datetime(
+        authority.validFrom, "production_authorization_window_invalid"
+    )
+    valid_until = _utc_datetime(
+        authority.validUntil, "production_authorization_window_invalid"
+    )
+    if not valid_from <= current < valid_until:
         raise ProductionAuthorizationError("production_authorization_outside_window")
-    if (
-        authority.authorizationTimestamp.tzinfo is None
-        or authority.activationTimestamp.tzinfo is None
-        or authority.authorizationTimestamp > authority.activationTimestamp
-        or authority.activationTimestamp > current
-    ):
+    authorized_at = _utc_datetime(
+        authority.authorizationTimestamp, "production_authorization_timestamps_invalid"
+    )
+    activated_at = _utc_datetime(
+        authority.activationTimestamp, "production_authorization_timestamps_invalid"
+    )
+    if authorized_at > activated_at or activated_at > current:
         raise ProductionAuthorizationError("production_authorization_timestamps_invalid")
 
     binding = authority.commandBinding
