@@ -108,7 +108,7 @@ def operation_audience(path: str) -> str:
         return "INTERNAL"
     if path.startswith(("/auth/", "/app/")):
         return "BROWSER_BFF"
-    if path == "/metrics" or path.startswith(("/v1/internal/", "/v1/system/")):
+    if path == "/metrics" or path.startswith(("/internal/v1/", "/v1/internal/", "/v1/system/")):
         return "INTERNAL"
     if path.startswith("/v1/admin/"):
         return "ADMIN"

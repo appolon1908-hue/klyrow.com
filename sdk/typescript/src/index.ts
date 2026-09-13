@@ -1,3 +1,8 @@
+import type { components } from "./schema";
+
+export type TemplateVersion = components["schemas"]["TemplateVersionView"];
+export type TemplateVersionPage = components["schemas"]["TemplateVersionPage"];
+
 export type Transport = (url: string, init: RequestInit) => Promise<Response>;
 
 export class KlyrowError extends Error {
@@ -31,6 +36,16 @@ export class Klyrow {
   message(messageId: string) { return this.request("GET", `/v1/messages/${encodeURIComponent(messageId)}`); }
   messages(limit = 50, cursor?: string) { return this.request("GET", `/v1/messages?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`); }
   createWebhook(url: string, events: string[]) { return this.request("POST", "/v1/webhook-subscriptions", { url, events }); }
+  templateVersions(templateId: string, options: { limit?: number; cursor?: string } = {}) {
+    const query = new URLSearchParams();
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    if (options.cursor !== undefined) query.set("cursor", options.cursor);
+    const suffix = query.size ? `?${query.toString()}` : "";
+    return this.request<TemplateVersionPage>("GET", `/v1/templates/${encodeURIComponent(templateId)}/versions${suffix}`);
+  }
+  templateVersion(templateId: string, versionId: string) {
+    return this.request<TemplateVersion>("GET", `/v1/templates/${encodeURIComponent(templateId)}/versions/${encodeURIComponent(versionId)}`);
+  }
 }
 
 export async function verifyWebhook(secret: string, timestamp: string, eventId: string, body: Uint8Array, signature: string, now = Math.floor(Date.now() / 1000), toleranceSeconds = 300): Promise<boolean> {

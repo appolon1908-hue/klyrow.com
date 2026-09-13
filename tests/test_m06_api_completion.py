@@ -6,11 +6,30 @@ webhook delivery introspection/replay/rotate-secret, and the customer-facing
 suppression check. Mirrors the existing test_messaging.py / test_api.py style.
 """
 from fastapi.testclient import TestClient
+from fastapi import HTTPException
+import pytest
 
 from apps.gateway.app.main import AllowedSender, Base, DB, Domain, Tenant, User, app, engine, ph, rate_buckets
 
 client = TestClient(app)
 tokens = {}
+
+
+@pytest.mark.parametrize("role", ["BILLING", "SUPPORT", "READ_ONLY"])
+@pytest.mark.parametrize("operation", ["replay", "rotate"])
+def test_webhook_mutations_require_management_before_database_access(role, operation):
+    from apps.gateway.app.messaging import webhook_delivery_replay, webhook_rotate_secret
+    from apps.gateway.app.capabilities import mutation_permission
+
+    context = {"tenant": "a", "role": role}
+    # No session is supplied: authorization must reject before any data access.
+    with pytest.raises(HTTPException) as error:
+        if operation == "replay":
+            webhook_delivery_replay("webhook", "delivery", context, None)
+        else:
+            webhook_rotate_secret("webhook", context, None)
+    assert error.value.status_code == 403
+    assert mutation_permission("POST", "/v1/webhooks/webhook/rotate-secret") == "webhook.manage"
 
 
 def setup_module():
@@ -98,7 +117,8 @@ def test_template_versions_list_and_detail():
     versions = client.get(f"/v1/templates/{tid}/versions", headers=h)
     assert versions.status_code == 200
     assert [item["version"] for item in versions.json()["items"]] == [2, 1]
-    first_version = client.get(f"/v1/templates/{tid}/versions/1", headers=h)
+    version_id = versions.json()["items"][-1]["id"]
+    first_version = client.get(f"/v1/templates/{tid}/versions/{version_id}", headers=h)
     assert first_version.status_code == 200 and first_version.json()["subject"] == "Hello {{name}}"
     missing = client.get(f"/v1/templates/{tid}/versions/99", headers=h)
     assert missing.status_code == 404

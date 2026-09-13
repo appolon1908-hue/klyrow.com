@@ -248,12 +248,14 @@ def webhook_delivery_detail(webhook_id:str,delivery_id:str,ctx=Depends(auth),s:S
     return delivery
 @router.post("/webhooks/{webhook_id}/deliveries/{delivery_id}/replay",status_code=202)
 def webhook_delivery_replay(webhook_id:str,delivery_id:str,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx,"webhook.manage")
     item=tenant_get(s,WebhookSubscription,webhook_id,ctx["tenant"])
     delivery=s.scalar(select(WebhookAttempt).where(WebhookAttempt.id==delivery_id,WebhookAttempt.subscription_id==item.id,WebhookAttempt.tenant_id==ctx["tenant"]))
     if not delivery:raise HTTPException(404,"not_found")
     delivery.state="PENDING";delivery.next_attempt_at=now();delivery.last_error=None;audit(s,ctx,"webhook.delivery_replay_requested");s.commit();return {"id":delivery.id,"state":delivery.state,"provider_submission":False}
 @router.post("/webhooks/{webhook_id}/rotate-secret")
 def webhook_rotate_secret(webhook_id:str,ctx=Depends(auth),s:Session=Depends(db)):
+    require_permission(ctx,"webhook.manage")
     return webhook_rotate(webhook_id,ctx,s)
 
 @router.post("/delivery-jobs/{message_id}",status_code=201)

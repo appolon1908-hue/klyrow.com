@@ -1,0 +1,1927 @@
+[
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "kind",
+      "severity",
+      "metrics_json",
+      "state",
+      "created_at"
+    ],
+    "table": "abuse_alerts",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "requested_by",
+      "state",
+      "confirmation_hash",
+      "grace_until",
+      "billing_settled",
+      "retention_policy",
+      "confirmed_at",
+      "closed_at"
+    ],
+    "table": "account_closures",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "mailbox_id",
+      "agent_id",
+      "campaign_id",
+      "action",
+      "correlation_id",
+      "detail",
+      "created_at"
+    ],
+    "table": "agent_mailbox_audit",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "campaign_id",
+      "mailbox_id",
+      "recipient",
+      "enabled",
+      "provider_route_id",
+      "created_at"
+    ],
+    "table": "agent_mailbox_inbound_routes",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "mailbox_id",
+      "tenant_id",
+      "agent_id",
+      "employee_id",
+      "keycloak_user_id",
+      "odoo_user_id",
+      "vicidial_user_id",
+      "campaign_id",
+      "campaign_name",
+      "domain",
+      "local_part",
+      "primary_email",
+      "display_name",
+      "sending_enabled",
+      "receiving_enabled",
+      "mailbox_status",
+      "quota",
+      "rate_limit",
+      "created_at",
+      "activated_at",
+      "suspended_at",
+      "deactivated_at",
+      "last_send_at",
+      "last_receive_at",
+      "provisioning_correlation_id",
+      "provisioning_error",
+      "audit_version",
+      "outbound_validated",
+      "inbound_validated"
+    ],
+    "table": "agent_mailboxes",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "campaign_id",
+      "mailbox_id",
+      "agent_id",
+      "sender",
+      "enabled",
+      "created_at"
+    ],
+    "table": "agent_outbound_sender_authorizations",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "address",
+      "role",
+      "enabled"
+    ],
+    "table": "allowed_senders",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "name",
+      "key_hash",
+      "revoked"
+    ],
+    "table": "api_keys",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "actor",
+      "action",
+      "created_at"
+    ],
+    "table": "audit_log",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "token_hash",
+      "csrf_hash",
+      "identity_id",
+      "user_id",
+      "tenant_id",
+      "role",
+      "refresh_ciphertext",
+      "id_token_ciphertext",
+      "created_at",
+      "last_seen_at",
+      "expires_at",
+      "rotated_from_id",
+      "revoked_at",
+      "user_agent_hash",
+      "ip_hash"
+    ],
+    "table": "browser_sessions",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "name",
+      "sender_id",
+      "template_id",
+      "segment_id",
+      "status",
+      "timezone",
+      "scheduled_at",
+      "frequency_cap",
+      "tracking_json",
+      "test_sent_at",
+      "created_at"
+    ],
+    "table": "campaign_definitions",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "campaign_id",
+      "campaign_name",
+      "primary_domain",
+      "alias_domains",
+      "sender_domain_verified",
+      "inbound_domain_verified",
+      "sending_enabled",
+      "receiving_enabled",
+      "human_mailbox_enabled",
+      "domain_classification",
+      "default_reply_to",
+      "support_address",
+      "billing_address",
+      "status",
+      "created_at",
+      "updated_at",
+      "approved_by",
+      "approved_at"
+    ],
+    "table": "campaign_email_domains",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "name",
+      "status",
+      "subject",
+      "scheduled_at",
+      "created_at"
+    ],
+    "table": "campaigns",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "profile_id",
+      "topic",
+      "status",
+      "source",
+      "version",
+      "occurred_at",
+      "proof_json"
+    ],
+    "table": "consents",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "name",
+      "description",
+      "active",
+      "created_at",
+      "updated_at"
+    ],
+    "table": "contact_lists",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "email",
+      "name",
+      "subscribed",
+      "metadata_json"
+    ],
+    "table": "contacts",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "tenant_id",
+      "profile_retention_days",
+      "event_retention_days",
+      "updated_by",
+      "updated_at"
+    ],
+    "table": "customer_data_retention",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "profile_id",
+      "name",
+      "source",
+      "idempotency_key",
+      "request_hash",
+      "properties_json",
+      "occurred_at",
+      "received_at"
+    ],
+    "table": "customer_events",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "profile_id",
+      "requested_by",
+      "reason",
+      "state",
+      "scheduled_for",
+      "created_at",
+      "cancelled_at",
+      "completed_at"
+    ],
+    "table": "customer_profile_deletion_jobs",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "requested_by",
+      "fields_json",
+      "filters_json",
+      "format",
+      "idempotency_key",
+      "state",
+      "object_reference",
+      "expires_at",
+      "row_count",
+      "created_at",
+      "completed_at"
+    ],
+    "table": "customer_profile_export_jobs",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "requested_by",
+      "object_reference",
+      "object_sha256",
+      "idempotency_key",
+      "state",
+      "row_count",
+      "accepted_count",
+      "rejected_count",
+      "error_report_json",
+      "created_at",
+      "updated_at",
+      "completed_at"
+    ],
+    "table": "customer_profile_import_jobs",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "domain_id",
+      "spf",
+      "dkim",
+      "dmarc",
+      "mx",
+      "ptr",
+      "tls",
+      "details_json",
+      "checked_at"
+    ],
+    "table": "deliverability_snapshots",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "message_id",
+      "state",
+      "attempts",
+      "lease_owner",
+      "lease_expires_at",
+      "next_attempt_at",
+      "error_class",
+      "dead_lettered_at"
+    ],
+    "table": "delivery_jobs",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "resource_type",
+      "resource_id",
+      "reason",
+      "active",
+      "created_by",
+      "created_at"
+    ],
+    "table": "delivery_resource_suspensions",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "domain_claim_id",
+      "selector",
+      "version",
+      "public_key",
+      "private_key_reference",
+      "active",
+      "created_at",
+      "retired_at"
+    ],
+    "table": "dkim_key_versions",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "domain_id",
+      "selector",
+      "version",
+      "public_value",
+      "private_secret_ref",
+      "status",
+      "created_at",
+      "activated_at",
+      "retired_at"
+    ],
+    "table": "dkim_keys",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "domain",
+      "state",
+      "challenge_hash",
+      "dkim_selector",
+      "dkim_version",
+      "return_path",
+      "tracking_domain",
+      "verified_at",
+      "suspended_at",
+      "created_at"
+    ],
+    "table": "domain_claims",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "domain",
+      "token",
+      "verified"
+    ],
+    "table": "domains",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "message_id",
+      "operation_id",
+      "correlation_id",
+      "payload",
+      "priority",
+      "state",
+      "attempts",
+      "provider_message_id",
+      "last_error",
+      "next_attempt_at",
+      "created_at",
+      "updated_at"
+    ],
+    "table": "email_outbox",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "message_id",
+      "kind",
+      "payload",
+      "created_at"
+    ],
+    "table": "events",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "experiment_id",
+      "profile_id",
+      "variant",
+      "converted"
+    ],
+    "table": "experiment_assignments",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "name",
+      "variants_json",
+      "metric",
+      "status"
+    ],
+    "table": "experiments",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "key",
+      "tenant_id",
+      "request_hash",
+      "resource_id",
+      "response_json",
+      "created_at"
+    ],
+    "table": "idempotency_keys",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "identity_id",
+      "email",
+      "email_verified",
+      "display_name",
+      "locale",
+      "created_at",
+      "updated_at"
+    ],
+    "table": "identity_profiles",
+    "tenant_scoped": false
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "route_id",
+      "message_id",
+      "sender",
+      "recipient",
+      "in_reply_to",
+      "references_json",
+      "headers_json",
+      "attachment_manifest_json",
+      "spam_score",
+      "malware_status",
+      "state",
+      "created_at"
+    ],
+    "table": "inbound_messages",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "address",
+      "destination_kind",
+      "destination_ref",
+      "verified",
+      "enabled"
+    ],
+    "table": "inbound_route_configs",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "domain_claim_id",
+      "recipient",
+      "wildcard",
+      "destination_kind",
+      "destination_ref",
+      "enabled",
+      "max_bytes",
+      "malware_scan_required"
+    ],
+    "table": "inbound_routes",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "target",
+      "event_type",
+      "aggregate_id",
+      "payload_json",
+      "idempotency_key",
+      "state",
+      "attempts",
+      "next_attempt_at",
+      "lease_expires_at",
+      "last_error",
+      "created_at",
+      "updated_at"
+    ],
+    "table": "integration_outbox",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "outbox_id",
+      "state",
+      "created_at",
+      "released_at",
+      "change_sha256",
+      "release_sha256"
+    ],
+    "table": "integration_result_holds",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "outbox_id",
+      "source",
+      "result_key",
+      "payload_json",
+      "created_at"
+    ],
+    "table": "integration_results",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "kind",
+      "name",
+      "config_json",
+      "enabled"
+    ],
+    "table": "integrations",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "domain",
+      "stream",
+      "pool_id",
+      "created_at"
+    ],
+    "table": "ip_pool_assignments",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "name",
+      "kind",
+      "postal_pool_ref",
+      "enabled"
+    ],
+    "table": "ip_pools",
+    "tenant_scoped": false
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "journey_id",
+      "profile_id",
+      "status",
+      "current_node",
+      "history_json",
+      "converted",
+      "updated_at"
+    ],
+    "table": "journey_runs",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "journey_id",
+      "version",
+      "graph_json",
+      "created_at"
+    ],
+    "table": "journey_versions",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "name",
+      "status",
+      "version",
+      "graph_json",
+      "goal_event",
+      "created_at"
+    ],
+    "table": "journeys",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "kind",
+      "reference",
+      "payload_json",
+      "created_at"
+    ],
+    "table": "klyrow_billing_events",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "billing_event_id",
+      "tenant_id",
+      "kind",
+      "state",
+      "attempts",
+      "available_at",
+      "lease_expires_at",
+      "last_error",
+      "completed_at",
+      "created_at"
+    ],
+    "table": "klyrow_billing_work_items",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "plan_id",
+      "price_id",
+      "provider",
+      "state",
+      "provider_reference",
+      "created_at"
+    ],
+    "table": "klyrow_checkout_sessions",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "number",
+      "tenant_id",
+      "invoice_id",
+      "amount",
+      "currency",
+      "reason",
+      "created_at"
+    ],
+    "table": "klyrow_credit_notes",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "invoice_id",
+      "amount",
+      "currency",
+      "reason",
+      "created_at"
+    ],
+    "table": "klyrow_credits",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "invoice_id",
+      "kind",
+      "description",
+      "quantity",
+      "unit_amount",
+      "amount",
+      "reference"
+    ],
+    "table": "klyrow_invoice_lines",
+    "tenant_scoped": false
+  },
+  {
+    "columns": [
+      "id",
+      "number",
+      "tenant_id",
+      "subscription_id",
+      "request_key",
+      "currency",
+      "subtotal",
+      "tax",
+      "discount",
+      "credits",
+      "total",
+      "status",
+      "due_at",
+      "evidence_json",
+      "created_at"
+    ],
+    "table": "klyrow_invoices",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "provider",
+      "provider_reference",
+      "label",
+      "is_default",
+      "revoked_at"
+    ],
+    "table": "klyrow_payment_method_references",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "invoice_id",
+      "provider",
+      "provider_reference",
+      "amount",
+      "currency",
+      "status",
+      "confirmed_by",
+      "created_at"
+    ],
+    "table": "klyrow_payments",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "product_id",
+      "code",
+      "name",
+      "features_json",
+      "active"
+    ],
+    "table": "klyrow_plans",
+    "tenant_scoped": false
+  },
+  {
+    "columns": [
+      "id",
+      "plan_id",
+      "version",
+      "currency",
+      "billing_cycle",
+      "base_amount",
+      "included_units",
+      "overage_amount",
+      "effective_at",
+      "retired_at"
+    ],
+    "table": "klyrow_prices",
+    "tenant_scoped": false
+  },
+  {
+    "columns": [
+      "id",
+      "code",
+      "name",
+      "active"
+    ],
+    "table": "klyrow_products",
+    "tenant_scoped": false
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "payment_id",
+      "amount",
+      "status",
+      "provider_reference",
+      "created_at"
+    ],
+    "table": "klyrow_refunds",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "plan_id",
+      "price_id",
+      "status",
+      "period_start",
+      "period_end",
+      "trial_end",
+      "cancel_at_period_end",
+      "version"
+    ],
+    "table": "klyrow_subscriptions",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "jurisdiction",
+      "mode",
+      "rate",
+      "evidence_label",
+      "active"
+    ],
+    "table": "klyrow_tax_rules",
+    "tenant_scoped": false
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "subscription_id",
+      "message_id",
+      "event_key",
+      "unit",
+      "quantity",
+      "price_id",
+      "occurred_at"
+    ],
+    "table": "klyrow_usage_events",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "kind",
+      "amount",
+      "currency",
+      "reference",
+      "created_at"
+    ],
+    "table": "klyrow_wallet_transactions",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "tenant_id",
+      "currency",
+      "balance",
+      "version"
+    ],
+    "table": "klyrow_wallets",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "name",
+      "kind",
+      "rate_limit",
+      "retention_days",
+      "tracking_enabled",
+      "suppression_policy",
+      "reputation_state",
+      "enabled"
+    ],
+    "table": "message_streams",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "recipient",
+      "sender",
+      "subject",
+      "status",
+      "created_at"
+    ],
+    "table": "messages",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "user_id",
+      "secret",
+      "enabled",
+      "recovery_hashes_json"
+    ],
+    "table": "mfa_configs",
+    "tenant_scoped": false
+  },
+  {
+    "columns": [
+      "command_id",
+      "tenant_id",
+      "command",
+      "idempotency_key",
+      "correlation_id",
+      "state",
+      "request_hash",
+      "request_json",
+      "result_json",
+      "error",
+      "created_at",
+      "updated_at"
+    ],
+    "table": "middleware_command_operations",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "command_id",
+      "idempotency_identity",
+      "request_hash",
+      "correlation_id",
+      "created_at"
+    ],
+    "table": "middleware_email_command_bindings",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "issuer",
+      "subject",
+      "user_id",
+      "default_tenant_id",
+      "identity_type",
+      "enabled",
+      "created_at"
+    ],
+    "table": "oidc_identities",
+    "tenant_scoped": false
+  },
+  {
+    "columns": [
+      "id",
+      "state_hash",
+      "verifier_ciphertext",
+      "nonce_ciphertext",
+      "return_url",
+      "mode",
+      "created_at",
+      "expires_at",
+      "used_at"
+    ],
+    "table": "oidc_login_transactions",
+    "tenant_scoped": false
+  },
+  {
+    "columns": [
+      "tenant_id",
+      "step",
+      "use_case",
+      "checklist_json",
+      "completed"
+    ],
+    "table": "onboarding",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "identity_id",
+      "tenant_id",
+      "event_type",
+      "payload_json",
+      "created_at"
+    ],
+    "table": "onboarding_events",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "name",
+      "slug",
+      "status",
+      "created_at"
+    ],
+    "table": "organizations",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "name",
+      "messages",
+      "profiles",
+      "seats",
+      "api_per_minute"
+    ],
+    "table": "plans",
+    "tenant_scoped": false
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "domain",
+      "state",
+      "provider_server_id",
+      "provider_server_permalink",
+      "provider_mode",
+      "api_key_ciphertext",
+      "api_key_fingerprint",
+      "last_error",
+      "created_at",
+      "updated_at"
+    ],
+    "table": "postal_domain_credentials",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "event_type",
+      "correlation_id",
+      "message_id",
+      "tenant_id",
+      "payload",
+      "state",
+      "attempts",
+      "last_error",
+      "created_at",
+      "updated_at"
+    ],
+    "table": "postal_events",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "idempotency_key",
+      "state",
+      "attempts",
+      "available_at",
+      "lease_owner",
+      "lease_expires_at",
+      "last_error",
+      "created_at",
+      "updated_at",
+      "completed_at"
+    ],
+    "table": "postal_provisioning_outbox",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "tenant_id",
+      "state",
+      "provider_organization_id",
+      "provider_organization_permalink",
+      "provider_server_id",
+      "provider_server_permalink",
+      "provider_mode",
+      "api_key_ciphertext",
+      "api_key_fingerprint",
+      "last_error",
+      "created_at",
+      "updated_at"
+    ],
+    "table": "postal_tenant_mappings",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "profile_id",
+      "topic",
+      "subscribed",
+      "updated_at"
+    ],
+    "table": "preferences",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "gate_key",
+      "reserved_deliveries",
+      "claimed_deliveries",
+      "updated_at"
+    ],
+    "table": "production_canary_gate",
+    "tenant_scoped": false
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "source_profile_id",
+      "target_profile_id",
+      "matched_identifiers_json",
+      "actor",
+      "created_at"
+    ],
+    "table": "profile_merge_audits",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "email",
+      "phone",
+      "external_id",
+      "customer_id",
+      "attributes_json",
+      "created_at",
+      "updated_at"
+    ],
+    "table": "profiles",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "actor",
+      "action",
+      "resource_id",
+      "outcome",
+      "correlation_id",
+      "created_at"
+    ],
+    "table": "provider_audit",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "domain",
+      "status",
+      "ownership_token",
+      "verified_at",
+      "dkim_selector",
+      "dkim_key_version",
+      "sending_enabled",
+      "inbound_enabled",
+      "created_at"
+    ],
+    "table": "provider_domains",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "message_id",
+      "kind",
+      "payload_json",
+      "state",
+      "attempts",
+      "available_at",
+      "last_error",
+      "updated_at",
+      "created_at"
+    ],
+    "table": "provider_events",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "provider_event_id",
+      "route_id",
+      "message_id_header",
+      "sender",
+      "recipient",
+      "subject",
+      "text_body",
+      "html_body",
+      "attachments_json",
+      "auth_verdict",
+      "spf_result",
+      "dkim_result",
+      "dmarc_result",
+      "arc_result",
+      "dmarc_fail_action",
+      "disposition",
+      "created_at"
+    ],
+    "table": "provider_inbound",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "correlation_id",
+      "idempotency_key",
+      "request_hash",
+      "sender",
+      "recipient",
+      "subject",
+      "payload_json",
+      "stream",
+      "status",
+      "sandbox",
+      "provider_message_id",
+      "attempts",
+      "available_at",
+      "lease_expires_at",
+      "last_error",
+      "created_at",
+      "updated_at"
+    ],
+    "table": "provider_messages",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "message_id",
+      "stream",
+      "billable_units",
+      "result_category",
+      "state",
+      "attempts",
+      "available_at",
+      "last_error",
+      "created_at"
+    ],
+    "table": "provider_usage_events",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "kind",
+      "state",
+      "drift_count",
+      "details_json",
+      "started_at",
+      "completed_at"
+    ],
+    "table": "reconciliation_runs",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "domain_claim_id",
+      "stream_id",
+      "sent",
+      "delivered",
+      "hard_bounces",
+      "complaints",
+      "invalid",
+      "state",
+      "measured_at"
+    ],
+    "table": "reputation_snapshots",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "reseller_id",
+      "customer_tenant_id",
+      "retail_rate",
+      "quota",
+      "active"
+    ],
+    "table": "reseller_customers",
+    "tenant_scoped": false
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "name",
+      "currency",
+      "wholesale_rate",
+      "credit_limit",
+      "active"
+    ],
+    "table": "resellers",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "domain_claim_id",
+      "address",
+      "display_name",
+      "reply_to",
+      "stream",
+      "status",
+      "verified"
+    ],
+    "table": "saas_sender_identities",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "message_id",
+      "envelope_from",
+      "envelope_to",
+      "content_json",
+      "created_at"
+    ],
+    "table": "sandbox_captures",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "name",
+      "prefix",
+      "verifier_hash",
+      "scopes_json",
+      "environment",
+      "ip_allowlist_json",
+      "created_by",
+      "created_at",
+      "last_used_at",
+      "expires_at",
+      "revoked_at"
+    ],
+    "table": "scoped_api_keys",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "email",
+      "scope",
+      "scope_id",
+      "reason",
+      "created_at"
+    ],
+    "table": "scoped_suppressions",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "segment_id",
+      "revision",
+      "rules_json",
+      "created_at"
+    ],
+    "table": "segment_audit",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "name",
+      "rules_json",
+      "kind",
+      "revision",
+      "created_at"
+    ],
+    "table": "segments",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "domain_id",
+      "email",
+      "display_name",
+      "reply_to",
+      "stream",
+      "status"
+    ],
+    "table": "sender_identities",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "name",
+      "client_id",
+      "secret_hash",
+      "scopes_json",
+      "expires_at",
+      "revoked_at",
+      "rotated_at",
+      "created_by",
+      "created_at"
+    ],
+    "table": "service_accounts",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "user_id",
+      "tenant_id",
+      "revoked",
+      "created_at"
+    ],
+    "table": "sessions",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "username",
+      "secret_hash",
+      "allowed_senders_json",
+      "allowed_streams_json",
+      "status",
+      "expires_at",
+      "created_at",
+      "rotated_at"
+    ],
+    "table": "smtp_credentials",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "tenant_id",
+      "plan_id",
+      "status",
+      "provider",
+      "external_ref"
+    ],
+    "table": "subscriptions",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "created_by",
+      "category",
+      "subject",
+      "description",
+      "status",
+      "priority",
+      "odoo_reference",
+      "created_at",
+      "updated_at"
+    ],
+    "table": "support_tickets",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "email",
+      "reason"
+    ],
+    "table": "suppressions",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "template_id",
+      "version",
+      "subject",
+      "html_body",
+      "text_body",
+      "variables_json",
+      "created_by",
+      "created_at"
+    ],
+    "table": "template_versions",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "slug",
+      "name",
+      "status",
+      "current_version",
+      "locale",
+      "created_at"
+    ],
+    "table": "templates",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "requested_by",
+      "scope_json",
+      "state",
+      "object_reference",
+      "expires_at",
+      "created_at"
+    ],
+    "table": "tenant_export_jobs",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "key",
+      "enabled",
+      "source"
+    ],
+    "table": "tenant_features",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "email",
+      "role",
+      "token_hash",
+      "expires_at",
+      "accepted_at",
+      "revoked_at",
+      "created_by",
+      "created_at"
+    ],
+    "table": "tenant_invitations",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "key",
+      "value",
+      "source"
+    ],
+    "table": "tenant_limits",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "tenant_id",
+      "sending_disabled",
+      "sandbox_mode",
+      "daily_limit",
+      "hourly_limit",
+      "max_message_bytes",
+      "max_attachment_bytes",
+      "allowed_test_recipients_json",
+      "reputation_state",
+      "warmup_daily_limit",
+      "warmup_hourly_limit",
+      "warmup_growth_percent",
+      "ip_pool",
+      "tracking_mode",
+      "spam_quarantine_score",
+      "spam_reject_score"
+    ],
+    "table": "tenant_mail_policies",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "user_id",
+      "role",
+      "active",
+      "created_at"
+    ],
+    "table": "tenant_members",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "tenant_id",
+      "enabled",
+      "reason",
+      "updated_by",
+      "updated_at"
+    ],
+    "table": "tenant_send_gates",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "key",
+      "value_json",
+      "updated_at"
+    ],
+    "table": "tenant_settings",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "username",
+      "verifier_hash",
+      "scopes_json",
+      "created_by",
+      "created_at",
+      "expires_at",
+      "revoked_at",
+      "rotated_at"
+    ],
+    "table": "tenant_smtp_credentials",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "name",
+      "enabled",
+      "quota"
+    ],
+    "table": "tenants",
+    "tenant_scoped": false
+  },
+  {
+    "columns": [
+      "id",
+      "token_hash",
+      "tenant_id",
+      "message_id",
+      "kind",
+      "expires_at",
+      "first_seen_at",
+      "created_at"
+    ],
+    "table": "tracking_tokens",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "kind",
+      "quantity",
+      "reference",
+      "created_at"
+    ],
+    "table": "usage_ledger",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "email",
+      "password_hash",
+      "role",
+      "enabled",
+      "reset_hash",
+      "reset_expires"
+    ],
+    "table": "users",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "domain",
+      "stream",
+      "starts_at",
+      "daily_limits_json",
+      "active"
+    ],
+    "table": "warmup_schedules",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "subscription_id",
+      "event_id",
+      "event_type",
+      "state",
+      "attempts",
+      "next_attempt_at",
+      "last_status",
+      "last_error",
+      "created_at"
+    ],
+    "table": "webhook_attempts",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "url",
+      "enabled",
+      "secret_hash"
+    ],
+    "table": "webhook_endpoints",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "created_at"
+    ],
+    "table": "webhook_replays",
+    "tenant_scoped": false
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "url",
+      "events_json",
+      "secret_hash",
+      "encrypted_secret_ref",
+      "enabled",
+      "created_at",
+      "rotated_at"
+    ],
+    "table": "webhook_subscriptions",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "mailbox_id",
+      "user_id",
+      "role",
+      "created_by",
+      "created_at"
+    ],
+    "table": "webmail_access",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "mailbox_id",
+      "message_id",
+      "filename",
+      "content_type",
+      "size",
+      "sha256",
+      "content",
+      "created_at"
+    ],
+    "table": "webmail_attachments",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "domain_id",
+      "address",
+      "display_name",
+      "status",
+      "sending_enabled",
+      "receiving_enabled",
+      "storage_quota_bytes",
+      "storage_used_bytes",
+      "created_at",
+      "updated_at"
+    ],
+    "table": "webmail_mailboxes",
+    "tenant_scoped": true
+  },
+  {
+    "columns": [
+      "id",
+      "tenant_id",
+      "mailbox_id",
+      "thread_id",
+      "provider_inbound_id",
+      "outbound_message_id",
+      "direction",
+      "folder",
+      "message_id_header",
+      "in_reply_to",
+      "reply_to_message_id",
+      "references_json",
+      "from_address",
+      "to_json",
+      "cc_json",
+      "bcc_json",
+      "reply_to",
+      "subject",
+      "text_body",
+      "html_body",
+      "attachments_json",
+      "is_read",
+      "is_starred",
+      "delivery_status",
+      "received_at",
+      "sent_at",
+      "deleted_at",
+      "created_at",
+      "updated_at"
+    ],
+    "table": "webmail_messages",
+    "tenant_scoped": true
+  }
+]
