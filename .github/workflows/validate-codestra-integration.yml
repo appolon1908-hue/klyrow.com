@@ -5,12 +5,19 @@ on:
     paths:
       - "codestra/integration/**"
       - "monitoring/klyrow-metrics-contract.v1.json"
+      - "monitoring/codestra-observability-boundary.v1.json"
       - "monitoring/prometheus-target.disabled.yml"
       - "monitoring/klyrow-recording-rules.yml"
       - "docs/CODESTRA-INTEGRATION-FILES.md"
+      - "docs/OBSERVABILITY_INTEGRATION.md"
       - "scripts/validate-codestra-integration.py"
+      - "apps/gateway/app/capabilities.py"
+      - "apps/gateway/app/main.py"
+      - "apps/gateway/app/observability.py"
+      - "apps/gateway/app/openapi_authority.py"
       - "tests/test_codestra_integration_files.py"
       - "tests/test_contract_conformance.py"
+      - "tests/test_observability_integration.py"
       - ".github/workflows/validate-codestra-integration.yml"
   push:
     branches:

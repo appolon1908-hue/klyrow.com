@@ -26,6 +26,7 @@ def validate() -> None:
     n8n = read_json("codestra/integration/n8n-orchestration.v1.json")
     aliases = read_json("codestra/integration/openbao-secret-aliases.v1.json")
     metrics = read_json("monitoring/klyrow-metrics-contract.v1.json")
+    boundary = read_json("monitoring/codestra-observability-boundary.v1.json")
     env = read_text("codestra/integration/runtime.env.example")
     target = read_text("monitoring/prometheus-target.disabled.yml")
     rules = read_text("monitoring/klyrow-recording-rules.yml")
@@ -129,6 +130,40 @@ def validate() -> None:
         "Activation Gates",
     ]:
         assert fragment in docs
+
+    assert boundary["schema_version"] == "1.0"
+    assert boundary["application"] == "klyrow.com"
+    assert boundary["status"] == "SOURCE_READY_PENDING_EXTERNAL_CERTIFICATION"
+    assert set(boundary["components"]) == {
+        "Codestra-Prometheus",
+        "Codestra-Alertmanager",
+        "Codestra-Grafana",
+        "Codestra-Telemetry",
+        "Codestra-Alloy",
+        "Codestra-Loki",
+        "Codestra-Tempo",
+        "Codestra-Node-Exporter",
+        "Codestra-cAdvisor",
+        "Codestra-Redis-Exporter",
+        "Codestra-Blackbox-Exporter",
+        "Codestra-Postgres-Exporter",
+        "Superset",
+        "Codestra-OpenBao",
+    }
+    assert all(component["odoo_write"] is False for component in boundary["components"].values())
+    assert boundary["integration_targets"]["Middleware"]["writes_odoo"] is True
+    assert boundary["integration_targets"]["Odoo"]["direct_writers"] == ["Middleware"]
+    assert boundary["klyrow_contract"]["outbox_target"] == "ODOO"
+    assert boundary["klyrow_contract"]["direct_odoo_database_write"] is False
+    assert boundary["klyrow_contract"]["internal_routes"] == [
+        "POST /v1/internal/integrations/alertmanager/events",
+        "POST /v1/internal/integrations/kpis/snapshots",
+        "GET /v1/internal/integrations/odoo/health",
+        "GET /v1/internal/integrations/odoo/checkpoints",
+        "POST /v1/internal/integrations/odoo/reconcile",
+    ]
+    for gate in boundary["activation_gates"]:
+        assert isinstance(gate, str) and gate.strip()
 
 
 if __name__ == "__main__":
