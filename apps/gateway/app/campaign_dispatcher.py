@@ -438,7 +438,7 @@ def dispatch_campaigns(limit: int = 100) -> int:
                 CampaignDispatchRun.state == "RUNNING",
                 CampaignDispatchRun.lease_owner == owner,
                 CampaignDispatchRun.fence_token == fence,
-            ))
+            ).with_for_update())
             if active is None:
                 continue
             try:

@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from apps.gateway.app import main
+from apps.gateway.app import main, service_worker
 from apps.gateway.app.secret_responses import (
     SecretResponse,
     cleanup_secret_responses,
@@ -83,6 +83,46 @@ def test_api_secret_response_is_tenant_scoped_and_unavailable_after_expiry(respo
         assert client.get(f"/v1/secret-responses/{response_id}").status_code == 404
     finally:
         main.app.dependency_overrides.pop(main.auth, None)
+
+
+def test_api_secret_response_is_visible_only_to_the_creating_actor(response_store):
+    created = datetime.now(timezone.utc)
+    with response_store() as session:
+        item = create_response(session, created)
+        session.commit()
+        response_id = item.id
+    client = TestClient(main.app)
+    try:
+        main.app.dependency_overrides[main.auth] = lambda: {
+            "tenant": "tenant-a",
+            "sub": "other-admin",
+            "role": "tenant_admin",
+        }
+        assert client.get(f"/v1/secret-responses/{response_id}").status_code == 404
+        main.app.dependency_overrides[main.auth] = lambda: {
+            "tenant": "tenant-a",
+            "sub": "owner-a",
+            "role": "tenant_admin",
+        }
+        assert client.get(f"/v1/secret-responses/{response_id}").status_code == 200
+    finally:
+        main.app.dependency_overrides.pop(main.auth, None)
+
+
+def test_base_mail_worker_redacts_expired_secret_responses(
+    response_store, monkeypatch
+):
+    created = datetime.now(timezone.utc) - timedelta(days=2)
+    with response_store() as session:
+        item = create_response(session, created)
+        session.commit()
+        response_id = item.id
+    monkeypatch.setattr(service_worker, "DB", response_store)
+    assert service_worker.secret_response_maintenance_tick() == 1
+    with response_store() as session:
+        item = session.get(SecretResponse, response_id)
+        assert item.encrypted_payload is None
+        assert item.redacted_at is not None
 
 
 @pytest.mark.parametrize("seconds", [59, 86401])

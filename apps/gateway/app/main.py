@@ -946,7 +946,7 @@ def queue_email_lifecycle_event(s:Session, *, kind:str, tenant_id:str, message_i
         event_type = "klyrow." + kind
         if event_type in KLYROW_EVENTS:
             enqueue_event(s, EventEnvelope(
-                id=event_id, type=event_type, source="klyrow", tenant_id=tenant_id,
+                id=event_id, type=event_type, version=1, source="klyrow", tenant_id=tenant_id,
                 correlation_id=correlation_id, causation_id=operation_id,
                 occurred_at=occurred_at, data={"message_id": message_id},
             ))

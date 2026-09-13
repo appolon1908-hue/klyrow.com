@@ -86,6 +86,33 @@ def test_all_m07_event_types_are_versioned_and_schema_validated():
                       data={"status":"RELEASED","reason":"wrong","changed_at":datetime.now(timezone.utc)})
 
 
+def test_wire_contract_requires_explicit_envelope_and_projection_defaults():
+    common = {
+        "id": "evt_required",
+        "type": "klyrow.tenant.created",
+        "tenant_id": "a",
+        "correlation_id": "cor_required",
+        "occurred_at": datetime.now(timezone.utc),
+        "data": {"tenant_id": "a", "enabled": True},
+    }
+    with pytest.raises(ValidationError):
+        EventEnvelope.model_validate(common)
+    with pytest.raises(ValidationError):
+        EventEnvelope.model_validate({**common, "version": 1, "source": "klyrow", "data": {"tenant_id": "a"}})
+    with pytest.raises(ValidationError):
+        EventEnvelope.model_validate({
+            **common,
+            "type": "klyrow.usage.daily",
+            "version": 1,
+            "source": "klyrow",
+            "data": {
+                "date": "2026-09-12",
+                "quantity": 1,
+                "snapshot_at": "2026-09-13T00:00:00Z",
+            },
+        })
+
+
 def test_enabled_publisher_requires_endpoint_and_separate_credentials(
     monkeypatch,
 ):

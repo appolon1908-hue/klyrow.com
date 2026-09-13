@@ -57,7 +57,7 @@ class TenantEventData(BaseModel):
     tenant_id: str = Field(min_length=1, max_length=200)
     name: Optional[str] = Field(default=None, max_length=200)
     organization_id: Optional[str] = Field(default=None, max_length=200)
-    enabled: bool = True
+    enabled: bool
 
 
 class SubscriptionChangedData(BaseModel):
@@ -73,7 +73,7 @@ class SubscriptionChangedData(BaseModel):
 class DailyUsageData(BaseModel):
     model_config = ConfigDict(extra="forbid")
     date: date
-    unit: Literal["accepted_message"] = "accepted_message"
+    unit: Literal["accepted_message"]
     quantity: int = Field(ge=0)
     snapshot_at: AwareDatetime
 
@@ -140,8 +140,8 @@ class EventEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str = Field(pattern=r"^evt_[A-Za-z0-9_-]+$", min_length=5, max_length=200)
     type: KlyrowEventType
-    version: Literal[1] = 1
-    source: Literal["klyrow"] = "klyrow"
+    version: Literal[1]
+    source: Literal["klyrow"]
     tenant_id: str = Field(min_length=1, max_length=200)
     correlation_id: str = Field(min_length=1, max_length=200)
     causation_id: Optional[str] = Field(default=None, min_length=1, max_length=200)
@@ -257,6 +257,8 @@ def enqueue_named_event(
     event = EventEnvelope(
         id=identifier,
         type=event_type,
+        version=1,
+        source="klyrow",
         tenant_id=tenant_id,
         correlation_id=correlation_id or identifier,
         causation_id=causation_id,
@@ -328,7 +330,12 @@ def daily_snapshot(session, tenant_id: str, day: date):
         causation_id=aggregate,
         aggregate_id=aggregate,
         occurred_at=current,
-        data=DailyUsageData(date=day, quantity=quantity, snapshot_at=current).model_dump(mode="json"),
+        data=DailyUsageData(
+            date=day,
+            unit="accepted_message",
+            quantity=quantity,
+            snapshot_at=current,
+        ).model_dump(mode="json"),
     )
 
 

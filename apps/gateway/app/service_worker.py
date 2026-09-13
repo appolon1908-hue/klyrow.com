@@ -158,6 +158,15 @@ def billing_tick(max_attempts=8):
         return 1
 
 
+def secret_response_maintenance_tick() -> int:
+    """Redact expired credentials from the always-on base worker."""
+    with DB() as session:
+        redacted = cleanup_secret_responses(session)
+        refresh_secret_metrics(session)
+        session.commit()
+        return redacted
+
+
 async def loop():
     while RUNNING:
         try:
@@ -169,6 +178,7 @@ async def loop():
                         if not process_one_sandbox(session):
                             break
                 await dispatch_provider_outbox()
+                secret_response_maintenance_tick()
             elif ROLE == "provisioning":
                 await provisioning_tick()
             elif ROLE == "billing":
@@ -177,10 +187,7 @@ async def loop():
                 await dispatch_mautic_outbox()
             elif ROLE == "business":
                 await dispatch_business_events()
-                with DB() as session:
-                    cleanup_secret_responses(session)
-                    refresh_secret_metrics(session)
-                    session.commit()
+                secret_response_maintenance_tick()
             elif ROLE == "campaign":
                 dispatch_campaigns()
         except Exception as exc:

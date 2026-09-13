@@ -20,13 +20,13 @@
     },
     "unit": {
       "const": "accepted_message",
-      "default": "accepted_message",
       "title": "Unit",
       "type": "string"
     }
   },
   "required": [
     "date",
+    "unit",
     "quantity",
     "snapshot_at"
   ],

@@ -149,10 +149,18 @@ def secret_response_get(response_id: str, ctx=Depends(auth), session: Session = 
     item = session.scalar(select(SecretResponse).where(
         SecretResponse.id == response_id,
         SecretResponse.tenant_id == ctx["tenant"],
+        SecretResponse.created_by == ctx["sub"],
     ).with_for_update())
     if item is None:
         raise HTTPException(404, "secret_response_not_found")
-    payload = read_secret_response(item)
+    try:
+        payload = read_secret_response(item)
+    except HTTPException as exc:
+        if exc.status_code == 410 and item.encrypted_payload is not None:
+            item.encrypted_payload = None
+            item.redacted_at = utcnow()
+            session.commit()
+        raise
     item.retrieved_at = utcnow()
     session.commit()
     return {

@@ -4,7 +4,6 @@
   "additionalProperties": false,
   "properties": {
     "enabled": {
-      "default": true,
       "title": "Enabled",
       "type": "boolean"
     },
@@ -42,7 +41,8 @@
     }
   },
   "required": [
-    "tenant_id"
+    "tenant_id",
+    "enabled"
   ],
   "title": "TenantEventData",
   "type": "object"
