@@ -14,6 +14,37 @@ env:
   KLYROW_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
 
 jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ env.KLYROW_SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "22"
+      - run: pip install -r apps/gateway/requirements.txt openapi-spec-validator pytest
+      - name: Verify composed API catalog and audience exports
+        run: |
+          python scripts/export-api-contracts.py --check
+          python scripts/validate-api-contracts.py
+          pytest -q tests/test_api_contract_compatibility.py tests/test_mission_api_boundaries.py tests/test_odoo_writer_architecture.py
+      - name: Reject contract changes against the pull request base
+        if: github.event_name == 'pull_request'
+        env:
+          KLYROW_CONTRACT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: python scripts/validate-api-contracts.py --base-ref "$KLYROW_CONTRACT_BASE_SHA"
+      - name: Generate and compile public TypeScript client types
+        run: |
+          npx --yes --package=openapi-typescript@7.10.1 openapi-typescript schemas/openapi/klyrow-public-api.yaml -o /tmp/klyrow-api.d.ts
+          cmp /tmp/klyrow-api.d.ts sdk/typescript/src/schema.d.ts
+          npx --yes --package=typescript@5.9.2 tsc --noEmit --strict --lib es2022,dom sdk/typescript/src/index.ts
+
   frontend:
     runs-on: ubuntu-latest
     defaults:
@@ -135,7 +166,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   image:
-    needs: [frontend, test, secrets]
+    needs: [frontend, test, secrets, contracts]
     runs-on: ubuntu-latest
     permissions:
       actions: read
