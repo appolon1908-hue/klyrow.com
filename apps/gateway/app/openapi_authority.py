@@ -72,6 +72,8 @@ DURABLE_IDEMPOTENCY = {
     ("post", "/v1/campaigns"),
     ("post", "/v1/messages/{message_id}/cancel"),
     ("post", "/v1/campaigns/{campaign_id}/schedule"),
+    ("post", "/v1/campaigns/{campaign_id}/pause"),
+    ("post", "/v1/campaigns/{campaign_id}/resume"),
     ("post", "/v1/campaigns/{campaign_id}/cancel"),
     ("post", "/v1/operations/{operation_id}/cancel"),
     ("post", "/v1/operations/{operation_id}/reconcile"),

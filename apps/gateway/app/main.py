@@ -134,7 +134,7 @@ class Tenant(Base):
 class User(Base):
     __tablename__="users"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id")); email:Mapped[str]=mapped_column(String,unique=True,index=True); password_hash:Mapped[str]=mapped_column(String); role:Mapped[str]=mapped_column(String,default="tenant_user"); enabled:Mapped[bool]=mapped_column(Boolean,default=True); reset_hash:Mapped[Optional[str]]=mapped_column(String,nullable=True); reset_expires:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True)
 class ApiKey(Base):
-    __tablename__="api_keys"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); name:Mapped[str]=mapped_column(String); key_hash:Mapped[str]=mapped_column(String,unique=True); revoked:Mapped[bool]=mapped_column(Boolean,default=False)
+    __tablename__="api_keys"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); name:Mapped[str]=mapped_column(String); key_hash:Mapped[str]=mapped_column(String,unique=True); revoked:Mapped[bool]=mapped_column(Boolean,default=False); rotated_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True)
 class Domain(Base):
     __tablename__="domains"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); domain:Mapped[str]=mapped_column(String); token:Mapped[str]=mapped_column(String); verified:Mapped[bool]=mapped_column(Boolean,default=False)
     __table_args__=(UniqueConstraint("tenant_id","domain",name="uq_domain_tenant_name"),)
@@ -160,7 +160,7 @@ class Contact(Base):
     __tablename__="contacts"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); email:Mapped[str]=mapped_column(String,index=True); name:Mapped[Optional[str]]=mapped_column(String,nullable=True); subscribed:Mapped[bool]=mapped_column(Boolean,default=True); metadata_json:Mapped[str]=mapped_column(Text,default="{}")
     __table_args__=(UniqueConstraint("tenant_id","email",name="uq_contact_tenant_email"),)
 class Campaign(Base):
-    __tablename__="campaigns"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); name:Mapped[str]=mapped_column(String); status:Mapped[str]=mapped_column(String,default="draft"); subject:Mapped[Optional[str]]=mapped_column(String,nullable=True); scheduled_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
+    __tablename__="campaigns"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); name:Mapped[str]=mapped_column(String); status:Mapped[str]=mapped_column(String,default="draft"); subject:Mapped[Optional[str]]=mapped_column(String,nullable=True); sender_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); template_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); segment_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); current_version:Mapped[int]=mapped_column(Integer,default=1); scheduled_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class Idempotency(Base):
     __tablename__="idempotency_keys"; id:Mapped[str]=mapped_column(String,primary_key=True,default=lambda:str(uuid.uuid4())); key:Mapped[str]=mapped_column(String); tenant_id:Mapped[str]=mapped_column(String,index=True); request_hash:Mapped[str]=mapped_column(String); resource_id:Mapped[str]=mapped_column(String); response_json:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); __table_args__=(UniqueConstraint("tenant_id","key",name="uq_idempotency_tenant_key"),)
 class EmailOutbox(Base):
@@ -171,7 +171,7 @@ class MiddlewareCommandOperation(Base):
 class ProductionCanaryGate(Base):
     __tablename__="production_canary_gate"; gate_key:Mapped[str]=mapped_column(String,primary_key=True); reserved_deliveries:Mapped[int]=mapped_column(Integer,default=0); claimed_deliveries:Mapped[int]=mapped_column(Integer,default=0); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class WebhookEndpoint(Base):
-    __tablename__="webhook_endpoints"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); url:Mapped[str]=mapped_column(String); enabled:Mapped[bool]=mapped_column(Boolean,default=True); secret_hash:Mapped[str]=mapped_column(String)
+    __tablename__="webhook_endpoints"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(ForeignKey("tenants.id"),index=True); url:Mapped[str]=mapped_column(String); enabled:Mapped[bool]=mapped_column(Boolean,default=True); secret_hash:Mapped[str]=mapped_column(String); rotated_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True)
 
 def db():
     with DB() as s: yield s
@@ -883,7 +883,14 @@ def reset(x:Reset,s:Session=Depends(db)):
 def me(ctx=Depends(auth)): return ctx
 @app.post("/v1/api-keys")
 def create_key(x:KeyIn,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db)):
-    raw="kly_"+secrets.token_urlsafe(32); k=ApiKey(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],name=x.name,key_hash=sha(raw)); s.add(k); audit(s,ctx,"api_key.created"); s.commit(); return {"id":k.id,"key":raw,"name":k.name}
+    from .secret_responses import record_secret_response,response_metadata
+    raw="kly_"+secrets.token_urlsafe(32); k=ApiKey(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],name=x.name,key_hash=sha(raw)); s.add(k);result={"id":k.id,"key":raw,"name":k.name};secret_response=record_secret_response(s,tenant_id=ctx["tenant"],resource_type="API_KEY",resource_id=k.id,action="CREATE",payload=result,actor=ctx["sub"]);audit(s,ctx,"api_key.created");s.commit();return {**result,**response_metadata(secret_response)}
+@app.post("/v1/api-keys/{kid}/rotate")
+def rotate_key(kid:str,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db)):
+    from .secret_responses import record_secret_response,response_metadata
+    k=s.scalar(select(ApiKey).where(ApiKey.id==kid,ApiKey.tenant_id==ctx["tenant"],ApiKey.revoked==False))
+    if not k:raise HTTPException(404,"not_found")
+    raw="kly_"+secrets.token_urlsafe(32);k.key_hash=sha(raw);k.rotated_at=datetime.now(timezone.utc);result={"id":k.id,"key":raw,"name":k.name};secret_response=record_secret_response(s,tenant_id=ctx["tenant"],resource_type="API_KEY",resource_id=k.id,action="ROTATE",payload=result,actor=ctx["sub"]);audit(s,ctx,"api_key.rotated");s.commit();return {**result,**response_metadata(secret_response)}
 @app.delete("/v1/api-keys/{kid}",status_code=204)
 def revoke(kid:str,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db)):
     k=s.scalar(select(ApiKey).where(ApiKey.id==kid,ApiKey.tenant_id==ctx["tenant"]));
@@ -896,13 +903,14 @@ def domain_add(x:DomainIn,ctx=Depends(require("platform_admin","tenant_admin")),
     d=Domain(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],domain=x.domain.lower(),token=secrets.token_urlsafe(24)); s.add(d); s.commit(); return {"id":d.id,"domain":d.domain,"verified":False,"dns":{"type":"TXT","name":"_klyrow-verification."+d.domain,"value":"klyrow="+d.token}}
 @app.post("/v1/domains/{did}/verify")
 def domain_verify(did:str,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db)):
+    from .business_events import enqueue_named_event
     import socket
     d=s.scalar(select(Domain).where(Domain.id==did,Domain.tenant_id==ctx["tenant"]));
     if not d: raise HTTPException(404,"not_found")
     try:
         import dns.resolver; values=[str(r).strip('"') for r in dns.resolver.resolve("_klyrow-verification."+d.domain,"TXT")]; d.verified=("klyrow="+d.token) in values
     except Exception: d.verified=False
-    s.commit(); return {"verified":d.verified}
+    enqueue_named_event(s,event_type="klyrow.domain.status",tenant_id=ctx["tenant"],aggregate_id=d.id,causation_id=did,data={"domain_id":d.id,"domain":d.domain,"status":"VERIFIED" if d.verified else "DNS_REQUIRED","verified_at":datetime.now(timezone.utc) if d.verified else None});s.commit();return {"verified":d.verified}
 @app.post("/v1/messages",status_code=202)
 @app.post("/v1/email/send",status_code=202,include_in_schema=False)
 async def send(x:MailIn,ctx=Depends(auth),s:Session=Depends(db),idempotency_key:Optional[str]=Header(default=None)):
@@ -938,7 +946,7 @@ def queue_email_lifecycle_event(s:Session, *, kind:str, tenant_id:str, message_i
         event_type = "klyrow." + kind
         if event_type in KLYROW_EVENTS:
             enqueue_event(s, EventEnvelope(
-                id=event_id, type=event_type, source="klyrow", tenant_id=tenant_id,
+                id=event_id, type=event_type, version=1, source="klyrow", tenant_id=tenant_id,
                 correlation_id=correlation_id, causation_id=operation_id,
                 occurred_at=occurred_at, data={"message_id": message_id},
             ))
@@ -1230,21 +1238,32 @@ def audits(ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depen
 def usage(ctx=Depends(auth),s:Session=Depends(db)): return {"sent_24h":len(s.scalars(select(Message).where(Message.tenant_id==ctx["tenant"],Message.created_at>=datetime.now(timezone.utc)-timedelta(days=1))).all()),"quota":s.get(Tenant,ctx["tenant"]).quota}
 @app.post("/v1/webhooks")
 def webhook_add(x:WebhookIn,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db)):
-    url=safe_webhook_url(x.url);raw=secrets.token_urlsafe(32); item=WebhookEndpoint(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],url=url,secret_hash=sha(raw)); s.add(item); audit(s,ctx,"webhook.created"); s.commit(); return {"id":item.id,"url":item.url,"secret":raw}
+    from .secret_responses import record_secret_response,response_metadata
+    url=safe_webhook_url(x.url);raw=secrets.token_urlsafe(32);item=WebhookEndpoint(id=str(uuid.uuid4()),tenant_id=ctx["tenant"],url=url,secret_hash=sha(raw));s.add(item);result={"id":item.id,"url":item.url,"secret":raw};secret_response=record_secret_response(s,tenant_id=ctx["tenant"],resource_type="WEBHOOK_SECRET",resource_id=item.id,action="CREATE",payload=result,actor=ctx["sub"]);audit(s,ctx,"webhook.created");s.commit();return {**result,**response_metadata(secret_response)}
+@app.post("/v1/webhooks/{wid}/rotate")
+def webhook_rotate(wid:str,ctx=Depends(require("platform_admin","tenant_admin")),s:Session=Depends(db)):
+    from .secret_responses import record_secret_response,response_metadata
+    item=s.scalar(select(WebhookEndpoint).where(WebhookEndpoint.id==wid,WebhookEndpoint.tenant_id==ctx["tenant"],WebhookEndpoint.enabled==True))
+    if not item:raise HTTPException(404,"not_found")
+    raw=secrets.token_urlsafe(32);item.secret_hash=sha(raw);item.rotated_at=datetime.now(timezone.utc);result={"id":item.id,"secret":raw,"rotated_at":item.rotated_at.isoformat()};secret_response=record_secret_response(s,tenant_id=ctx["tenant"],resource_type="WEBHOOK_SECRET",resource_id=item.id,action="ROTATE",payload=result,actor=ctx["sub"]);audit(s,ctx,"webhook.rotated");s.commit();return {"id":item.id,"secret":raw,"rotated_at":item.rotated_at,**response_metadata(secret_response)}
 @app.get("/v1/admin/tenants")
 def admin_tenants(ctx=Depends(require("platform_admin")),s:Session=Depends(db)): return s.scalars(select(Tenant)).all()
 @app.post("/v1/admin/tenants",status_code=201)
-def admin_tenant_create(x:TenantIn,ctx=Depends(require("platform_admin")),s:Session=Depends(db)): item=Tenant(id=str(uuid.uuid4()),name=x.name,quota=x.quota); s.add(item); audit(s,ctx,"tenant.created"); s.commit(); return item
+def admin_tenant_create(x:TenantIn,ctx=Depends(require("platform_admin")),s:Session=Depends(db)):
+    from .business_events import enqueue_named_event
+    item=Tenant(id=str(uuid.uuid4()),name=x.name,quota=x.quota);s.add(item);enqueue_named_event(s,event_type="klyrow.tenant.created",tenant_id=item.id,aggregate_id=item.id,data={"tenant_id":item.id,"name":item.name,"enabled":True});audit(s,ctx,"tenant.created");s.commit();return item
 @app.post("/v1/admin/tenants/{tid}/suspend")
 def admin_suspend(tid:str,ctx=Depends(require("platform_admin")),s:Session=Depends(db)):
+    from .business_events import enqueue_named_event
     item=s.get(Tenant,tid)
     if not item:raise HTTPException(404,"not_found")
-    item.enabled=False; audit(s,ctx,"tenant.suspended"); s.commit(); return {"id":tid,"enabled":False}
+    item.enabled=False;enqueue_named_event(s,event_type="klyrow.tenant.updated",tenant_id=item.id,aggregate_id=item.id,data={"tenant_id":item.id,"name":item.name,"enabled":False});audit(s,ctx,"tenant.suspended");s.commit();return {"id":tid,"enabled":False}
 @app.post("/v1/admin/tenants/{tid}/quota")
 def admin_quota(tid:str,x:QuotaIn,ctx=Depends(require("platform_admin")),s:Session=Depends(db)):
+    from .business_events import enqueue_named_event
     item=s.get(Tenant,tid)
     if not item:raise HTTPException(404,"not_found")
-    item.quota=x.quota; audit(s,ctx,"tenant.quota_changed"); s.commit(); return {"id":tid,"quota":item.quota}
+    item.quota=x.quota;enqueue_named_event(s,event_type="klyrow.tenant.updated",tenant_id=item.id,aggregate_id=item.id,data={"tenant_id":item.id,"name":item.name,"enabled":item.enabled});audit(s,ctx,"tenant.quota_changed");s.commit();return {"id":tid,"quota":item.quota}
 @app.get("/",include_in_schema=False)
 def auth_home(): return RedirectResponse("/login",status_code=302)
 @app.get("/portal",response_class=HTMLResponse,include_in_schema=False)
@@ -1300,6 +1319,10 @@ from .delivery_controls import router as delivery_controls_router
 app.include_router(delivery_controls_router)
 from .preferences import router as preferences_router
 app.include_router(preferences_router)
+from . import business_events as _business_events
+from . import campaign_dispatcher as _campaign_dispatcher
+from .secret_responses import router as secret_responses_router
+app.include_router(secret_responses_router)
 from . import webmail_models as _webmail_models
 from .provider import provider_worker_loop, reconcile_legacy_registry, router as provider_router, status_router as provider_status_router
 app.include_router(provider_router)
