@@ -32,7 +32,9 @@ def test_only_caddy_publishes_public_ports():
 def test_staging_is_fail_closed_for_external_delivery():
     compose = yaml.safe_load((STAGING / "compose.yml").read_text())
     env = compose["services"]["gateway"]["environment"]
-    assert env["KLYROW_ENV"] == "staging"
+    assert env["KLYROW_ENV"] == "production"
+    assert env["KLYROW_IDENTITY_PROFILE"] == "staging"
+    assert env["KLYROW_LOCAL_AUTH_ENABLED"] == "false"
     assert env["KLYROW_SAFE_MODE"] == "true"
     assert env["LIVE_EMAIL_DELIVERY"] == "false"
     assert env["EXTERNAL_EMAIL_DELIVERY"] == "false"
@@ -52,3 +54,19 @@ def test_keycloak_realm_requires_pkce_and_disables_password_grant():
 def test_openbao_policy_explicitly_denies_odoo_writer_secret():
     policy = (STAGING / "openbao" / "klyrow-staging.hcl").read_text()
     assert re.search(r'odoo-writer/\*"\s*\{\s*capabilities\s*=\s*\["deny"\]', policy, re.S)
+
+
+def test_staging_dependencies_are_declared():
+    compose = yaml.safe_load((STAGING / "compose.yml").read_text())
+    template = (STAGING / "staging.env.example").read_text()
+    for service in compose["services"].values():
+        variable = service["image"].split("${", 1)[1].split(":", 1)[0]
+        assert variable + "=" in template
+    gateway = compose["services"]["gateway"]
+    for name in ("webhook_secret", "middleware_ca", "middleware_cert", "middleware_key"):
+        assert name in gateway["secrets"]
+        assert name in compose["secrets"]
+    prometheus = compose["services"]["prometheus"]
+    assert {"source": "metrics_token", "target": "klyrow_metrics_token"} in prometheus["secrets"]
+    assert any("/etc/prometheus/alerts.yml" in value for value in prometheus["volumes"])
+    assert "header_up Host app.klyrow.com" in (STAGING / "Caddyfile").read_text()

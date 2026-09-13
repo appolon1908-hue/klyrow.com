@@ -50,3 +50,21 @@ Certification is PASS only when all rows pass against the same immutable release
 ## Rollback
 
 Keep the previous digest set and database backup. On failure, stop admission at Caddy, disable workers, capture sanitized queue/ledger state, restore only through the reviewed restore runbook, redeploy the prior digest set, and verify identity, readiness, queue and read-back before reopening staging. Never delete a failed-event queue to make certification green.
+
+## Reviewed runtime corrections
+
+Staging uses `KLYROW_ENV=production` to retain production authentication,
+invitation, cookie, secret-file and migration enforcement. The closed
+`KLYROW_IDENTITY_PROFILE=staging` selects only the registered staging issuer
+and public origin; the default profile retains production authorities. The
+portal client and callback must match the supplied realm. This does not enable
+email delivery or confer platform-owner authority on staging identities.
+
+Render `webhook-secret`, `middleware-ca.pem`, `middleware-client.pem` and
+`middleware-client-key.pem` with the other root-owned OpenBao files. Prometheus
+receives its metrics token and alert rules. Caddy selects the web image's
+registered virtual host. Supply every image digest in the environment template.
+Preflight rejects a source SHA different from the clean checkout; deployment
+also checks gateway, web and migration image revision labels after pulling and
+before starting services. Image signing/provenance and external runtime evidence
+remain separate release gates; revision labels alone are not certification.

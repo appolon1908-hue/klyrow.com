@@ -42,7 +42,15 @@ services:
     <<: *runtime
     image: ${KLYROW_GATEWAY_IMAGE:?immutable gateway digest required}
     environment:
-      KLYROW_ENV: staging
+      KLYROW_ENV: production
+      KLYROW_IDENTITY_PROFILE: staging
+      KLYROW_LOCAL_AUTH_ENABLED: "false"
+      KLYROW_REQUIRED_SCHEMA_VERSION: "2026091001_customer_data_lifecycle.sql"
+      KLYROW_PUBLIC_URL: https://staging.klyrow.com
+      KLYROW_OIDC_CLIENT_ID: kyyow-portal
+      KLYROW_OIDC_AUDIENCE: klyrow-api
+      KLYROW_OIDC_REDIRECT_URI: https://staging.klyrow.com/auth/callback
+      KLYROW_PRODUCTION_GATE_APPROVED: "false"
       KLYROW_SAFE_MODE: "true"
       LIVE_EMAIL_DELIVERY: "false"
       EXTERNAL_EMAIL_DELIVERY: "false"
@@ -53,11 +61,15 @@ services:
       KLYROW_DURABLE_RESULT_KEYRING_FILE: /run/secrets/result_keyring
       KLYROW_METRICS_TOKEN_FILE: /run/secrets/metrics_token
       KLYROW_MIDDLEWARE_API_KEY_FILE: /run/secrets/middleware_token
+      KLYROW_WEBHOOK_SECRET_FILE: /run/secrets/webhook_secret
+      KLYROW_SERVER_A_CA_FILE: /run/secrets/middleware_ca
+      KLYROW_SERVER_A_CLIENT_CERT_FILE: /run/secrets/middleware_cert
+      KLYROW_SERVER_A_CLIENT_KEY_FILE: /run/secrets/middleware_key
       KLYROW_MIDDLEWARE_URL: ${KLYROW_MIDDLEWARE_URL:?required}
       KLYROW_SEARCH_URL: http://search:7700
       KLYROW_SEARCH_API_KEY_FILE: /run/secrets/search_key
       KLYROW_OIDC_ISSUER: ${KLYROW_KEYCLOAK_URL:?required}/realms/${KLYROW_KEYCLOAK_REALM:?required}
-    secrets: [database_password, session_secret, result_keyring, metrics_token, middleware_token, search_key]
+    secrets: [database_password, session_secret, result_keyring, metrics_token, middleware_token, search_key, webhook_secret, middleware_ca, middleware_cert, middleware_key]
     depends_on:
       postgres: {condition: service_healthy}
       migrate: {condition: service_completed_successfully}
@@ -123,7 +135,11 @@ services:
     command: [--config.file=/etc/prometheus/prometheus.yml, --storage.tsdb.retention.time=15d]
     volumes:
       - ../../config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../../config/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus_data:/prometheus
+    secrets:
+      - source: metrics_token
+        target: klyrow_metrics_token
     networks: [observability, app]
 
   grafana:
@@ -159,3 +175,7 @@ secrets:
   middleware_token: {file: "${KLYROW_STAGING_SECRET_DIR}/middleware-token"}
   search_key: {file: "${KLYROW_STAGING_SECRET_DIR}/search-key"}
   grafana_password: {file: "${KLYROW_STAGING_SECRET_DIR}/grafana-password"}
+  webhook_secret: {file: "${KLYROW_STAGING_SECRET_DIR}/webhook-secret"}
+  middleware_ca: {file: "${KLYROW_STAGING_SECRET_DIR}/middleware-ca.pem"}
+  middleware_cert: {file: "${KLYROW_STAGING_SECRET_DIR}/middleware-client.pem"}
+  middleware_key: {file: "${KLYROW_STAGING_SECRET_DIR}/middleware-client-key.pem"}

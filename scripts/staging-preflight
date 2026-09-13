@@ -13,14 +13,19 @@ done
 for name in KLYROW_SOURCE_SHA KLYROW_MIDDLEWARE_SOURCE_SHA KLYROW_ODOO_SOURCE_SHA; do
   [[ "${!name:-}" =~ ^[0-9a-f]{40}$ ]] || fail "$name must be an exact 40-character commit SHA"
 done
+[[ "$KLYROW_SOURCE_SHA" = "$(git -C "$ROOT" rev-parse HEAD)" ]] || fail "declared source differs from checkout"
+[[ -z "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]] || fail "checkout has uncommitted changes"
+[[ "${KLYROW_STAGING_HOST:-}" = staging.klyrow.com ]] || fail "unexpected staging host"
+[[ "${KLYROW_KEYCLOAK_URL:-}" = https://auth-staging.codestra.co ]] || fail "unexpected staging issuer"
 [[ "${KLYROW_MIDDLEWARE_MIGRATION:-}" = 0061 ]] || fail "Middleware migration 0061 is required"
 [[ "${KLYROW_ODOO_ADDON:-}" = codestra_klyrow_observability ]] || fail "unexpected Odoo addon"
 [[ "${KLYROW_KEYCLOAK_REALM:-}" = kyyow ]] || fail "the Kyyow realm must be selected"
 [[ "${KLYROW_STAGING_SECRET_DIR:-}" = /* ]] || fail "secret directory must be absolute"
 [[ -d "$KLYROW_STAGING_SECRET_DIR" ]] || fail "OpenBao-rendered secret directory is absent"
-for file in database-owner-password database-runtime-password session-secret result-keyring.json metrics-token middleware-token search-key grafana-password; do
+for file in database-owner-password database-runtime-password session-secret result-keyring.json metrics-token middleware-token search-key grafana-password webhook-secret middleware-ca.pem middleware-client.pem middleware-client-key.pem; do
   path="$KLYROW_STAGING_SECRET_DIR/$file"
   [[ -f "$path" && ! -L "$path" ]] || fail "missing regular secret file: $file"
+  [[ "$(stat -c %u "$path")" = 0 ]] || fail "secret must be root owned: $file"
   mode="$(stat -c %a "$path")"
   [[ "$mode" = 400 || "$mode" = 440 || "$mode" = 600 || "$mode" = 640 ]] || fail "unsafe mode $mode on $file"
 done
