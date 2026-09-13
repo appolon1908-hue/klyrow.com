@@ -20,9 +20,9 @@ not installation or activation of other Codestra repositories.
 | Source/packaging Odoo-writer guardrails | PASS | `tests/test_odoo_writer_architecture.py`; not a live network/ACL test |
 | Generated TypeScript API types/client compilation | PASS | Pinned openapi-typescript generation and TypeScript compiler in contract CI |
 | Contract drift/compatibility checks | PASS | Generated-file comparison and conservative operation/schema/security diff; initial exports have no predecessor at baseline |
-| Python regression checks | PASS | Python 3.12 full run: 1,237 passed, 19 skipped, one exact-fingerprint policy expectation failed; that expectation was updated to the reviewed exclusions and `pytest -q tests --lf --lfnf=none` passed the remaining test. All 1,238 executed cases now pass; skipped runtime/PostgreSQL gates are not certified |
+| Python regression checks | PASS | Python 3.12 full run: 1,256 passed, 20 skipped in 1,142 seconds. Isolated PostgreSQL 17.6 usage suite: 19 passed, including UTC grouping and transaction-local timeout reset. Focused contract/boundary checks also pass. Skipped environment gates are not certified |
 | Full-history and staged-change secret scan | PASS | Five reviewed historical findings were TestClient `Idempotency-Key` values, not credentials; exact commit/file/line exclusions in `.gitleaksignore`, no broad file/rule suppression |
-| All M06 target operations and typed response schemas | FAIL | Existing API remains broader/different than the target; template history added, remaining contract gaps inventoried |
+| All M06 target operations and typed response schemas | FAIL | Existing API remains broader/different than the target; template and usage history added, remaining contract gaps inventoried |
 | AsyncAPI and normalized M07 summary production | FAIL | Existing signed event protocol differs from the new envelope; coordinated producer/consumer migration remains |
 | Full Odoo KPI writer/reconciler | FAIL | Included worker handles inbound mail, not the complete daily KPI loop; existing Odoo model mappings unavailable in this repo |
 | OTLP instrumentation and end-to-end traces | FAIL | SDK/exporter configuration and runtime trace proof remain |
@@ -59,8 +59,8 @@ New APIs:
 - `GET /v1/templates/{template_id}/versions?limit=&cursor=`
 - `GET /v1/templates/{template_id}/versions/{version_id}`
 
-Database migrations: none. Existing immutable `template_versions` rows are read
-without changing historical content. Runtime changes also add private-namespace
+Database migrations: none. Existing immutable `template_versions` rows and
+`klyrow_usage_events` ledger rows are read without changing historical content. Runtime changes also add private-namespace
 OpenAPI classification and a redacted 503 readiness response.
 
 Deployment changes: none executed. CI adds a required `contracts` prerequisite
