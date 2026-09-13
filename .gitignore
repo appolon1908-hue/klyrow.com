@@ -9,7 +9,9 @@ backups/
 __pycache__/
 .pytest_cache/
 .venv/
+.venv*/
 *.pyc
+*.db-journal
 backups/
 secrets/
 postal-data/

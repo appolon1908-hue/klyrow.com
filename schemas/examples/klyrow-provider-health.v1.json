@@ -2,15 +2,15 @@
   "causation_id": "cause_example",
   "correlation_id": "cor_example",
   "data": {
-    "date": "2026-09-12",
-    "quantity": 123,
-    "snapshot_at": "2026-09-13T00:00:00Z",
-    "unit": "accepted_message"
+    "checked_at": "2026-09-13T00:00:00Z",
+    "provider": "postal",
+    "reason_code": null,
+    "status": "HEALTHY"
   },
-  "id": "evt_klyrow_usage_daily",
+  "id": "evt_klyrow_provider_health",
   "occurred_at": "2026-09-13T00:00:00Z",
   "source": "klyrow",
   "tenant_id": "tnt_example",
-  "type": "klyrow.usage.daily",
+  "type": "klyrow.provider.health",
   "version": 1
 }

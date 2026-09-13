@@ -7,6 +7,7 @@ import signal
 import uuid
 from datetime import timedelta
 
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import select
 
 from .delivery_safety import email_activation_status
@@ -22,6 +23,8 @@ from .provider import (
 from .security_smtp_worker import security_smtp_delivery_loop
 from .tenant_postal_delivery import tenant_email_outbox_loop
 from .business_event_worker import dispatch as dispatch_business_events
+from .campaign_dispatcher import dispatch_campaigns
+from .secret_responses import cleanup_secret_responses, refresh_metrics as refresh_secret_metrics
 from .telemetry import configure_tracing
 
 ROLE = os.getenv("KLYROW_WORKER_ROLE", "mail")
@@ -56,9 +59,23 @@ def selected_email_outbox_loop():
 
 async def health(reader, writer):
     try:
-        await reader.read(4096)
+        request = await reader.read(4096)
     except Exception:
-        pass
+        request = b""
+    if request.startswith(b"GET /metrics "):
+        body = generate_latest()
+        writer.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: "
+            + CONTENT_TYPE_LATEST.encode()
+            + b"\r\nContent-Length: "
+            + str(len(body)).encode()
+            + b"\r\nConnection: close\r\n\r\n"
+            + body
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+        return
     body = json.dumps(
         {
             "status": "ok",
@@ -160,6 +177,12 @@ async def loop():
                 await dispatch_mautic_outbox()
             elif ROLE == "business":
                 await dispatch_business_events()
+                with DB() as session:
+                    cleanup_secret_responses(session)
+                    refresh_secret_metrics(session)
+                    session.commit()
+            elif ROLE == "campaign":
+                dispatch_campaigns()
         except Exception as exc:
             print(
                 json.dumps(

@@ -179,6 +179,9 @@ class ListPatch(BaseModel):
 class CampaignPatch(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=200)
     subject: Optional[str] = Field(default=None, max_length=998)
+    sender_id: Optional[str] = None
+    template_id: Optional[str] = None
+    segment_id: Optional[str] = None
 
 
 class CampaignSchedule(BaseModel):
@@ -854,13 +857,14 @@ def campaign_patch(
         raise HTTPException(409, "campaign_not_editable")
     for key, value in body.model_dump(exclude_unset=True).items():
         setattr(item, key, value)
+    if body.model_dump(exclude_unset=True):
+        item.current_version += 1
     audit(s, ctx, "campaign.updated")
     s.commit()
     return item
 
 
-@router.post("/v1/campaigns/{campaign_id}/schedule", status_code=202,
-             responses={409: {"description": "Campaign dispatcher unavailable; scheduling is not accepted."}})
+@router.post("/v1/campaigns/{campaign_id}/schedule", status_code=202)
 def campaign_schedule(
     campaign_id: str,
     body: CampaignSchedule,
@@ -871,12 +875,83 @@ def campaign_schedule(
     from .main import Campaign
 
     _require_permission(ctx, "campaign.manage")
-    _tenant_item_for_update(s, Campaign, campaign_id, ctx["tenant"])
+    item = _tenant_item_for_update(s, Campaign, campaign_id, ctx["tenant"])
     if body.scheduled_at.astimezone(timezone.utc) <= now():
         raise HTTPException(422, "schedule_must_be_future")
-    # No worker consumes this schedule. Do not create a promise or replay an
-    # older promise that the current runtime cannot execute.
-    raise HTTPException(409, "campaign_dispatcher_unavailable")
+    from .campaign_dispatcher import CampaignAudienceSnapshot, enabled as campaign_dispatcher_enabled, schedule_campaign
+    if not campaign_dispatcher_enabled():
+        raise HTTPException(409, "campaign_dispatcher_unavailable")
+    prior, storage_key, request_hash = _idempotency_begin(
+        s, ctx, idempotency_key, action="campaign.schedule", resource=campaign_id,
+        semantic_payload=body.model_dump(mode="json"),
+    )
+    if prior is not None:
+        return prior
+    run = schedule_campaign(s, item, body.scheduled_at.astimezone(timezone.utc))
+    audience_count = int(s.scalar(select(func.count()).select_from(CampaignAudienceSnapshot).where(
+        CampaignAudienceSnapshot.campaign_id == item.id,
+        CampaignAudienceSnapshot.campaign_version == run.campaign_version,
+    )) or 0)
+    result = {"id": item.id, "status": item.status, "dispatch_run_id": run.id,
+              "campaign_version": run.campaign_version, "audience_count": audience_count,
+              "scheduled_at": run.scheduled_at}
+    audit(s, ctx, "campaign.scheduled")
+    _idempotency_complete(
+        s, ctx, storage_key=storage_key, request_hash=request_hash,
+        resource=campaign_id, response=jsonable_encoder(result),
+    )
+    s.commit()
+    return result
+
+
+@router.post("/v1/campaigns/{campaign_id}/pause")
+def campaign_pause(
+    campaign_id: str,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=200),
+) -> dict[str, Any]:
+    from .main import Campaign
+    from .campaign_dispatcher import pause_campaign
+    _require_permission(ctx, "campaign.manage")
+    item = _tenant_item_for_update(s, Campaign, campaign_id, ctx["tenant"])
+    prior, storage_key, request_hash = _idempotency_begin(
+        s, ctx, idempotency_key, action="campaign.pause", resource=campaign_id, semantic_payload={}
+    )
+    if prior is not None:
+        return prior
+    run = pause_campaign(s, item)
+    result = {"id": item.id, "status": item.status, "dispatch_run_id": run.id}
+    audit(s, ctx, "campaign.paused")
+    _idempotency_complete(s, ctx, storage_key=storage_key, request_hash=request_hash,
+                          resource=campaign_id, response=result)
+    s.commit()
+    return result
+
+
+@router.post("/v1/campaigns/{campaign_id}/resume", status_code=202)
+def campaign_resume(
+    campaign_id: str,
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
+    idempotency_key: str = Header(alias="Idempotency-Key", min_length=8, max_length=200),
+) -> dict[str, Any]:
+    from .main import Campaign
+    from .campaign_dispatcher import resume_campaign
+    _require_permission(ctx, "campaign.manage")
+    item = _tenant_item_for_update(s, Campaign, campaign_id, ctx["tenant"])
+    prior, storage_key, request_hash = _idempotency_begin(
+        s, ctx, idempotency_key, action="campaign.resume", resource=campaign_id, semantic_payload={}
+    )
+    if prior is not None:
+        return prior
+    run = resume_campaign(s, item)
+    result = {"id": item.id, "status": item.status, "dispatch_run_id": run.id}
+    audit(s, ctx, "campaign.resumed")
+    _idempotency_complete(s, ctx, storage_key=storage_key, request_hash=request_hash,
+                          resource=campaign_id, response=result)
+    s.commit()
+    return result
 
 
 @router.post("/v1/campaigns/{campaign_id}/cancel")
@@ -897,8 +972,8 @@ def campaign_cancel(
         return prior
     if item.status in {"completed", "cancelled"}:
         raise HTTPException(409, "campaign_terminal")
-    item.status = "cancelled"
-    item.scheduled_at = None
+    from .campaign_dispatcher import cancel_campaign
+    cancel_campaign(s, item)
     audit(s, ctx, "campaign.cancelled")
     result = {"id": item.id, "status": item.status}
     _idempotency_complete(
