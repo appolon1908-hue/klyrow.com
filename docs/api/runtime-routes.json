@@ -1051,6 +1051,18 @@
   },
   {
     "documented": true,
+    "handler": "daily_usage",
+    "method": "GET",
+    "path": "/v1/usage/daily"
+  },
+  {
+    "documented": true,
+    "handler": "monthly_usage",
+    "method": "GET",
+    "path": "/v1/usage/monthly"
+  },
+  {
+    "documented": true,
     "handler": "webhook_subscriptions",
     "method": "GET",
     "path": "/v1/webhook-subscriptions"

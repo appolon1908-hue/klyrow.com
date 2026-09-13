@@ -1333,35 +1333,35 @@
     "declared_path": "/admin",
     "file": "apps/gateway/app/platform.py",
     "handler": "platform_admin_ui",
-    "line": 143,
+    "line": 149,
     "method": "GET"
   },
   {
     "declared_path": "/admin/{path:path}",
     "file": "apps/gateway/app/platform.py",
     "handler": "platform_admin_ui",
-    "line": 143,
+    "line": 149,
     "method": "GET"
   },
   {
     "declared_path": "/app",
     "file": "apps/gateway/app/platform.py",
     "handler": "product_app_ui",
-    "line": 151,
+    "line": 157,
     "method": "GET"
   },
   {
     "declared_path": "/app/{path:path}",
     "file": "apps/gateway/app/platform.py",
     "handler": "product_app_ui",
-    "line": 151,
+    "line": 157,
     "method": "GET"
   },
   {
     "declared_path": "/onboarding",
     "file": "apps/gateway/app/platform.py",
     "handler": "product_app_ui",
-    "line": 151,
+    "line": 157,
     "method": "GET"
   },
   {
@@ -2713,6 +2713,20 @@
     "file": "apps/gateway/app/tenancy_onboarding.py",
     "handler": "platform_dashboard",
     "line": 382,
+    "method": "GET"
+  },
+  {
+    "declared_path": "/v1/usage/daily",
+    "file": "apps/gateway/app/usage_history.py",
+    "handler": "daily_usage",
+    "line": 151,
+    "method": "GET"
+  },
+  {
+    "declared_path": "/v1/usage/monthly",
+    "file": "apps/gateway/app/usage_history.py",
+    "handler": "monthly_usage",
+    "line": 157,
     "method": "GET"
   },
   {
