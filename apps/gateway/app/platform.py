@@ -116,6 +116,12 @@ from .runtime_authority_fixes import install_runtime_authority_fixes
 
 install_runtime_authority_fixes()
 
+from .usage_history import router as usage_history_router
+
+if not getattr(app.state, "klyrow_usage_history_registered", False):
+    app.include_router(usage_history_router)
+    app.state.klyrow_usage_history_registered = True
+
 # The core app may have generated OpenAPI before browser composition.
 app.openapi_schema = None
 

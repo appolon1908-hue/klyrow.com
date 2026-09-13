@@ -2165,6 +2165,79 @@
         "title": "TemplateVersionView",
         "type": "object"
       },
+      "UsageBucket": {
+        "properties": {
+          "period_start": {
+            "format": "date",
+            "title": "Period Start",
+            "type": "string"
+          },
+          "quantity": {
+            "title": "Quantity",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "period_start",
+          "quantity"
+        ],
+        "title": "UsageBucket",
+        "type": "object"
+      },
+      "UsageHistoryPage": {
+        "properties": {
+          "granularity": {
+            "enum": [
+              "day",
+              "month"
+            ],
+            "title": "Granularity",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/UsageBucket"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          },
+          "unit": {
+            "title": "Unit",
+            "type": "string"
+          },
+          "window_end": {
+            "format": "date-time",
+            "title": "Window End",
+            "type": "string"
+          },
+          "window_start": {
+            "format": "date-time",
+            "title": "Window Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "granularity",
+          "unit",
+          "window_start",
+          "window_end",
+          "items",
+          "next_cursor"
+        ],
+        "title": "UsageHistoryPage",
+        "type": "object"
+      },
       "UsageIn": {
         "properties": {
           "event_key": {
@@ -22375,6 +22448,334 @@
           }
         ],
         "summary": "Usage",
+        "x-klyrow-audience": "PUBLIC",
+        "x-klyrow-auth-model": "BEARER_JWT_OR_API_KEY",
+        "x-klyrow-enforced-auth-dependencies": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/usage/daily": {
+      "get": {
+        "description": "Daily UTC totals from the authoritative usage ledger. Periods without entries are omitted. Counts describe metered units, not recipient delivery.",
+        "operationId": "daily_usage_v1_usage_daily_get",
+        "parameters": [
+          {
+            "description": "Inclusive UTC date; maximum window is 366 days.",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inclusive UTC date; maximum window is 366 days.",
+              "title": "From"
+            }
+          },
+          {
+            "description": "Exclusive UTC date; defaults to tomorrow in UTC.",
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Exclusive UTC date; defaults to tomorrow in UTC.",
+              "title": "To"
+            }
+          },
+          {
+            "in": "query",
+            "name": "unit",
+            "required": false,
+            "schema": {
+              "default": "accepted_message",
+              "maxLength": 80,
+              "minLength": 1,
+              "title": "Unit",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 31,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-klyrow-tenant-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Klyrow-Tenant-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Tenant-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageHistoryPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "422": {
+            "description": "Invalid date window, cursor, filter or pagination limit"
+          },
+          "503": {
+            "description": "Usage store unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Daily Usage",
+        "tags": [
+          "Usage history"
+        ],
+        "x-klyrow-audience": "PUBLIC",
+        "x-klyrow-auth-model": "BEARER_JWT_OR_API_KEY",
+        "x-klyrow-enforced-auth-dependencies": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/usage/monthly": {
+      "get": {
+        "description": "Monthly UTC totals within the requested date window. Boundary months may be partial. Periods without entries are omitted.",
+        "operationId": "monthly_usage_v1_usage_monthly_get",
+        "parameters": [
+          {
+            "description": "Inclusive UTC date; maximum window is 366 days.",
+            "in": "query",
+            "name": "from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Inclusive UTC date; maximum window is 366 days.",
+              "title": "From"
+            }
+          },
+          {
+            "description": "Exclusive UTC date; defaults to tomorrow in UTC.",
+            "in": "query",
+            "name": "to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Exclusive UTC date; defaults to tomorrow in UTC.",
+              "title": "To"
+            }
+          },
+          {
+            "in": "query",
+            "name": "unit",
+            "required": false,
+            "schema": {
+              "default": "accepted_message",
+              "maxLength": 80,
+              "minLength": 1,
+              "title": "Unit",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 31,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-klyrow-tenant-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Klyrow-Tenant-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Tenant-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageHistoryPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "422": {
+            "description": "Invalid date window, cursor, filter or pagination limit"
+          },
+          "503": {
+            "description": "Usage store unavailable"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Monthly Usage",
+        "tags": [
+          "Usage history"
+        ],
         "x-klyrow-audience": "PUBLIC",
         "x-klyrow-auth-model": "BEARER_JWT_OR_API_KEY",
         "x-klyrow-enforced-auth-dependencies": [

@@ -13,8 +13,9 @@ not installation or activation of other Codestra repositories.
 | --- | --- | --- |
 | Repository/API/secret-reference inventory | PASS | `docs/architecture/current-state.md`, generated `docs/api/` and `docs/security/secret-references.json` |
 | Middleware-only Odoo writer ADR | PASS | `docs/adr/ADR-001-middleware-only-odoo-writer.md` |
-| OpenAPI validation and audience separation | PASS | `python scripts/validate-api-contracts.py`; 351 operations across four exports |
+| OpenAPI validation and audience separation | PASS | `python scripts/validate-api-contracts.py`; 353 operations across four exports |
 | Template-version history API | PASS | Cursor pagination, immutable content, authentication, cross-tenant and wrong-parent tests |
+| Usage-history API | PASS | Tenant/unit SQL aggregation, bounded UTC windows, cursor validation and redacted failure tests; PostgreSQL timezone test is part of CI |
 | Database outage readiness | PASS | `/health/ready` reports redacted 503; liveness is independent |
 | Source/packaging Odoo-writer guardrails | PASS | `tests/test_odoo_writer_architecture.py`; not a live network/ACL test |
 | Generated TypeScript API types/client compilation | PASS | Pinned openapi-typescript generation and TypeScript compiler in contract CI |
@@ -53,6 +54,8 @@ not installation or activation of other Codestra repositories.
 
 New APIs:
 
+- `GET /v1/usage/daily?from=&to=&unit=&limit=&cursor=`
+- `GET /v1/usage/monthly?from=&to=&unit=&limit=&cursor=`
 - `GET /v1/templates/{template_id}/versions?limit=&cursor=`
 - `GET /v1/templates/{template_id}/versions/{version_id}`
 
