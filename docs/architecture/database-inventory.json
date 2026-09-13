@@ -452,6 +452,7 @@
   },
   {
     "columns": [
+      "trace_context_json",
       "id",
       "tenant_id",
       "message_id",

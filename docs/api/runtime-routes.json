@@ -805,6 +805,12 @@
   },
   {
     "documented": true,
+    "handler": "members",
+    "method": "GET",
+    "path": "/v1/members"
+  },
+  {
+    "documented": true,
     "handler": "messages",
     "method": "GET",
     "path": "/v1/messages"
@@ -844,6 +850,12 @@
     "handler": "operation_events",
     "method": "GET",
     "path": "/v1/operations/{operation_id}/events"
+  },
+  {
+    "documented": true,
+    "handler": "organization",
+    "method": "GET",
+    "path": "/v1/organization"
   },
   {
     "documented": true,
@@ -1048,6 +1060,18 @@
     "handler": "usage",
     "method": "GET",
     "path": "/v1/usage"
+  },
+  {
+    "documented": true,
+    "handler": "daily_usage",
+    "method": "GET",
+    "path": "/v1/usage/daily"
+  },
+  {
+    "documented": true,
+    "handler": "monthly_usage",
+    "method": "GET",
+    "path": "/v1/usage/monthly"
   },
   {
     "documented": true,
