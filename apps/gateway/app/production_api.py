@@ -7,6 +7,8 @@ integration outbox; this module never performs a browser-request provider call.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -14,11 +16,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import Boolean, DateTime, String, Text, UniqueConstraint, func, select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .billing import BillingPlan, BillingPrice, BillingSubscription, Wallet
@@ -70,6 +72,82 @@ class ContactList(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class TemplateVersionView(BaseModel):
+    id: str
+    template_id: str
+    version: int
+    subject: str
+    html_body: str
+    text_body: str
+    variables: list[str]
+    created_at: datetime
+
+
+class TemplateVersionPage(BaseModel):
+    items: list[TemplateVersionView]
+    next_cursor: str | None
+
+
+def _version_view(item: TemplateVersion) -> TemplateVersionView:
+    created_at = item.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    return TemplateVersionView(
+        id=item.id, template_id=item.template_id, version=item.version,
+        subject=item.subject, html_body=item.html_body, text_body=item.text_body,
+        variables=json.loads(item.variables_json), created_at=created_at.astimezone(timezone.utc),
+    )
+
+
+def _owned_template(session: Session, tenant: str, template_id: str) -> None:
+    if session.scalar(select(Template.id).where(Template.id == template_id, Template.tenant_id == tenant)) is None:
+        raise HTTPException(404, "template_not_found")
+
+
+@router.get("/v1/templates/{template_id}/versions", response_model=TemplateVersionPage,
+            responses={401: {"description": "Authentication required"}, 404: {"description": "Template not found"}, 422: {"description": "Invalid cursor or limit"}})
+def template_versions(
+    template_id: str,
+    limit: int = Query(default=50, ge=1, le=100),
+    cursor: str | None = Query(default=None, max_length=64),
+    ctx: dict = Depends(auth),
+    s: Session = Depends(db),
+) -> TemplateVersionPage:
+    _owned_template(s, ctx["tenant"], template_id)
+    query = select(TemplateVersion).where(
+        TemplateVersion.tenant_id == ctx["tenant"], TemplateVersion.template_id == template_id,
+    )
+    if cursor is not None:
+        try:
+            raw = base64.b64decode(cursor, altchars=b"-_", validate=True).decode("ascii")
+            if not raw.isascii() or not raw.isdecimal() or len(raw) > 10 or int(raw) < 1:
+                raise ValueError("invalid version cursor")
+        except (ValueError, UnicodeError, binascii.Error) as exc:
+            raise HTTPException(422, "invalid_cursor") from exc
+        query = query.where(TemplateVersion.version < int(raw))
+    items = s.scalars(query.order_by(TemplateVersion.version.desc()).limit(limit + 1)).all()
+    page = items[:limit]
+    next_cursor = None
+    if len(items) > limit:
+        next_cursor = base64.urlsafe_b64encode(str(page[-1].version).encode("ascii")).decode("ascii")
+    return TemplateVersionPage(items=[_version_view(item) for item in page], next_cursor=next_cursor)
+
+
+@router.get("/v1/templates/{template_id}/versions/{version_id}", response_model=TemplateVersionView,
+            responses={401: {"description": "Authentication required"}, 404: {"description": "Template version not found"}})
+def template_version(
+    template_id: str, version_id: str, ctx: dict = Depends(auth), s: Session = Depends(db),
+) -> TemplateVersionView:
+    _owned_template(s, ctx["tenant"], template_id)
+    item = s.scalar(select(TemplateVersion).where(
+        TemplateVersion.id == version_id, TemplateVersion.template_id == template_id,
+        TemplateVersion.tenant_id == ctx["tenant"],
+    ))
+    if item is None:
+        raise HTTPException(404, "template_version_not_found")
+    return _version_view(item)
 
 
 class MemberIn(BaseModel):
@@ -409,9 +487,14 @@ def health_live() -> dict[str, str]:
     return {"status": "live"}
 
 
-@router.get("/health/ready")
+@router.get("/health/ready", responses={503: {"description": "Application database unavailable"}})
 def health_ready(s: Session = Depends(db)) -> dict[str, str]:
-    s.execute(text("SELECT 1"))
+    try:
+        s.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        # Report admission readiness without exposing SQL, connection strings,
+        # credentials or dependency exception text to the public health route.
+        raise HTTPException(503, "database_unavailable") from exc
     return {"status": "ready", "database": "ok"}
 
 

@@ -41,3 +41,12 @@ Enabling the runtime profile is a separate operator action and is not part of
 this repository change. Provider credential release, Odoo system parameters,
 server environment changes, mail-server unarchiving, and end-to-end delivery
 read-back remain required operational gates.
+
+## Validation ownership
+
+Klyrow tests read its checked-in
+`codestra/integration/middleware-command-contract.v1.json` and verify disabled
+email controls. Odoo event names, the upstream durable handoff, and activation
+payload serialization require tests in their owning Odoo/Middleware repositories.
+The document specifies that upstream contract; local fixtures are not evidence
+that upstream serialization excludes credentials or that an event was delivered.
