@@ -7,6 +7,7 @@ from .delivery_safety import email_activation_status, safe_mode_enabled
 from .durable_results import read_control_response, seal_control_response
 from .durable_keys import keyring_ready
 from .capabilities import has_service_permission, mutation_permission
+from .telemetry import TraceMiddleware, configure_tracing, stored_carrier, trace_carrier, traced
 from typing import Optional
 
 import httpx, jwt
@@ -74,6 +75,8 @@ engine=create_engine(DATABASE_URL, pool_pre_ping=True)
 DB=sessionmaker(engine, expire_on_commit=False)
 ph=PasswordHasher()
 app=FastAPI(title="Klyrow API", version="1.0.0", docs_url=None if os.getenv("KLYROW_ENV")=="production" else "/docs")
+app.add_middleware(TraceMiddleware)
+app.on_event("startup")(configure_tracing)
 AUTH_WEB_DIST=Path(__file__).with_name("auth_web")
 if not AUTH_WEB_DIST.exists():
     AUTH_WEB_DIST=Path(__file__).parents[2]/"web"/"dist"
@@ -161,6 +164,7 @@ class Campaign(Base):
 class Idempotency(Base):
     __tablename__="idempotency_keys"; id:Mapped[str]=mapped_column(String,primary_key=True,default=lambda:str(uuid.uuid4())); key:Mapped[str]=mapped_column(String); tenant_id:Mapped[str]=mapped_column(String,index=True); request_hash:Mapped[str]=mapped_column(String); resource_id:Mapped[str]=mapped_column(String); response_json:Mapped[str]=mapped_column(Text); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); __table_args__=(UniqueConstraint("tenant_id","key",name="uq_idempotency_tenant_key"),)
 class EmailOutbox(Base):
+    trace_context_json:Mapped[str]=mapped_column(Text,default=lambda:json.dumps(trace_carrier()),server_default="{}")
     __tablename__="email_outbox"; id:Mapped[str]=mapped_column(String,primary_key=True); tenant_id:Mapped[str]=mapped_column(String,index=True); message_id:Mapped[str]=mapped_column(String,unique=True,index=True); operation_id:Mapped[Optional[str]]=mapped_column(String,nullable=True,index=True); correlation_id:Mapped[Optional[str]]=mapped_column(String,nullable=True,index=True); payload:Mapped[str]=mapped_column(Text); priority:Mapped[int]=mapped_column(Integer,default=20,index=True); state:Mapped[str]=mapped_column(String,default="pending",index=True); attempts:Mapped[int]=mapped_column(Integer,default=0); provider_message_id:Mapped[Optional[str]]=mapped_column(String,nullable=True); last_error:Mapped[Optional[str]]=mapped_column(String,nullable=True); next_attempt_at:Mapped[Optional[datetime]]=mapped_column(DateTime(timezone=True),nullable=True); created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc)); updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc))
 class MiddlewareCommandOperation(Base):
     __tablename__="middleware_command_operations";command_id:Mapped[str]=mapped_column(String,primary_key=True);tenant_id:Mapped[str]=mapped_column(String,index=True);command:Mapped[str]=mapped_column(String,index=True);idempotency_key:Mapped[str]=mapped_column(String,index=True);correlation_id:Mapped[str]=mapped_column(String,index=True);state:Mapped[str]=mapped_column(String,default="accepted",index=True);request_hash:Mapped[str]=mapped_column(String);request_json:Mapped[str]=mapped_column(Text,default="{}");result_json:Mapped[str]=mapped_column(Text,default="{}");error:Mapped[Optional[str]]=mapped_column(String,nullable=True);created_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc));updated_at:Mapped[datetime]=mapped_column(DateTime(timezone=True),default=lambda:datetime.now(timezone.utc));__table_args__=(UniqueConstraint("tenant_id","idempotency_key",name="uq_middleware_command_tenant_idempotency"),)
@@ -672,15 +676,17 @@ async def email_outbox_loop():
                 item.state="sending";item.attempts+=1;item.next_attempt_at=None;item.updated_at=current
                 message=s.get(Message,item.message_id)
                 if message:set_core_message_status(message,"submitted")
-                snapshot=(item.id,item.message_id,item.payload,item.operation_id,item.correlation_id,item.tenant_id);s.commit()
+                snapshot=(item.id,item.message_id,item.payload,item.operation_id,item.correlation_id,item.tenant_id,item.trace_context_json);s.commit()
             key_file=os.getenv("KLYROW_POSTAL_API_KEY_FILE","")
             key=Path(key_file).read_text(encoding="utf-8").strip() if key_file else ""
             if not key:raise RuntimeError("postal credential unavailable")
             headers={"X-Server-API-Key":key,"Idempotency-Key":"klyrow:"+snapshot[1]}
             postal_host=os.getenv("KLYROW_POSTAL_API_HOST_HEADER","").strip()
             if postal_host:headers["Host"]=postal_host
-            async with httpx.AsyncClient(timeout=10,trust_env=False,follow_redirects=False) as client:
-                response=await client.post(os.environ["KLYROW_POSTAL_API_URL"]+"/api/v1/send/message",headers=headers,json=json.loads(snapshot[2]));response.raise_for_status();provider_id=str(response.json().get("data",{}).get("message_id") or snapshot[1])
+            with traced("postal submit", stored_carrier(snapshot[6])):
+                headers.update(trace_carrier())
+                async with httpx.AsyncClient(timeout=10,trust_env=False,follow_redirects=False) as client:
+                    response=await client.post(os.environ["KLYROW_POSTAL_API_URL"]+"/api/v1/send/message",headers=headers,json=json.loads(snapshot[2]));response.raise_for_status();provider_id=str(response.json().get("data",{}).get("message_id") or snapshot[1])
             with DB() as s:
                 item=s.get(EmailOutbox,snapshot[0]);message=s.get(Message,snapshot[1])
                 if item:item.state="delivered";item.provider_message_id=provider_id;item.last_error=None;item.updated_at=datetime.now(timezone.utc)
@@ -717,11 +723,28 @@ async def start_postal_retry_worker():
 
 @app.middleware("http")
 async def headers(request, call_next):
-    started=time.monotonic();request_id=request.headers.get("X-Request-Id") or str(uuid.uuid4())
-    try: response=await call_next(request)
-    except Exception: REQUESTS.labels(request.url.path,"500").inc(); raise
-    response.headers.update({"X-Request-Id":request_id,"X-Content-Type-Options":"nosniff","X-Frame-Options":"DENY","Referrer-Policy":"no-referrer","Permissions-Policy":"camera=(), microphone=(), geolocation=()","Content-Security-Policy":"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"})
-    REQUESTS.labels(request.url.path,str(response.status_code)).inc();LATENCY.labels(request.url.path).observe(time.monotonic()-started); return response
+    started=time.monotonic()
+    def identifier(value):
+        return value if value and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) else str(uuid.uuid4())
+    request_id=identifier(request.headers.get("X-Request-Id"))
+    correlation_id=identifier(request.headers.get("X-Correlation-Id"))
+    request.state.request_id=request_id
+    request.state.correlation_id=correlation_id
+    status="500"
+    try:
+        response=await call_next(request)
+        status=str(response.status_code)
+        response.headers.update({"X-Request-Id":request_id,"X-Correlation-Id":correlation_id,"X-Content-Type-Options":"nosniff","X-Frame-Options":"DENY","Referrer-Policy":"no-referrer","Permissions-Policy":"camera=(), microphone=(), geolocation=()","Content-Security-Policy":"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"})
+        return response
+    finally:
+        # Registered route templates bound cardinality and exclude identifiers.
+        # A metrics client failure must never turn accepted mail into HTTP 500.
+        route=getattr(request.scope.get("route"),"path","unmatched")
+        try:
+            REQUESTS.labels(route,status).inc()
+            LATENCY.labels(route).observe(time.monotonic()-started)
+        except Exception:
+            pass
 
 @app.get("/v1/health")
 def health(s:Session=Depends(db)):
@@ -910,6 +933,15 @@ def queue_email_lifecycle_event(s:Session, *, kind:str, tenant_id:str, message_i
     payload["payload_hash"]=hashlib.sha256(json.dumps(payload,separators=(",",":"),sort_keys=True).encode()).hexdigest()
     s.add(ProviderEvent(id=event_id,tenant_id=tenant_id,message_id=message_id,kind=kind,
         payload_json=json.dumps(payload,separators=(",",":"),sort_keys=True)))
+    if os.getenv("KLYROW_BUSINESS_EVENTS_ENABLED", "false").lower() == "true":
+        from .business_events import EventEnvelope, KLYROW_EVENTS, enqueue_event
+        event_type = "klyrow." + kind
+        if event_type in KLYROW_EVENTS:
+            enqueue_event(s, EventEnvelope(
+                id=event_id, type=event_type, source="klyrow", tenant_id=tenant_id,
+                correlation_id=correlation_id, causation_id=operation_id,
+                occurred_at=occurred_at, data={"message_id": message_id},
+            ))
     return event_id
 
 

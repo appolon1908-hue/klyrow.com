@@ -2,23 +2,60 @@ name: Codestra deploy readiness
 
 on:
   pull_request:
-    branches: ["**"]
+    branches:
+      - "**"
   push:
-    branches: ["**"]
+    branches:
+      - "**"
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Verify, release, stage/certify read-only, or promote a read-only canary
+        required: true
+        type: choice
+        default: verify
+        options:
+          - verify
+          - release
+          - deploy-staging-readonly
+          - certify-staging-readonly
+          - promote-production-readonly
+      confirmation:
+        description: Fixed confirmation required for deployment operations
+        required: false
+        type: string
+        default: ""
+      canary_percent:
+        description: Read-only canary percentage; maximum 1
+        required: false
+        type: string
+        default: "1"
 
-# klyrow.com is public and cannot call the private infrastructure repository's
-# reusable workflow. Keep the repository-owned gate read-only; image release is
-# governed separately by the protected-main publish job in ci.yml.
 permissions:
-  contents: read
-
-concurrency:
-  group: klyrow-deploy-readiness-${{ github.ref }}
-  cancel-in-progress: false
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
 
 jobs:
+  deploy-readiness:
+    uses: ./.github/workflows/reusable-codestra-deploy-readiness.yml
+    with:
+      repository_class: application
+      run_stack_tests: false
+      # The canonical release workflow publishes the gateway, web, migration,
+      # and provisioner images independently. A generic single-Dockerfile
+      # image is not a deployable representation of this monorepo.
+      artifact_strategy: source-bundle
+      runtime_deployable: true
+      health_paths: "/healthz,/readyz,/version"
+      operation: ${{ github.event_name == 'workflow_dispatch' && inputs.operation || 'verify' }}
+      confirmation: ${{ github.event_name == 'workflow_dispatch' && inputs.confirmation || '' }}
+      canary_percent: ${{ github.event_name == 'workflow_dispatch' && inputs.canary_percent || '1' }}
+
   source-ci:
+    permissions:
+      contents: read
     name: deploy-readiness / source-ci
     runs-on: ubuntu-24.04
     timeout-minutes: 15
