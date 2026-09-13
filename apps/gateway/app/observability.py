@@ -124,6 +124,13 @@ class KpiSnapshotIn(BaseModel):
     labels: dict[str, str] = Field(default_factory=dict, max_length=40)
     status: str = Field(default="observed", max_length=20)
 
+    @field_validator("observed_at", "window_start", "window_end")
+    @classmethod
+    def timezone_required(cls, value: datetime | None) -> datetime | None:
+        if value is not None and (value.tzinfo is None or value.utcoffset() is None):
+            raise ValueError("observability_timestamp_requires_timezone")
+        return value
+
     @field_validator("query_ref")
     @classmethod
     def vetted_query_reference(cls, value: str) -> str:
@@ -210,6 +217,10 @@ def _payload_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
+def _semantic_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in payload.items() if key != "correlation_id"}
+
+
 def _enqueue_odoo(
     session: Session,
     context: dict[str, Any],
@@ -235,7 +246,7 @@ def _enqueue_odoo(
         )
     )
     if prior is not None:
-        if prior.payload_json != payload_json:
+        if _semantic_payload(json.loads(prior.payload_json)) != _semantic_payload(payload):
             raise HTTPException(409, "observability_idempotency_conflict")
         return prior, True
 
@@ -262,7 +273,7 @@ def _enqueue_odoo(
         )
         if prior is None:
             raise
-        if prior.payload_json != payload_json:
+        if _semantic_payload(json.loads(prior.payload_json)) != _semantic_payload(payload):
             raise HTTPException(409, "observability_idempotency_conflict")
         return prior, True
     return item, False
@@ -377,10 +388,10 @@ def receive_kpi_snapshot(
     }
 
 
-def _outbox_summary(session: Session) -> dict[str, Any]:
+def _outbox_summary(session: Session, tenant_id: str) -> dict[str, Any]:
     rows = session.execute(
         select(IntegrationOutbox.state, func.count())
-        .where(IntegrationOutbox.target == ODOO_TARGET)
+        .where(IntegrationOutbox.target == ODOO_TARGET, IntegrationOutbox.tenant_id == tenant_id)
         .group_by(IntegrationOutbox.state)
     ).all()
     counts = {str(state): int(count) for state, count in rows}
@@ -388,6 +399,7 @@ def _outbox_summary(session: Session) -> dict[str, Any]:
         select(IntegrationOutbox.created_at)
         .where(
             IntegrationOutbox.target == ODOO_TARGET,
+            IntegrationOutbox.tenant_id == tenant_id,
             IntegrationOutbox.state.in_(("PENDING", "PROCESSING", "RETRY")),
         )
         .order_by(IntegrationOutbox.created_at)
@@ -427,8 +439,7 @@ def odoo_health(
     ctx: dict[str, Any] = Depends(require_observability_read),
     session: Session = Depends(db),
 ) -> dict[str, Any]:
-    del ctx
-    summary = _outbox_summary(session)
+    summary = _outbox_summary(session, ctx["tenant"])
     dead_letters = summary["counts"].get("DEAD_LETTER", 0)
     configured = _transport_configured()
     status = "healthy" if configured and dead_letters == 0 else "degraded"
@@ -448,7 +459,6 @@ def odoo_checkpoints(
     ctx: dict[str, Any] = Depends(require_observability_read),
     session: Session = Depends(db),
 ) -> dict[str, Any]:
-    del ctx
     rows = session.execute(
         select(
             IntegrationOutbox.event_type,
@@ -456,7 +466,7 @@ def odoo_checkpoints(
             func.count(),
             func.max(IntegrationOutbox.updated_at),
         )
-        .where(IntegrationOutbox.target == ODOO_TARGET)
+        .where(IntegrationOutbox.target == ODOO_TARGET, IntegrationOutbox.tenant_id == ctx["tenant"])
         .group_by(IntegrationOutbox.event_type, IntegrationOutbox.state)
         .order_by(IntegrationOutbox.event_type, IntegrationOutbox.state)
     ).all()

@@ -78,6 +78,10 @@ def test_observability_routes_are_unique_and_openapi_classified() -> None:
 
     schema = app.openapi()
     reconcile = schema["paths"]["/v1/internal/integrations/odoo/reconcile"]["post"]
+    for method, path in expected:
+        operation = schema["paths"][path][method.lower()]
+        assert operation["security"] == [{"serviceBearer": []}]
+        assert operation["x-klyrow-auth-model"] == "DEDICATED_SERVICE_BEARER_ON_PRIVATE_ROUTE"
     assert reconcile["x-klyrow-audience"] == "INTERNAL"
     assert reconcile["x-idempotency-required"] is True
     assert "Idempotency-Key" in {
@@ -121,7 +125,7 @@ def test_alert_firing_and_resolved_events_are_durable_and_idempotent(isolated_se
         firing, SERVICE_CONTEXT, isolated_session, "correlation-1"
     )
     replay = observability.receive_alertmanager_events(
-        firing, SERVICE_CONTEXT, isolated_session, "correlation-1"
+        firing, SERVICE_CONTEXT, isolated_session, "correlation-retry"
     )
     assert first["accepted"] == 1
     assert first["duplicates"] == 0
@@ -182,3 +186,34 @@ def test_kpi_snapshot_accepts_only_vetted_recording_rules(isolated_session) -> N
                 "query_ref": "up{job=\"klyrow\"}",
             }
         )
+
+
+@pytest.mark.parametrize("field", ["observed_at", "window_start", "window_end"])
+def test_kpi_timestamps_require_explicit_timezone(field):
+    payload = {
+        "snapshot_id": "timezone-test-snapshot",
+        "kpi_key": "http_error_ratio",
+        "query_ref": "klyrow:http_errors:ratio5m",
+        "value": 0.01,
+        "observed_at": "2026-09-12T10:00:00Z",
+        "window_start": "2026-09-12T09:00:00Z",
+        "window_end": "2026-09-12T10:00:00Z",
+        "service": "gateway",
+        "environment": "test",
+    }
+    payload[field] = "2026-09-12T10:00:00"
+    with pytest.raises(ValueError, match="observability_timestamp_requires_timezone"):
+        observability.KpiSnapshotIn.model_validate(payload)
+
+
+def test_status_summaries_are_partitioned_by_tenant(isolated_session):
+    for tenant, state in (("tenant-a", "PENDING"), ("tenant-b", "DEAD_LETTER")):
+        isolated_session.add(IntegrationOutbox(
+            id=tenant, tenant_id=tenant, target="ODOO", event_type="TestEvent",
+            aggregate_id=tenant, payload_json="{}", idempotency_key=tenant, state=state,
+        ))
+    isolated_session.commit()
+    assert observability._outbox_summary(isolated_session, "tenant-a")["counts"] == {"PENDING": 1}
+    assert observability._outbox_summary(isolated_session, "empty")["counts"] == {}
+    checkpoints = observability.odoo_checkpoints(SERVICE_CONTEXT, isolated_session)
+    assert [(item["state"], item["count"]) for item in checkpoints["items"]] == [("PENDING", 1)]

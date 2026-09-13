@@ -1,0 +1,2318 @@
+[
+  {
+    "documented": true,
+    "handler": "revoke_access",
+    "method": "DELETE",
+    "path": "/app/api/mailboxes/{mailbox_id}/access/{user_id}"
+  },
+  {
+    "documented": true,
+    "handler": "delete_message",
+    "method": "DELETE",
+    "path": "/app/api/mailboxes/{mailbox_id}/messages/{message_id}"
+  },
+  {
+    "documented": true,
+    "handler": "revoke_user_session",
+    "method": "DELETE",
+    "path": "/auth/sessions/{session_id}"
+  },
+  {
+    "documented": true,
+    "handler": "revoke",
+    "method": "DELETE",
+    "path": "/v1/api-keys/{kid}"
+  },
+  {
+    "documented": true,
+    "handler": "session_revoke",
+    "method": "DELETE",
+    "path": "/v1/auth/sessions/{sid}"
+  },
+  {
+    "documented": true,
+    "handler": "contact_delete",
+    "method": "DELETE",
+    "path": "/v1/contacts/{contact_id}"
+  },
+  {
+    "documented": true,
+    "handler": "api_key_revoke",
+    "method": "DELETE",
+    "path": "/v1/developer/api-keys/{item_id}"
+  },
+  {
+    "documented": true,
+    "handler": "smtp_revoke",
+    "method": "DELETE",
+    "path": "/v1/developer/smtp-credentials/{item_id}"
+  },
+  {
+    "documented": true,
+    "handler": "domain_delete",
+    "method": "DELETE",
+    "path": "/v1/domains/{domain_id}"
+  },
+  {
+    "documented": true,
+    "handler": "list_delete",
+    "method": "DELETE",
+    "path": "/v1/lists/{list_id}"
+  },
+  {
+    "documented": true,
+    "handler": "remove_subaccount",
+    "method": "DELETE",
+    "path": "/v1/reseller/subaccounts/{item_id}"
+  },
+  {
+    "documented": true,
+    "handler": "service_revoke",
+    "method": "DELETE",
+    "path": "/v1/service-accounts/{item_id}"
+  },
+  {
+    "documented": true,
+    "handler": "suppression_delete",
+    "method": "DELETE",
+    "path": "/v1/suppressions/{suppression_id}"
+  },
+  {
+    "documented": true,
+    "handler": "remove_member",
+    "method": "DELETE",
+    "path": "/v1/team/members/{user_id}"
+  },
+  {
+    "documented": true,
+    "handler": "template_delete",
+    "method": "DELETE",
+    "path": "/v1/templates/{template_id}"
+  },
+  {
+    "documented": false,
+    "handler": "auth_home",
+    "method": "GET",
+    "path": "/"
+  },
+  {
+    "documented": false,
+    "handler": "auth_page",
+    "method": "GET",
+    "path": "/account-disabled"
+  },
+  {
+    "documented": false,
+    "handler": "platform_admin_ui",
+    "method": "GET",
+    "path": "/admin"
+  },
+  {
+    "documented": false,
+    "handler": "platform_admin_ui",
+    "method": "GET",
+    "path": "/admin/{path:path}"
+  },
+  {
+    "documented": false,
+    "handler": "product_app_ui",
+    "method": "GET",
+    "path": "/app"
+  },
+  {
+    "documented": true,
+    "handler": "platform_dashboard",
+    "method": "GET",
+    "path": "/app/api/admin/dashboard"
+  },
+  {
+    "documented": true,
+    "handler": "admin_provisioning",
+    "method": "GET",
+    "path": "/app/api/admin/provisioning/postal"
+  },
+  {
+    "documented": true,
+    "handler": "browser_platform_owner_status",
+    "method": "GET",
+    "path": "/app/api/admin/security/platform-owner"
+  },
+  {
+    "documented": true,
+    "handler": "context",
+    "method": "GET",
+    "path": "/app/api/context"
+  },
+  {
+    "documented": true,
+    "handler": "dashboard",
+    "method": "GET",
+    "path": "/app/api/dashboard"
+  },
+  {
+    "documented": true,
+    "handler": "browser_domains",
+    "method": "GET",
+    "path": "/app/api/domains"
+  },
+  {
+    "documented": true,
+    "handler": "list_mailboxes",
+    "method": "GET",
+    "path": "/app/api/mailboxes"
+  },
+  {
+    "documented": true,
+    "handler": "list_access",
+    "method": "GET",
+    "path": "/app/api/mailboxes/{mailbox_id}/access"
+  },
+  {
+    "documented": true,
+    "handler": "list_messages",
+    "method": "GET",
+    "path": "/app/api/mailboxes/{mailbox_id}/messages"
+  },
+  {
+    "documented": true,
+    "handler": "get_message",
+    "method": "GET",
+    "path": "/app/api/mailboxes/{mailbox_id}/messages/{message_id}"
+  },
+  {
+    "documented": true,
+    "handler": "get_attachment",
+    "method": "GET",
+    "path": "/app/api/mailboxes/{mailbox_id}/messages/{message_id}/attachments/{attachment_id}"
+  },
+  {
+    "documented": true,
+    "handler": "browser_messages",
+    "method": "GET",
+    "path": "/app/api/messages"
+  },
+  {
+    "documented": true,
+    "handler": "onboarding_get",
+    "method": "GET",
+    "path": "/app/api/onboarding"
+  },
+  {
+    "documented": true,
+    "handler": "provisioning_status",
+    "method": "GET",
+    "path": "/app/api/provisioning/postal"
+  },
+  {
+    "documented": true,
+    "handler": "browser_senders",
+    "method": "GET",
+    "path": "/app/api/senders"
+  },
+  {
+    "documented": true,
+    "handler": "browser_team",
+    "method": "GET",
+    "path": "/app/api/team"
+  },
+  {
+    "documented": false,
+    "handler": "product_app_ui",
+    "method": "GET",
+    "path": "/app/{path:path}"
+  },
+  {
+    "documented": false,
+    "handler": "admin_js",
+    "method": "GET",
+    "path": "/assets/admin.js"
+  },
+  {
+    "documented": false,
+    "handler": "portal_js",
+    "method": "GET",
+    "path": "/assets/portal.js"
+  },
+  {
+    "documented": true,
+    "handler": "oidc_callback",
+    "method": "GET",
+    "path": "/auth/callback"
+  },
+  {
+    "documented": true,
+    "handler": "google_start",
+    "method": "GET",
+    "path": "/auth/google"
+  },
+  {
+    "documented": true,
+    "handler": "login_start",
+    "method": "GET",
+    "path": "/auth/login"
+  },
+  {
+    "documented": true,
+    "handler": "session_status",
+    "method": "GET",
+    "path": "/auth/session"
+  },
+  {
+    "documented": true,
+    "handler": "list_user_sessions",
+    "method": "GET",
+    "path": "/auth/sessions"
+  },
+  {
+    "documented": true,
+    "handler": "signup_start",
+    "method": "GET",
+    "path": "/auth/signup"
+  },
+  {
+    "documented": false,
+    "handler": "platform_owner_step_up",
+    "method": "GET",
+    "path": "/auth/step-up"
+  },
+  {
+    "documented": true,
+    "handler": "capabilities",
+    "method": "GET",
+    "path": "/capabilities"
+  },
+  {
+    "documented": true,
+    "handler": "dependencies",
+    "method": "GET",
+    "path": "/dependencies"
+  },
+  {
+    "documented": false,
+    "handler": "auth_page",
+    "method": "GET",
+    "path": "/forgot-password"
+  },
+  {
+    "documented": true,
+    "handler": "health_alias",
+    "method": "GET",
+    "path": "/health"
+  },
+  {
+    "documented": true,
+    "handler": "health_live",
+    "method": "GET",
+    "path": "/health/live"
+  },
+  {
+    "documented": true,
+    "handler": "health_ready",
+    "method": "GET",
+    "path": "/health/ready"
+  },
+  {
+    "documented": true,
+    "handler": "healthz",
+    "method": "GET",
+    "path": "/healthz"
+  },
+  {
+    "documented": true,
+    "handler": "provider_healthz",
+    "method": "GET",
+    "path": "/healthz"
+  },
+  {
+    "documented": false,
+    "handler": "auth_page",
+    "method": "GET",
+    "path": "/invite"
+  },
+  {
+    "documented": false,
+    "handler": "auth_page",
+    "method": "GET",
+    "path": "/logged-out"
+  },
+  {
+    "documented": false,
+    "handler": "auth_page",
+    "method": "GET",
+    "path": "/login"
+  },
+  {
+    "documented": true,
+    "handler": "metrics",
+    "method": "GET",
+    "path": "/metrics"
+  },
+  {
+    "documented": false,
+    "handler": "product_app_ui",
+    "method": "GET",
+    "path": "/onboarding"
+  },
+  {
+    "documented": false,
+    "handler": "portal",
+    "method": "GET",
+    "path": "/portal"
+  },
+  {
+    "documented": true,
+    "handler": "readiness_alias",
+    "method": "GET",
+    "path": "/readiness"
+  },
+  {
+    "documented": true,
+    "handler": "provider_readyz",
+    "method": "GET",
+    "path": "/readyz"
+  },
+  {
+    "documented": true,
+    "handler": "readyz",
+    "method": "GET",
+    "path": "/readyz"
+  },
+  {
+    "documented": false,
+    "handler": "auth_page",
+    "method": "GET",
+    "path": "/reset-expired"
+  },
+  {
+    "documented": false,
+    "handler": "auth_page",
+    "method": "GET",
+    "path": "/reset-password"
+  },
+  {
+    "documented": false,
+    "handler": "auth_page",
+    "method": "GET",
+    "path": "/reset-sent"
+  },
+  {
+    "documented": false,
+    "handler": "auth_page",
+    "method": "GET",
+    "path": "/reset-success"
+  },
+  {
+    "documented": false,
+    "handler": "auth_page",
+    "method": "GET",
+    "path": "/service-error"
+  },
+  {
+    "documented": false,
+    "handler": "auth_page",
+    "method": "GET",
+    "path": "/signup"
+  },
+  {
+    "documented": true,
+    "handler": "consume_tracking_token",
+    "method": "GET",
+    "path": "/t/{kind}/{token}"
+  },
+  {
+    "documented": true,
+    "handler": "delivery_activation",
+    "method": "GET",
+    "path": "/v1/admin/delivery/activation"
+  },
+  {
+    "documented": true,
+    "handler": "admin_operations",
+    "method": "GET",
+    "path": "/v1/admin/operations"
+  },
+  {
+    "documented": true,
+    "handler": "platform_owner_status",
+    "method": "GET",
+    "path": "/v1/admin/security/platform-owner"
+  },
+  {
+    "documented": true,
+    "handler": "admin_tenants",
+    "method": "GET",
+    "path": "/v1/admin/tenants"
+  },
+  {
+    "documented": true,
+    "handler": "list_mailboxes",
+    "method": "GET",
+    "path": "/v1/agent-mailboxes"
+  },
+  {
+    "documented": true,
+    "handler": "analytics",
+    "method": "GET",
+    "path": "/v1/analytics/overview"
+  },
+  {
+    "documented": true,
+    "handler": "audits",
+    "method": "GET",
+    "path": "/v1/audit"
+  },
+  {
+    "documented": true,
+    "handler": "oidc_config",
+    "method": "GET",
+    "path": "/v1/auth/oidc/config"
+  },
+  {
+    "documented": true,
+    "handler": "sessions",
+    "method": "GET",
+    "path": "/v1/auth/sessions"
+  },
+  {
+    "documented": true,
+    "handler": "billing_account",
+    "method": "GET",
+    "path": "/v1/billing/account"
+  },
+  {
+    "documented": true,
+    "handler": "billing_credits",
+    "method": "GET",
+    "path": "/v1/billing/credits"
+  },
+  {
+    "documented": true,
+    "handler": "billing_invoices",
+    "method": "GET",
+    "path": "/v1/billing/invoices"
+  },
+  {
+    "documented": true,
+    "handler": "billing_invoice",
+    "method": "GET",
+    "path": "/v1/billing/invoices/{invoice_id}"
+  },
+  {
+    "documented": true,
+    "handler": "billing_plan",
+    "method": "GET",
+    "path": "/v1/billing/plan"
+  },
+  {
+    "documented": true,
+    "handler": "billing_plans",
+    "method": "GET",
+    "path": "/v1/billing/plans"
+  },
+  {
+    "documented": true,
+    "handler": "billing_portal",
+    "method": "GET",
+    "path": "/v1/billing/portal"
+  },
+  {
+    "documented": true,
+    "handler": "billing_quota",
+    "method": "GET",
+    "path": "/v1/billing/quota"
+  },
+  {
+    "documented": true,
+    "handler": "reconcile",
+    "method": "GET",
+    "path": "/v1/billing/reconciliation"
+  },
+  {
+    "documented": true,
+    "handler": "billing_subscription",
+    "method": "GET",
+    "path": "/v1/billing/subscription"
+  },
+  {
+    "documented": true,
+    "handler": "billing_usage",
+    "method": "GET",
+    "path": "/v1/billing/usage"
+  },
+  {
+    "documented": true,
+    "handler": "bounces",
+    "method": "GET",
+    "path": "/v1/bounces"
+  },
+  {
+    "documented": true,
+    "handler": "campaign_definitions",
+    "method": "GET",
+    "path": "/v1/campaign-definitions"
+  },
+  {
+    "documented": true,
+    "handler": "campaigns",
+    "method": "GET",
+    "path": "/v1/campaigns"
+  },
+  {
+    "documented": true,
+    "handler": "campaign_get",
+    "method": "GET",
+    "path": "/v1/campaigns/{cid}"
+  },
+  {
+    "documented": true,
+    "handler": "complaints",
+    "method": "GET",
+    "path": "/v1/complaints"
+  },
+  {
+    "documented": true,
+    "handler": "contacts",
+    "method": "GET",
+    "path": "/v1/contacts"
+  },
+  {
+    "documented": true,
+    "handler": "contact_detail",
+    "method": "GET",
+    "path": "/v1/contacts/{contact_id}"
+  },
+  {
+    "documented": true,
+    "handler": "profile_deletions",
+    "method": "GET",
+    "path": "/v1/customer-data/deletions"
+  },
+  {
+    "documented": true,
+    "handler": "customer_data_retention",
+    "method": "GET",
+    "path": "/v1/customer-data/retention"
+  },
+  {
+    "documented": true,
+    "handler": "deliverability_all",
+    "method": "GET",
+    "path": "/v1/deliverability"
+  },
+  {
+    "documented": true,
+    "handler": "api_keys",
+    "method": "GET",
+    "path": "/v1/developer/api-keys"
+  },
+  {
+    "documented": true,
+    "handler": "developer_openapi",
+    "method": "GET",
+    "path": "/v1/developer/openapi.json"
+  },
+  {
+    "documented": true,
+    "handler": "smtp_credentials",
+    "method": "GET",
+    "path": "/v1/developer/smtp-credentials"
+  },
+  {
+    "documented": true,
+    "handler": "domains",
+    "method": "GET",
+    "path": "/v1/domains"
+  },
+  {
+    "documented": true,
+    "handler": "domain_claims",
+    "method": "GET",
+    "path": "/v1/domains/claims"
+  },
+  {
+    "documented": true,
+    "handler": "domain_detail",
+    "method": "GET",
+    "path": "/v1/domains/{domain_id}"
+  },
+  {
+    "documented": true,
+    "handler": "domain_dns",
+    "method": "GET",
+    "path": "/v1/domains/{domain_id}/dns"
+  },
+  {
+    "documented": true,
+    "handler": "domain_verification",
+    "method": "GET",
+    "path": "/v1/domains/{domain_id}/verification"
+  },
+  {
+    "documented": true,
+    "handler": "readback",
+    "method": "GET",
+    "path": "/v1/email/messages/{command_id}"
+  },
+  {
+    "documented": true,
+    "handler": "message",
+    "method": "GET",
+    "path": "/v1/email/{mid}"
+  },
+  {
+    "documented": true,
+    "handler": "events",
+    "method": "GET",
+    "path": "/v1/email/{mid}/events"
+  },
+  {
+    "documented": true,
+    "handler": "experiment_results",
+    "method": "GET",
+    "path": "/v1/experiments/{eid}/results"
+  },
+  {
+    "documented": true,
+    "handler": "health",
+    "method": "GET",
+    "path": "/v1/health"
+  },
+  {
+    "documented": true,
+    "handler": "inbound_messages",
+    "method": "GET",
+    "path": "/v1/inbound/messages"
+  },
+  {
+    "documented": true,
+    "handler": "inbound_routes",
+    "method": "GET",
+    "path": "/v1/inbound/routes"
+  },
+  {
+    "documented": true,
+    "handler": "mautic_operations",
+    "method": "GET",
+    "path": "/v1/integrations/mautic/operations"
+  },
+  {
+    "documented": true,
+    "handler": "mautic_operation",
+    "method": "GET",
+    "path": "/v1/integrations/mautic/operations/{operation_id}"
+  },
+  {
+    "documented": true,
+    "handler": "canonical_domains",
+    "method": "GET",
+    "path": "/v1/internal/email/communications/domains"
+  },
+  {
+    "documented": true,
+    "handler": "canonical_message_get",
+    "method": "GET",
+    "path": "/v1/internal/email/communications/messages/{messageId}"
+  },
+  {
+    "documented": true,
+    "handler": "canonical_message_events",
+    "method": "GET",
+    "path": "/v1/internal/email/communications/messages/{messageId}/events"
+  },
+  {
+    "documented": true,
+    "handler": "canonical_provider_health",
+    "method": "GET",
+    "path": "/v1/internal/email/communications/provider-health"
+  },
+  {
+    "documented": true,
+    "handler": "canonical_reputation",
+    "method": "GET",
+    "path": "/v1/internal/email/communications/reputation"
+  },
+  {
+    "documented": true,
+    "handler": "message_get",
+    "method": "GET",
+    "path": "/v1/internal/email/messages/{message_id}"
+  },
+  {
+    "documented": true,
+    "handler": "operations_health",
+    "method": "GET",
+    "path": "/v1/internal/email/operations/health"
+  },
+  {
+    "documented": true,
+    "handler": "reputation_metrics",
+    "method": "GET",
+    "path": "/v1/internal/email/reputation"
+  },
+  {
+    "documented": true,
+    "handler": "observability_contract",
+    "method": "GET",
+    "path": "/v1/internal/integrations/observability/contract"
+  },
+  {
+    "documented": true,
+    "handler": "odoo_checkpoints",
+    "method": "GET",
+    "path": "/v1/internal/integrations/odoo/checkpoints"
+  },
+  {
+    "documented": true,
+    "handler": "odoo_health",
+    "method": "GET",
+    "path": "/v1/internal/integrations/odoo/health"
+  },
+  {
+    "documented": true,
+    "handler": "get_sender_identity",
+    "method": "GET",
+    "path": "/v1/internal/sender-identities/{item_id}"
+  },
+  {
+    "documented": true,
+    "handler": "journey_runs",
+    "method": "GET",
+    "path": "/v1/journeys/{jid}/runs"
+  },
+  {
+    "documented": true,
+    "handler": "billing_usage",
+    "method": "GET",
+    "path": "/v1/legacy/billing/usage"
+  },
+  {
+    "documented": true,
+    "handler": "lists",
+    "method": "GET",
+    "path": "/v1/lists"
+  },
+  {
+    "documented": true,
+    "handler": "list_detail",
+    "method": "GET",
+    "path": "/v1/lists/{list_id}"
+  },
+  {
+    "documented": true,
+    "handler": "me",
+    "method": "GET",
+    "path": "/v1/me"
+  },
+  {
+    "documented": true,
+    "handler": "my_capabilities",
+    "method": "GET",
+    "path": "/v1/me/capabilities"
+  },
+  {
+    "documented": true,
+    "handler": "my_permissions",
+    "method": "GET",
+    "path": "/v1/me/permissions"
+  },
+  {
+    "documented": true,
+    "handler": "my_sessions",
+    "method": "GET",
+    "path": "/v1/me/sessions"
+  },
+  {
+    "documented": true,
+    "handler": "messages",
+    "method": "GET",
+    "path": "/v1/messages"
+  },
+  {
+    "documented": true,
+    "handler": "message_alias",
+    "method": "GET",
+    "path": "/v1/messages/{mid}"
+  },
+  {
+    "documented": true,
+    "handler": "onboarding_get",
+    "method": "GET",
+    "path": "/v1/onboarding"
+  },
+  {
+    "documented": true,
+    "handler": "operations",
+    "method": "GET",
+    "path": "/v1/operations"
+  },
+  {
+    "documented": true,
+    "handler": "middleware_operation",
+    "method": "GET",
+    "path": "/v1/operations/{command_id}"
+  },
+  {
+    "documented": true,
+    "handler": "operation_attempts",
+    "method": "GET",
+    "path": "/v1/operations/{operation_id}/attempts"
+  },
+  {
+    "documented": true,
+    "handler": "operation_events",
+    "method": "GET",
+    "path": "/v1/operations/{operation_id}/events"
+  },
+  {
+    "documented": true,
+    "handler": "organizations",
+    "method": "GET",
+    "path": "/v1/organizations"
+  },
+  {
+    "documented": true,
+    "handler": "organization_detail",
+    "method": "GET",
+    "path": "/v1/organizations/{organization_id}"
+  },
+  {
+    "documented": true,
+    "handler": "organization_members",
+    "method": "GET",
+    "path": "/v1/organizations/{organization_id}/members"
+  },
+  {
+    "documented": true,
+    "handler": "profile_exports",
+    "method": "GET",
+    "path": "/v1/profile-exports"
+  },
+  {
+    "documented": true,
+    "handler": "profile_export_get",
+    "method": "GET",
+    "path": "/v1/profile-exports/{job_id}"
+  },
+  {
+    "documented": true,
+    "handler": "profile_imports",
+    "method": "GET",
+    "path": "/v1/profile-imports"
+  },
+  {
+    "documented": true,
+    "handler": "profile_import_get",
+    "method": "GET",
+    "path": "/v1/profile-imports/{job_id}"
+  },
+  {
+    "documented": true,
+    "handler": "profile_list",
+    "method": "GET",
+    "path": "/v1/profiles"
+  },
+  {
+    "documented": true,
+    "handler": "profile_lookup",
+    "method": "GET",
+    "path": "/v1/profiles/lookup"
+  },
+  {
+    "documented": true,
+    "handler": "profile_get",
+    "method": "GET",
+    "path": "/v1/profiles/{pid}"
+  },
+  {
+    "documented": true,
+    "handler": "preferences",
+    "method": "GET",
+    "path": "/v1/profiles/{pid}/preferences"
+  },
+  {
+    "documented": true,
+    "handler": "timeline",
+    "method": "GET",
+    "path": "/v1/profiles/{pid}/timeline"
+  },
+  {
+    "documented": true,
+    "handler": "postal_health",
+    "method": "GET",
+    "path": "/v1/providers/postal/health"
+  },
+  {
+    "documented": true,
+    "handler": "postal_status",
+    "method": "GET",
+    "path": "/v1/providers/postal/status"
+  },
+  {
+    "documented": true,
+    "handler": "list_subaccounts",
+    "method": "GET",
+    "path": "/v1/reseller/subaccounts"
+  },
+  {
+    "documented": true,
+    "handler": "segment_preview",
+    "method": "GET",
+    "path": "/v1/segments/{sid}/preview"
+  },
+  {
+    "documented": true,
+    "handler": "senders",
+    "method": "GET",
+    "path": "/v1/senders"
+  },
+  {
+    "documented": true,
+    "handler": "service_accounts",
+    "method": "GET",
+    "path": "/v1/service-accounts"
+  },
+  {
+    "documented": true,
+    "handler": "send_gate",
+    "method": "GET",
+    "path": "/v1/settings/send-gate"
+  },
+  {
+    "documented": true,
+    "handler": "streams",
+    "method": "GET",
+    "path": "/v1/streams"
+  },
+  {
+    "documented": true,
+    "handler": "support_list",
+    "method": "GET",
+    "path": "/v1/support/tickets"
+  },
+  {
+    "documented": true,
+    "handler": "suppressions",
+    "method": "GET",
+    "path": "/v1/suppressions"
+  },
+  {
+    "documented": true,
+    "handler": "system_capabilities",
+    "method": "GET",
+    "path": "/v1/system/capabilities"
+  },
+  {
+    "documented": true,
+    "handler": "system_readiness",
+    "method": "GET",
+    "path": "/v1/system/readiness"
+  },
+  {
+    "documented": true,
+    "handler": "team_invitations",
+    "method": "GET",
+    "path": "/v1/team/invitations"
+  },
+  {
+    "documented": true,
+    "handler": "team_members",
+    "method": "GET",
+    "path": "/v1/team/members"
+  },
+  {
+    "documented": true,
+    "handler": "templates",
+    "method": "GET",
+    "path": "/v1/templates"
+  },
+  {
+    "documented": true,
+    "handler": "template_detail",
+    "method": "GET",
+    "path": "/v1/templates/{template_id}"
+  },
+  {
+    "documented": true,
+    "handler": "template_versions",
+    "method": "GET",
+    "path": "/v1/templates/{template_id}/versions"
+  },
+  {
+    "documented": true,
+    "handler": "template_version",
+    "method": "GET",
+    "path": "/v1/templates/{template_id}/versions/{version_id}"
+  },
+  {
+    "documented": true,
+    "handler": "tracking_events",
+    "method": "GET",
+    "path": "/v1/tracking/events"
+  },
+  {
+    "documented": true,
+    "handler": "tracking_event_detail",
+    "method": "GET",
+    "path": "/v1/tracking/events/{event_id}"
+  },
+  {
+    "documented": true,
+    "handler": "tracking_message",
+    "method": "GET",
+    "path": "/v1/tracking/messages/{message_id}"
+  },
+  {
+    "documented": true,
+    "handler": "usage",
+    "method": "GET",
+    "path": "/v1/usage"
+  },
+  {
+    "documented": true,
+    "handler": "webhook_subscriptions",
+    "method": "GET",
+    "path": "/v1/webhook-subscriptions"
+  },
+  {
+    "documented": false,
+    "handler": "auth_page",
+    "method": "GET",
+    "path": "/verification-expired"
+  },
+  {
+    "documented": false,
+    "handler": "auth_page",
+    "method": "GET",
+    "path": "/verification-success"
+  },
+  {
+    "documented": false,
+    "handler": "auth_page",
+    "method": "GET",
+    "path": "/verify-email"
+  },
+  {
+    "documented": true,
+    "handler": "provider_version",
+    "method": "GET",
+    "path": "/version"
+  },
+  {
+    "documented": true,
+    "handler": "version",
+    "method": "GET",
+    "path": "/version"
+  },
+  {
+    "documented": true,
+    "handler": "update_message",
+    "method": "PATCH",
+    "path": "/app/api/mailboxes/{mailbox_id}/messages/{message_id}"
+  },
+  {
+    "documented": true,
+    "handler": "onboarding_update",
+    "method": "PATCH",
+    "path": "/app/api/onboarding"
+  },
+  {
+    "documented": true,
+    "handler": "campaign_patch",
+    "method": "PATCH",
+    "path": "/v1/campaigns/{campaign_id}"
+  },
+  {
+    "documented": true,
+    "handler": "contact_patch",
+    "method": "PATCH",
+    "path": "/v1/contacts/{contact_id}"
+  },
+  {
+    "documented": true,
+    "handler": "domain_patch",
+    "method": "PATCH",
+    "path": "/v1/domains/{domain_id}"
+  },
+  {
+    "documented": true,
+    "handler": "list_patch",
+    "method": "PATCH",
+    "path": "/v1/lists/{list_id}"
+  },
+  {
+    "documented": true,
+    "handler": "organization_member_patch",
+    "method": "PATCH",
+    "path": "/v1/organizations/{organization_id}/members/{member_id}"
+  },
+  {
+    "documented": true,
+    "handler": "role_change",
+    "method": "PATCH",
+    "path": "/v1/team/members/{user_id}"
+  },
+  {
+    "documented": true,
+    "handler": "template_patch",
+    "method": "PATCH",
+    "path": "/v1/templates/{template_id}"
+  },
+  {
+    "documented": true,
+    "handler": "admin_retry_provisioning",
+    "method": "POST",
+    "path": "/app/api/admin/provisioning/postal/{tenant_id}/retry"
+  },
+  {
+    "documented": true,
+    "handler": "browser_domain_create",
+    "method": "POST",
+    "path": "/app/api/domains"
+  },
+  {
+    "documented": true,
+    "handler": "browser_domain_verify",
+    "method": "POST",
+    "path": "/app/api/domains/{item_id}/verify"
+  },
+  {
+    "documented": true,
+    "handler": "browser_send",
+    "method": "POST",
+    "path": "/app/api/email/send"
+  },
+  {
+    "documented": true,
+    "handler": "activate_inbound_mailboxes",
+    "method": "POST",
+    "path": "/app/api/mailboxes/inbound/activate"
+  },
+  {
+    "documented": true,
+    "handler": "sync_mailboxes",
+    "method": "POST",
+    "path": "/app/api/mailboxes/sync"
+  },
+  {
+    "documented": true,
+    "handler": "grant_access",
+    "method": "POST",
+    "path": "/app/api/mailboxes/{mailbox_id}/access"
+  },
+  {
+    "documented": true,
+    "handler": "create_draft",
+    "method": "POST",
+    "path": "/app/api/mailboxes/{mailbox_id}/drafts"
+  },
+  {
+    "documented": true,
+    "handler": "send_message",
+    "method": "POST",
+    "path": "/app/api/mailboxes/{mailbox_id}/send"
+  },
+  {
+    "documented": true,
+    "handler": "onboarding_complete",
+    "method": "POST",
+    "path": "/app/api/onboarding/complete"
+  },
+  {
+    "documented": true,
+    "handler": "browser_switch",
+    "method": "POST",
+    "path": "/app/api/organizations/{tenant_id}/switch"
+  },
+  {
+    "documented": true,
+    "handler": "request_provisioning",
+    "method": "POST",
+    "path": "/app/api/provisioning/postal"
+  },
+  {
+    "documented": true,
+    "handler": "retry_provisioning",
+    "method": "POST",
+    "path": "/app/api/provisioning/postal/retry"
+  },
+  {
+    "documented": true,
+    "handler": "browser_sender_create",
+    "method": "POST",
+    "path": "/app/api/senders"
+  },
+  {
+    "documented": true,
+    "handler": "browser_invite",
+    "method": "POST",
+    "path": "/app/api/team/invitations"
+  },
+  {
+    "documented": true,
+    "handler": "validate_invitation",
+    "method": "POST",
+    "path": "/auth/actions/invitation"
+  },
+  {
+    "documented": true,
+    "handler": "begin_recovery",
+    "method": "POST",
+    "path": "/auth/actions/recover"
+  },
+  {
+    "documented": true,
+    "handler": "begin_password_update",
+    "method": "POST",
+    "path": "/auth/actions/update-password"
+  },
+  {
+    "documented": true,
+    "handler": "begin_email_verification",
+    "method": "POST",
+    "path": "/auth/actions/verify-email"
+  },
+  {
+    "documented": true,
+    "handler": "logout",
+    "method": "POST",
+    "path": "/auth/logout"
+  },
+  {
+    "documented": true,
+    "handler": "logout_all_user_sessions",
+    "method": "POST",
+    "path": "/auth/logout-all"
+  },
+  {
+    "documented": true,
+    "handler": "refresh_session",
+    "method": "POST",
+    "path": "/auth/refresh"
+  },
+  {
+    "documented": true,
+    "handler": "closure",
+    "method": "POST",
+    "path": "/v1/account/closure"
+  },
+  {
+    "documented": true,
+    "handler": "closure_confirm",
+    "method": "POST",
+    "path": "/v1/account/closure/{item_id}/confirm"
+  },
+  {
+    "documented": true,
+    "handler": "evaluate_abuse",
+    "method": "POST",
+    "path": "/v1/admin/abuse/evaluate"
+  },
+  {
+    "documented": true,
+    "handler": "catalog",
+    "method": "POST",
+    "path": "/v1/admin/billing/catalog"
+  },
+  {
+    "documented": true,
+    "handler": "dunning",
+    "method": "POST",
+    "path": "/v1/admin/billing/dunning"
+  },
+  {
+    "documented": true,
+    "handler": "suspend_resource",
+    "method": "POST",
+    "path": "/v1/admin/delivery/suspend"
+  },
+  {
+    "documented": true,
+    "handler": "release_resource",
+    "method": "POST",
+    "path": "/v1/admin/delivery/suspensions/{item_id}/release"
+  },
+  {
+    "documented": true,
+    "handler": "create_pool",
+    "method": "POST",
+    "path": "/v1/admin/ip-pools"
+  },
+  {
+    "documented": true,
+    "handler": "oidc_identity",
+    "method": "POST",
+    "path": "/v1/admin/oidc-identities"
+  },
+  {
+    "documented": true,
+    "handler": "recover_delivery",
+    "method": "POST",
+    "path": "/v1/admin/operations/delivery-jobs/{item_id}/recover"
+  },
+  {
+    "documented": true,
+    "handler": "fail_integration",
+    "method": "POST",
+    "path": "/v1/admin/operations/integrations/{item_id}/fail"
+  },
+  {
+    "documented": true,
+    "handler": "recover_integration",
+    "method": "POST",
+    "path": "/v1/admin/operations/integrations/{item_id}/recover"
+  },
+  {
+    "documented": true,
+    "handler": "replay_webhook",
+    "method": "POST",
+    "path": "/v1/admin/operations/webhooks/{item_id}/replay"
+  },
+  {
+    "documented": true,
+    "handler": "plan_create",
+    "method": "POST",
+    "path": "/v1/admin/plans"
+  },
+  {
+    "documented": true,
+    "handler": "reconcile",
+    "method": "POST",
+    "path": "/v1/admin/reconciliation"
+  },
+  {
+    "documented": true,
+    "handler": "create_reseller",
+    "method": "POST",
+    "path": "/v1/admin/resellers"
+  },
+  {
+    "documented": true,
+    "handler": "admin_tenant_create",
+    "method": "POST",
+    "path": "/v1/admin/tenants"
+  },
+  {
+    "documented": true,
+    "handler": "admin_quota",
+    "method": "POST",
+    "path": "/v1/admin/tenants/{tid}/quota"
+  },
+  {
+    "documented": true,
+    "handler": "admin_suspend",
+    "method": "POST",
+    "path": "/v1/admin/tenants/{tid}/suspend"
+  },
+  {
+    "documented": true,
+    "handler": "provision",
+    "method": "POST",
+    "path": "/v1/agent-mailboxes/provision"
+  },
+  {
+    "documented": true,
+    "handler": "suspend",
+    "method": "POST",
+    "path": "/v1/agent-mailboxes/{mailbox_id}/suspend"
+  },
+  {
+    "documented": true,
+    "handler": "validate",
+    "method": "POST",
+    "path": "/v1/agent-mailboxes/{mailbox_id}/validate"
+  },
+  {
+    "documented": true,
+    "handler": "ai_assist",
+    "method": "POST",
+    "path": "/v1/ai/assist"
+  },
+  {
+    "documented": true,
+    "handler": "create_key",
+    "method": "POST",
+    "path": "/v1/api-keys"
+  },
+  {
+    "documented": true,
+    "handler": "forgot",
+    "method": "POST",
+    "path": "/v1/auth/forgot-password"
+  },
+  {
+    "documented": true,
+    "handler": "login",
+    "method": "POST",
+    "path": "/v1/auth/login"
+  },
+  {
+    "documented": true,
+    "handler": "logout",
+    "method": "POST",
+    "path": "/v1/auth/logout"
+  },
+  {
+    "documented": true,
+    "handler": "mfa_enable",
+    "method": "POST",
+    "path": "/v1/auth/mfa/enable"
+  },
+  {
+    "documented": true,
+    "handler": "mfa_setup",
+    "method": "POST",
+    "path": "/v1/auth/mfa/setup"
+  },
+  {
+    "documented": true,
+    "handler": "reset",
+    "method": "POST",
+    "path": "/v1/auth/reset-password"
+  },
+  {
+    "documented": true,
+    "handler": "automation",
+    "method": "POST",
+    "path": "/v1/automation/events"
+  },
+  {
+    "documented": true,
+    "handler": "checkout",
+    "method": "POST",
+    "path": "/v1/billing/checkout"
+  },
+  {
+    "documented": true,
+    "handler": "invoice_create",
+    "method": "POST",
+    "path": "/v1/billing/invoices"
+  },
+  {
+    "documented": true,
+    "handler": "credit_note",
+    "method": "POST",
+    "path": "/v1/billing/invoices/{invoice_id}/credit-notes"
+  },
+  {
+    "documented": true,
+    "handler": "billing_sync",
+    "method": "POST",
+    "path": "/v1/billing/odoo-sync"
+  },
+  {
+    "documented": true,
+    "handler": "payment_method",
+    "method": "POST",
+    "path": "/v1/billing/payment-methods"
+  },
+  {
+    "documented": true,
+    "handler": "pay",
+    "method": "POST",
+    "path": "/v1/billing/payments"
+  },
+  {
+    "documented": true,
+    "handler": "billing_manual_payment",
+    "method": "POST",
+    "path": "/v1/billing/payments/manual"
+  },
+  {
+    "documented": true,
+    "handler": "confirm_manual",
+    "method": "POST",
+    "path": "/v1/billing/payments/{payment_id}/confirm"
+  },
+  {
+    "documented": true,
+    "handler": "refund",
+    "method": "POST",
+    "path": "/v1/billing/payments/{payment_id}/refunds"
+  },
+  {
+    "documented": true,
+    "handler": "billing_refund",
+    "method": "POST",
+    "path": "/v1/billing/refunds"
+  },
+  {
+    "documented": true,
+    "handler": "subscribe",
+    "method": "POST",
+    "path": "/v1/billing/subscription"
+  },
+  {
+    "documented": true,
+    "handler": "change_plan",
+    "method": "POST",
+    "path": "/v1/billing/subscription-plan-change"
+  },
+  {
+    "documented": true,
+    "handler": "billing_subscription_cancel",
+    "method": "POST",
+    "path": "/v1/billing/subscription/cancel"
+  },
+  {
+    "documented": true,
+    "handler": "billing_subscription_change",
+    "method": "POST",
+    "path": "/v1/billing/subscription/change"
+  },
+  {
+    "documented": true,
+    "handler": "transition",
+    "method": "POST",
+    "path": "/v1/billing/subscription/{status}"
+  },
+  {
+    "documented": true,
+    "handler": "meter",
+    "method": "POST",
+    "path": "/v1/billing/usage-events"
+  },
+  {
+    "documented": true,
+    "handler": "wallet_tx",
+    "method": "POST",
+    "path": "/v1/billing/wallet/transactions"
+  },
+  {
+    "documented": true,
+    "handler": "campaign_create",
+    "method": "POST",
+    "path": "/v1/campaign-definitions"
+  },
+  {
+    "documented": true,
+    "handler": "campaign_cancel",
+    "method": "POST",
+    "path": "/v1/campaign-definitions/{item_id}/cancel"
+  },
+  {
+    "documented": true,
+    "handler": "campaign_preflight",
+    "method": "POST",
+    "path": "/v1/campaign-definitions/{item_id}/preflight"
+  },
+  {
+    "documented": true,
+    "handler": "campaign_schedule",
+    "method": "POST",
+    "path": "/v1/campaign-definitions/{item_id}/schedule"
+  },
+  {
+    "documented": true,
+    "handler": "campaign_test",
+    "method": "POST",
+    "path": "/v1/campaign-definitions/{item_id}/test"
+  },
+  {
+    "documented": true,
+    "handler": "domain_register",
+    "method": "POST",
+    "path": "/v1/campaign-email-domains"
+  },
+  {
+    "documented": true,
+    "handler": "campaign_create",
+    "method": "POST",
+    "path": "/v1/campaigns"
+  },
+  {
+    "documented": true,
+    "handler": "campaign_cancel",
+    "method": "POST",
+    "path": "/v1/campaigns/{campaign_id}/cancel"
+  },
+  {
+    "documented": true,
+    "handler": "campaign_schedule",
+    "method": "POST",
+    "path": "/v1/campaigns/{campaign_id}/schedule"
+  },
+  {
+    "documented": true,
+    "handler": "middleware_command",
+    "method": "POST",
+    "path": "/v1/commands"
+  },
+  {
+    "documented": true,
+    "handler": "consent",
+    "method": "POST",
+    "path": "/v1/consents"
+  },
+  {
+    "documented": true,
+    "handler": "contact_upsert",
+    "method": "POST",
+    "path": "/v1/contacts"
+  },
+  {
+    "documented": true,
+    "handler": "content_render",
+    "method": "POST",
+    "path": "/v1/content/render"
+  },
+  {
+    "documented": true,
+    "handler": "profile_deletion_schedule",
+    "method": "POST",
+    "path": "/v1/customer-data/deletions"
+  },
+  {
+    "documented": true,
+    "handler": "profile_deletion_cancel",
+    "method": "POST",
+    "path": "/v1/customer-data/deletions/{job_id}/cancel"
+  },
+  {
+    "documented": true,
+    "handler": "deliverability",
+    "method": "POST",
+    "path": "/v1/deliverability/domains/{did}/check"
+  },
+  {
+    "documented": true,
+    "handler": "job_fail",
+    "method": "POST",
+    "path": "/v1/delivery-jobs/{job_id}/fail"
+  },
+  {
+    "documented": true,
+    "handler": "job_lease",
+    "method": "POST",
+    "path": "/v1/delivery-jobs/{job_id}/lease"
+  },
+  {
+    "documented": true,
+    "handler": "job_create",
+    "method": "POST",
+    "path": "/v1/delivery-jobs/{message_id}"
+  },
+  {
+    "documented": true,
+    "handler": "api_key_create",
+    "method": "POST",
+    "path": "/v1/developer/api-keys"
+  },
+  {
+    "documented": true,
+    "handler": "smtp_create",
+    "method": "POST",
+    "path": "/v1/developer/smtp-credentials"
+  },
+  {
+    "documented": true,
+    "handler": "smtp_rotate",
+    "method": "POST",
+    "path": "/v1/developer/smtp-credentials/{item_id}/rotate"
+  },
+  {
+    "documented": true,
+    "handler": "domain_add",
+    "method": "POST",
+    "path": "/v1/domains"
+  },
+  {
+    "documented": true,
+    "handler": "domain_claim",
+    "method": "POST",
+    "path": "/v1/domains/claims"
+  },
+  {
+    "documented": true,
+    "handler": "dkim_rotate",
+    "method": "POST",
+    "path": "/v1/domains/claims/{item_id}/dkim/rotate"
+  },
+  {
+    "documented": true,
+    "handler": "domain_verify",
+    "method": "POST",
+    "path": "/v1/domains/claims/{item_id}/verify"
+  },
+  {
+    "documented": true,
+    "handler": "domain_verify",
+    "method": "POST",
+    "path": "/v1/domains/{did}/verify"
+  },
+  {
+    "documented": true,
+    "handler": "bulk",
+    "method": "POST",
+    "path": "/v1/email/bulk"
+  },
+  {
+    "documented": true,
+    "handler": "submit",
+    "method": "POST",
+    "path": "/v1/email/messages"
+  },
+  {
+    "documented": false,
+    "handler": "send",
+    "method": "POST",
+    "path": "/v1/email/send"
+  },
+  {
+    "documented": true,
+    "handler": "ingest",
+    "method": "POST",
+    "path": "/v1/events"
+  },
+  {
+    "documented": true,
+    "handler": "ingest_batch",
+    "method": "POST",
+    "path": "/v1/events/batch"
+  },
+  {
+    "documented": true,
+    "handler": "experiment_create",
+    "method": "POST",
+    "path": "/v1/experiments"
+  },
+  {
+    "documented": true,
+    "handler": "experiment_assign",
+    "method": "POST",
+    "path": "/v1/experiments/{eid}/assign/{pid}"
+  },
+  {
+    "documented": true,
+    "handler": "export",
+    "method": "POST",
+    "path": "/v1/exports"
+  },
+  {
+    "documented": true,
+    "handler": "inbound_fixture",
+    "method": "POST",
+    "path": "/v1/inbound/fixtures"
+  },
+  {
+    "documented": true,
+    "handler": "inbound_route",
+    "method": "POST",
+    "path": "/v1/inbound/routes"
+  },
+  {
+    "documented": true,
+    "handler": "integration_create",
+    "method": "POST",
+    "path": "/v1/integrations"
+  },
+  {
+    "documented": true,
+    "handler": "mautic_command",
+    "method": "POST",
+    "path": "/v1/integrations/mautic/commands"
+  },
+  {
+    "documented": true,
+    "handler": "mautic_reconcile",
+    "method": "POST",
+    "path": "/v1/integrations/mautic/operations/{operation_id}/reconcile"
+  },
+  {
+    "documented": true,
+    "handler": "result",
+    "method": "POST",
+    "path": "/v1/integrations/results"
+  },
+  {
+    "documented": true,
+    "handler": "beyvra_send",
+    "method": "POST",
+    "path": "/v1/internal/email/beyvra/send"
+  },
+  {
+    "documented": true,
+    "handler": "canonical_email_send",
+    "method": "POST",
+    "path": "/v1/internal/email/communications/messages"
+  },
+  {
+    "documented": true,
+    "handler": "domain_register",
+    "method": "POST",
+    "path": "/v1/internal/email/domains/register"
+  },
+  {
+    "documented": true,
+    "handler": "domain_verify",
+    "method": "POST",
+    "path": "/v1/internal/email/domains/verify"
+  },
+  {
+    "documented": true,
+    "handler": "dkim_rotate",
+    "method": "POST",
+    "path": "/v1/internal/email/domains/{domain_id}/dkim/rotate"
+  },
+  {
+    "documented": true,
+    "handler": "dkim_verify",
+    "method": "POST",
+    "path": "/v1/internal/email/domains/{domain_id}/dkim/{key_id}/verify"
+  },
+  {
+    "documented": true,
+    "handler": "domain_dns_check",
+    "method": "POST",
+    "path": "/v1/internal/email/domains/{domain_id}/dns-check"
+  },
+  {
+    "documented": true,
+    "handler": "domain_suspend",
+    "method": "POST",
+    "path": "/v1/internal/email/domains/{domain_id}/suspend"
+  },
+  {
+    "documented": true,
+    "handler": "inbound_receive",
+    "method": "POST",
+    "path": "/v1/internal/email/inbound/receive"
+  },
+  {
+    "documented": true,
+    "handler": "create_tracking_token",
+    "method": "POST",
+    "path": "/v1/internal/email/messages/{message_id}/tracking/{kind}"
+  },
+  {
+    "documented": true,
+    "handler": "operation_event_retry",
+    "method": "POST",
+    "path": "/v1/internal/email/operations/events/{event_id}/retry"
+  },
+  {
+    "documented": true,
+    "handler": "operation_message_retry",
+    "method": "POST",
+    "path": "/v1/internal/email/operations/messages/{message_id}/retry"
+  },
+  {
+    "documented": true,
+    "handler": "operation_outbox_reconcile",
+    "method": "POST",
+    "path": "/v1/internal/email/operations/outbox/reconcile"
+  },
+  {
+    "documented": true,
+    "handler": "process_sandbox",
+    "method": "POST",
+    "path": "/v1/internal/email/operations/process-sandbox"
+  },
+  {
+    "documented": true,
+    "handler": "operation_reconcile",
+    "method": "POST",
+    "path": "/v1/internal/email/operations/reconcile"
+  },
+  {
+    "documented": true,
+    "handler": "operation_usage_retry",
+    "method": "POST",
+    "path": "/v1/internal/email/operations/usage/{usage_event_id}/retry"
+  },
+  {
+    "documented": true,
+    "handler": "email_preflight",
+    "method": "POST",
+    "path": "/v1/internal/email/preflight"
+  },
+  {
+    "documented": true,
+    "handler": "email_send",
+    "method": "POST",
+    "path": "/v1/internal/email/send"
+  },
+  {
+    "documented": true,
+    "handler": "sender_create",
+    "method": "POST",
+    "path": "/v1/internal/email/senders"
+  },
+  {
+    "documented": true,
+    "handler": "sender_suspend",
+    "method": "POST",
+    "path": "/v1/internal/email/senders/{sender_id}/suspend"
+  },
+  {
+    "documented": true,
+    "handler": "smtp_credential_create",
+    "method": "POST",
+    "path": "/v1/internal/email/smtp/credentials"
+  },
+  {
+    "documented": true,
+    "handler": "smtp_credential_revoke",
+    "method": "POST",
+    "path": "/v1/internal/email/smtp/credentials/{credential_id}/revoke"
+  },
+  {
+    "documented": true,
+    "handler": "smtp_credential_rotate",
+    "method": "POST",
+    "path": "/v1/internal/email/smtp/credentials/{credential_id}/rotate"
+  },
+  {
+    "documented": true,
+    "handler": "smtp_preflight",
+    "method": "POST",
+    "path": "/v1/internal/email/smtp/preflight"
+  },
+  {
+    "documented": true,
+    "handler": "suppression_check",
+    "method": "POST",
+    "path": "/v1/internal/email/suppressions/check"
+  },
+  {
+    "documented": true,
+    "handler": "webhook_test",
+    "method": "POST",
+    "path": "/v1/internal/email/webhooks/test"
+  },
+  {
+    "documented": true,
+    "handler": "receive_alertmanager_events",
+    "method": "POST",
+    "path": "/v1/internal/integrations/alertmanager/events"
+  },
+  {
+    "documented": true,
+    "handler": "receive_kpi_snapshot",
+    "method": "POST",
+    "path": "/v1/internal/integrations/kpis/snapshots"
+  },
+  {
+    "documented": true,
+    "handler": "request_odoo_reconcile",
+    "method": "POST",
+    "path": "/v1/internal/integrations/odoo/reconcile"
+  },
+  {
+    "documented": true,
+    "handler": "create_sender_identity",
+    "method": "POST",
+    "path": "/v1/internal/sender-identities"
+  },
+  {
+    "documented": true,
+    "handler": "disable_sender_identity",
+    "method": "POST",
+    "path": "/v1/internal/sender-identities/{item_id}/disable"
+  },
+  {
+    "documented": true,
+    "handler": "journey_create",
+    "method": "POST",
+    "path": "/v1/journeys"
+  },
+  {
+    "documented": true,
+    "handler": "journey_pause",
+    "method": "POST",
+    "path": "/v1/journeys/{jid}/pause"
+  },
+  {
+    "documented": true,
+    "handler": "journey_publish",
+    "method": "POST",
+    "path": "/v1/journeys/{jid}/publish"
+  },
+  {
+    "documented": true,
+    "handler": "journey_resume",
+    "method": "POST",
+    "path": "/v1/journeys/{jid}/resume"
+  },
+  {
+    "documented": true,
+    "handler": "journey_rollback",
+    "method": "POST",
+    "path": "/v1/journeys/{jid}/rollback"
+  },
+  {
+    "documented": true,
+    "handler": "journey_run",
+    "method": "POST",
+    "path": "/v1/journeys/{jid}/runs"
+  },
+  {
+    "documented": true,
+    "handler": "list_create",
+    "method": "POST",
+    "path": "/v1/lists"
+  },
+  {
+    "documented": true,
+    "handler": "send",
+    "method": "POST",
+    "path": "/v1/messages"
+  },
+  {
+    "documented": true,
+    "handler": "message_cancel",
+    "method": "POST",
+    "path": "/v1/messages/{message_id}/cancel"
+  },
+  {
+    "documented": true,
+    "handler": "operation_cancel",
+    "method": "POST",
+    "path": "/v1/operations/{operation_id}/cancel"
+  },
+  {
+    "documented": true,
+    "handler": "operation_reconcile",
+    "method": "POST",
+    "path": "/v1/operations/{operation_id}/reconcile"
+  },
+  {
+    "documented": true,
+    "handler": "organization",
+    "method": "POST",
+    "path": "/v1/organizations"
+  },
+  {
+    "documented": true,
+    "handler": "organization_member_add",
+    "method": "POST",
+    "path": "/v1/organizations/{organization_id}/members"
+  },
+  {
+    "documented": true,
+    "handler": "switch",
+    "method": "POST",
+    "path": "/v1/organizations/{tenant_id}/switch"
+  },
+  {
+    "documented": true,
+    "handler": "profile_export",
+    "method": "POST",
+    "path": "/v1/profile-exports"
+  },
+  {
+    "documented": true,
+    "handler": "profile_import",
+    "method": "POST",
+    "path": "/v1/profile-imports"
+  },
+  {
+    "documented": true,
+    "handler": "profile_upsert",
+    "method": "POST",
+    "path": "/v1/profiles"
+  },
+  {
+    "documented": true,
+    "handler": "reputation",
+    "method": "POST",
+    "path": "/v1/reputation/recalculate"
+  },
+  {
+    "documented": true,
+    "handler": "add_subaccount",
+    "method": "POST",
+    "path": "/v1/reseller/subaccounts"
+  },
+  {
+    "documented": true,
+    "handler": "segment_create",
+    "method": "POST",
+    "path": "/v1/segments"
+  },
+  {
+    "documented": true,
+    "handler": "sender_create",
+    "method": "POST",
+    "path": "/v1/senders"
+  },
+  {
+    "documented": true,
+    "handler": "service_create",
+    "method": "POST",
+    "path": "/v1/service-accounts"
+  },
+  {
+    "documented": true,
+    "handler": "service_rotate",
+    "method": "POST",
+    "path": "/v1/service-accounts/{item_id}/rotate"
+  },
+  {
+    "documented": true,
+    "handler": "assign_pool",
+    "method": "POST",
+    "path": "/v1/settings/ip-pool-assignment"
+  },
+  {
+    "documented": true,
+    "handler": "warmup",
+    "method": "POST",
+    "path": "/v1/settings/warmup"
+  },
+  {
+    "documented": true,
+    "handler": "stream_create",
+    "method": "POST",
+    "path": "/v1/streams"
+  },
+  {
+    "documented": true,
+    "handler": "support",
+    "method": "POST",
+    "path": "/v1/support/tickets"
+  },
+  {
+    "documented": true,
+    "handler": "suppression_create",
+    "method": "POST",
+    "path": "/v1/suppressions"
+  },
+  {
+    "documented": true,
+    "handler": "invite",
+    "method": "POST",
+    "path": "/v1/team/invitations"
+  },
+  {
+    "documented": true,
+    "handler": "accept",
+    "method": "POST",
+    "path": "/v1/team/invitations/accept"
+  },
+  {
+    "documented": true,
+    "handler": "accept_legacy_invitation",
+    "method": "POST",
+    "path": "/v1/team/invitations/accept"
+  },
+  {
+    "documented": true,
+    "handler": "template_create",
+    "method": "POST",
+    "path": "/v1/templates"
+  },
+  {
+    "documented": true,
+    "handler": "template_publish",
+    "method": "POST",
+    "path": "/v1/templates/{item_id}/publish"
+  },
+  {
+    "documented": true,
+    "handler": "template_render",
+    "method": "POST",
+    "path": "/v1/templates/{item_id}/render"
+  },
+  {
+    "documented": true,
+    "handler": "template_rollback",
+    "method": "POST",
+    "path": "/v1/templates/{item_id}/rollback/{version}"
+  },
+  {
+    "documented": true,
+    "handler": "unsubscribe",
+    "method": "POST",
+    "path": "/v1/unsubscribe"
+  },
+  {
+    "documented": true,
+    "handler": "unsubscribe_token",
+    "method": "POST",
+    "path": "/v1/unsubscribe/tokens"
+  },
+  {
+    "documented": true,
+    "handler": "webhook_create",
+    "method": "POST",
+    "path": "/v1/webhook-subscriptions"
+  },
+  {
+    "documented": true,
+    "handler": "webhook_rotate",
+    "method": "POST",
+    "path": "/v1/webhook-subscriptions/{item_id}/rotate"
+  },
+  {
+    "documented": true,
+    "handler": "webhook_test",
+    "method": "POST",
+    "path": "/v1/webhook-subscriptions/{item_id}/test"
+  },
+  {
+    "documented": true,
+    "handler": "webhook_add",
+    "method": "POST",
+    "path": "/v1/webhooks"
+  },
+  {
+    "documented": true,
+    "handler": "postal_hook",
+    "method": "POST",
+    "path": "/v1/webhooks/postal"
+  },
+  {
+    "documented": true,
+    "handler": "postal_inbound",
+    "method": "POST",
+    "path": "/v1/webhooks/postal-inbound"
+  },
+  {
+    "documented": true,
+    "handler": "postal_native_hook",
+    "method": "POST",
+    "path": "/v1/webhooks/postal-native"
+  },
+  {
+    "documented": true,
+    "handler": "update_draft",
+    "method": "PUT",
+    "path": "/app/api/mailboxes/{mailbox_id}/drafts/{message_id}"
+  },
+  {
+    "documented": true,
+    "handler": "customer_data_retention_update",
+    "method": "PUT",
+    "path": "/v1/customer-data/retention"
+  },
+  {
+    "documented": true,
+    "handler": "policy_update",
+    "method": "PUT",
+    "path": "/v1/internal/email/policy"
+  },
+  {
+    "documented": true,
+    "handler": "onboarding_put",
+    "method": "PUT",
+    "path": "/v1/onboarding"
+  },
+  {
+    "documented": true,
+    "handler": "preference",
+    "method": "PUT",
+    "path": "/v1/profiles/{pid}/preferences/{topic}"
+  },
+  {
+    "documented": true,
+    "handler": "kill_switch",
+    "method": "PUT",
+    "path": "/v1/settings/send-gate"
+  },
+  {
+    "documented": true,
+    "handler": "template_update",
+    "method": "PUT",
+    "path": "/v1/templates/{item_id}"
+  }
+]
