@@ -823,6 +823,12 @@
   },
   {
     "documented": true,
+    "handler": "members",
+    "method": "GET",
+    "path": "/v1/members"
+  },
+  {
+    "documented": true,
     "handler": "messages",
     "method": "GET",
     "path": "/v1/messages"
@@ -862,6 +868,12 @@
     "handler": "operation_events",
     "method": "GET",
     "path": "/v1/operations/{operation_id}/events"
+  },
+  {
+    "documented": true,
+    "handler": "organization",
+    "method": "GET",
+    "path": "/v1/organization"
   },
   {
     "documented": true,
@@ -952,6 +964,12 @@
     "handler": "list_subaccounts",
     "method": "GET",
     "path": "/v1/reseller/subaccounts"
+  },
+  {
+    "documented": true,
+    "handler": "secret_response_get",
+    "method": "GET",
+    "path": "/v1/secret-responses/{response_id}"
   },
   {
     "documented": true,
@@ -1066,6 +1084,18 @@
     "handler": "usage",
     "method": "GET",
     "path": "/v1/usage"
+  },
+  {
+    "documented": true,
+    "handler": "daily_usage",
+    "method": "GET",
+    "path": "/v1/usage/daily"
+  },
+  {
+    "documented": true,
+    "handler": "monthly_usage",
+    "method": "GET",
+    "path": "/v1/usage/monthly"
   },
   {
     "documented": true,
@@ -1345,6 +1375,12 @@
   },
   {
     "documented": true,
+    "handler": "replay_business_event",
+    "method": "POST",
+    "path": "/v1/admin/operations/business-events/{event_id}/replay"
+  },
+  {
+    "documented": true,
     "handler": "recover_delivery",
     "method": "POST",
     "path": "/v1/admin/operations/delivery-jobs/{item_id}/recover"
@@ -1432,6 +1468,12 @@
     "handler": "create_key",
     "method": "POST",
     "path": "/v1/api-keys"
+  },
+  {
+    "documented": true,
+    "handler": "rotate_key",
+    "method": "POST",
+    "path": "/v1/api-keys/{kid}/rotate"
   },
   {
     "documented": true,
@@ -1627,6 +1669,18 @@
   },
   {
     "documented": true,
+    "handler": "campaign_pause",
+    "method": "POST",
+    "path": "/v1/campaigns/{campaign_id}/pause"
+  },
+  {
+    "documented": true,
+    "handler": "campaign_resume",
+    "method": "POST",
+    "path": "/v1/campaigns/{campaign_id}/resume"
+  },
+  {
+    "documented": true,
     "handler": "campaign_schedule",
     "method": "POST",
     "path": "/v1/campaigns/{campaign_id}/schedule"
@@ -1696,6 +1750,12 @@
     "handler": "api_key_create",
     "method": "POST",
     "path": "/v1/developer/api-keys"
+  },
+  {
+    "documented": true,
+    "handler": "api_key_rotate",
+    "method": "POST",
+    "path": "/v1/developer/api-keys/{item_id}/rotate"
   },
   {
     "documented": true,
@@ -1993,12 +2053,6 @@
   },
   {
     "documented": true,
-    "handler": "request_odoo_reconcile",
-    "method": "POST",
-    "path": "/v1/internal/integrations/odoo/reconcile"
-  },
-  {
-    "documented": true,
     "handler": "create_sender_identity",
     "method": "POST",
     "path": "/v1/internal/sender-identities"
@@ -2275,9 +2329,21 @@
   },
   {
     "documented": true,
+    "handler": "webhook_rotate",
+    "method": "POST",
+    "path": "/v1/webhooks/{wid}/rotate"
+  },
+  {
+    "documented": true,
     "handler": "update_draft",
     "method": "PUT",
     "path": "/app/api/mailboxes/{mailbox_id}/drafts/{message_id}"
+  },
+  {
+    "documented": true,
+    "handler": "campaign_dispatch_configuration",
+    "method": "PUT",
+    "path": "/v1/campaigns/{campaign_id}/dispatch-configuration"
   },
   {
     "documented": true,

@@ -58,8 +58,9 @@
             "type": "string"
           },
           "fingerprint": {
-            "maxLength": 200,
+            "maxLength": 128,
             "minLength": 8,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/-]+$",
             "title": "Fingerprint",
             "type": "string"
           },
@@ -73,7 +74,7 @@
             "additionalProperties": {
               "type": "string"
             },
-            "maxProperties": 40,
+            "maxProperties": 32,
             "title": "Labels",
             "type": "object"
           },
@@ -119,7 +120,7 @@
           },
           "groupKey": {
             "default": "",
-            "maxLength": 500,
+            "maxLength": 2048,
             "title": "Groupkey",
             "type": "string"
           },
@@ -530,14 +531,19 @@
         "additionalProperties": false,
         "properties": {
           "environment": {
-            "maxLength": 80,
-            "minLength": 1,
+            "enum": [
+              "development",
+              "test",
+              "staging",
+              "production"
+            ],
             "title": "Environment",
             "type": "string"
           },
           "kpi_key": {
-            "maxLength": 160,
+            "maxLength": 96,
             "minLength": 3,
+            "pattern": "^[a-z][a-z0-9_.:-]*$",
             "title": "Kpi Key",
             "type": "string"
           },
@@ -545,7 +551,7 @@
             "additionalProperties": {
               "type": "string"
             },
-            "maxProperties": 40,
+            "maxProperties": 32,
             "title": "Labels",
             "type": "object"
           },
@@ -555,33 +561,46 @@
             "type": "string"
           },
           "query_ref": {
-            "maxLength": 200,
+            "maxLength": 96,
             "minLength": 3,
             "title": "Query Ref",
             "type": "string"
           },
           "service": {
-            "maxLength": 120,
+            "maxLength": 128,
             "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
             "title": "Service",
             "type": "string"
           },
           "snapshot_id": {
-            "maxLength": 200,
+            "maxLength": 128,
             "minLength": 8,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]+$",
             "title": "Snapshot Id",
             "type": "string"
           },
+          "source_revision": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Source Revision",
+            "type": "integer"
+          },
           "status": {
             "default": "observed",
-            "maxLength": 20,
+            "enum": [
+              "observed",
+              "stale",
+              "unavailable"
+            ],
             "title": "Status",
             "type": "string"
           },
           "unit": {
             "default": "ratio",
-            "maxLength": 40,
+            "maxLength": 32,
             "minLength": 1,
+            "pattern": "^[A-Za-z][A-Za-z0-9_.%/-]{0,31}$",
             "title": "Unit",
             "type": "string"
           },
@@ -590,28 +609,14 @@
             "type": "number"
           },
           "window_end": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Window End"
+            "format": "date-time",
+            "title": "Window End",
+            "type": "string"
           },
           "window_start": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Window Start"
+            "format": "date-time",
+            "title": "Window Start",
+            "type": "string"
           }
         },
         "required": [
@@ -620,6 +625,8 @@
           "query_ref",
           "value",
           "observed_at",
+          "window_start",
+          "window_end",
           "service",
           "environment"
         ],
@@ -748,22 +755,6 @@
           "html"
         ],
         "title": "MailIn",
-        "type": "object"
-      },
-      "OdooReconcileIn": {
-        "additionalProperties": false,
-        "properties": {
-          "scopes": {
-            "items": {
-              "type": "string"
-            },
-            "maxItems": 10,
-            "minItems": 1,
-            "title": "Scopes",
-            "type": "array"
-          }
-        },
-        "title": "OdooReconcileIn",
         "type": "object"
       },
       "OidcIdentityIn": {
@@ -2365,6 +2356,108 @@
         "summary": "Admin Operations",
         "tags": [
           "SaaS P0/P1"
+        ],
+        "x-klyrow-audience": "ADMIN",
+        "x-klyrow-auth-model": "EXACT_PLATFORM_OWNER_OIDC_WITH_VERIFIED_EMAIL_AND_FRESH_MFA",
+        "x-klyrow-enforced-auth-dependencies": [
+          "auth"
+        ]
+      }
+    },
+    "/v1/admin/operations/business-events/{event_id}/replay": {
+      "post": {
+        "operationId": "replay_business_event_v1_admin_operations_business_events__event_id__replay_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "event_id",
+            "required": true,
+            "schema": {
+              "title": "Event Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-klyrow-tenant-id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Klyrow-Tenant-Id"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Tenant-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoverIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Replay Business Event",
+        "tags": [
+          "Operations and integrations"
         ],
         "x-klyrow-audience": "ADMIN",
         "x-klyrow-auth-model": "EXACT_PLATFORM_OWNER_OIDC_WITH_VERIFIED_EMAIL_AND_FRESH_MFA",
@@ -7116,7 +7209,7 @@
             "required": false,
             "schema": {
               "default": "",
-              "maxLength": 200,
+              "maxLength": 128,
               "title": "X-Correlation-Id",
               "type": "string"
             }
@@ -7219,6 +7312,17 @@
       "post": {
         "operationId": "receive_kpi_snapshot_v1_internal_integrations_kpis_snapshots_post",
         "parameters": [
+          {
+            "in": "header",
+            "name": "X-Correlation-ID",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 128,
+              "title": "X-Correlation-Id",
+              "type": "string"
+            }
+          },
           {
             "in": "header",
             "name": "authorization",
@@ -7574,118 +7678,6 @@
         "x-klyrow-enforced-auth-dependencies": [
           "auth",
           "require_observability_read"
-        ]
-      }
-    },
-    "/v1/internal/integrations/odoo/reconcile": {
-      "post": {
-        "operationId": "request_odoo_reconcile_v1_internal_integrations_odoo_reconcile_post",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": true,
-            "schema": {
-              "maxLength": 200,
-              "minLength": 8,
-              "title": "Idempotency-Key",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "x-klyrow-tenant-id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Klyrow-Tenant-Id"
-            }
-          },
-          {
-            "in": "header",
-            "name": "X-Tenant-ID",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Tenant-Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/OdooReconcileIn"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Request Odoo Reconcile V1 Internal Integrations Odoo Reconcile Post",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "security": [
-          {
-            "serviceBearer": []
-          }
-        ],
-        "summary": "Request Odoo Reconcile",
-        "tags": [
-          "Observability integrations"
-        ],
-        "x-durable-idempotency": true,
-        "x-idempotency-model": "REQUEST_SCOPED_ATOMIC",
-        "x-idempotency-required": true,
-        "x-klyrow-audience": "INTERNAL",
-        "x-klyrow-auth-model": "DEDICATED_SERVICE_BEARER_ON_PRIVATE_ROUTE",
-        "x-klyrow-enforced-auth-dependencies": [
-          "auth",
-          "require_observability_write"
         ]
       }
     },

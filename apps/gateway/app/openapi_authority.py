@@ -58,7 +58,6 @@ DEDICATED_SERVICE_PATHS = {
     "/v1/internal/integrations/kpis/snapshots",
     "/v1/internal/integrations/odoo/health",
     "/v1/internal/integrations/odoo/checkpoints",
-    "/v1/internal/integrations/odoo/reconcile",
     "/v1/internal/integrations/observability/contract",
     "/v1/internal/email/beyvra/send",
 }
@@ -78,13 +77,14 @@ DURABLE_IDEMPOTENCY = {
     ("post", "/v1/campaigns"),
     ("post", "/v1/messages/{message_id}/cancel"),
     ("post", "/v1/campaigns/{campaign_id}/schedule"),
+    ("post", "/v1/campaigns/{campaign_id}/pause"),
+    ("post", "/v1/campaigns/{campaign_id}/resume"),
     ("post", "/v1/campaigns/{campaign_id}/cancel"),
     ("post", "/v1/operations/{operation_id}/cancel"),
     ("post", "/v1/operations/{operation_id}/reconcile"),
     ("post", "/v1/integrations/mautic/operations/{operation_id}/reconcile"),
     ("post", "/v1/integrations/mautic/commands"),
     ("post", "/v1/commands"),
-    ("post", "/v1/internal/integrations/odoo/reconcile"),
 }
 NON_ATOMIC_ITEM_IDEMPOTENCY = {
     ("post", "/v1/email/bulk"),
