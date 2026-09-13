@@ -140,6 +140,7 @@ This inventories the composed platform, including hidden compatibility and brows
 | GET | `/v1/me/capabilities` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `my_capabilities` |
 | GET | `/v1/me/permissions` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `my_permissions` |
 | GET | `/v1/me/sessions` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `my_sessions` |
+| GET | `/v1/members` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `members` |
 | GET | `/v1/messages` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `messages` |
 | GET | `/v1/messages/{mid}` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `message_alias` |
 | GET | `/v1/onboarding` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `onboarding_get` |
@@ -147,6 +148,7 @@ This inventories the composed platform, including hidden compatibility and brows
 | GET | `/v1/operations/{command_id}` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `middleware_operation` |
 | GET | `/v1/operations/{operation_id}/attempts` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `operation_attempts` |
 | GET | `/v1/operations/{operation_id}/events` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `operation_events` |
+| GET | `/v1/organization` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `organization` |
 | GET | `/v1/organizations` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `organizations` |
 | GET | `/v1/organizations/{organization_id}` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `organization_detail` |
 | GET | `/v1/organizations/{organization_id}/members` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `organization_members` |
@@ -181,6 +183,8 @@ This inventories the composed platform, including hidden compatibility and brows
 | GET | `/v1/tracking/events/{event_id}` | TRACKING | BEARER_JWT_OR_API_KEY | true | `tracking_event_detail` |
 | GET | `/v1/tracking/messages/{message_id}` | TRACKING | BEARER_JWT_OR_API_KEY | true | `tracking_message` |
 | GET | `/v1/usage` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `usage` |
+| GET | `/v1/usage/daily` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `daily_usage` |
+| GET | `/v1/usage/monthly` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `monthly_usage` |
 | GET | `/v1/webhook-subscriptions` | PUBLIC | BEARER_JWT_OR_API_KEY | true | `webhook_subscriptions` |
 | GET | `/verification-expired` | PUBLIC | BEARER_JWT_OR_API_KEY | false | `auth_page` |
 | GET | `/verification-success` | PUBLIC | BEARER_JWT_OR_API_KEY | false | `auth_page` |

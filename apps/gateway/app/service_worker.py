@@ -21,6 +21,8 @@ from .provider import (
 )
 from .security_smtp_worker import security_smtp_delivery_loop
 from .tenant_postal_delivery import tenant_email_outbox_loop
+from .business_event_worker import dispatch as dispatch_business_events
+from .telemetry import configure_tracing
 
 ROLE = os.getenv("KLYROW_WORKER_ROLE", "mail")
 RUNNING = True
@@ -156,6 +158,8 @@ async def loop():
                 billing_tick()
             elif ROLE == "scheduler":
                 await dispatch_mautic_outbox()
+            elif ROLE == "business":
+                await dispatch_business_events()
         except Exception as exc:
             print(
                 json.dumps(
@@ -172,6 +176,7 @@ async def loop():
 
 async def main():
     global RUNNING
+    configure_tracing("klyrow-" + ROLE)
     event = asyncio.Event()
 
     def stop():

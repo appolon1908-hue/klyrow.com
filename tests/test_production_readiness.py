@@ -28,7 +28,7 @@ def test_schema_migration_is_a_required_gateway_dependency():
     compose = (ROOT / "docker-compose.yml").read_text()
     runner = (ROOT / "scripts/migrate").read_text()
     assert "gateway-migrate: {condition: service_completed_successfully}" in compose
-    assert "2026090208_runtime_database_least_privilege.sql" in compose
+    assert "2026091301_outbox_trace_context.sql" in compose
     assert 'KLYROW_REQUIRE_LEAST_PRIVILEGE_DB: "true"' in compose
     source = (ROOT / "apps/gateway/app/main.py").read_text()
     assert "runtime database role has cluster-level privileges" in source

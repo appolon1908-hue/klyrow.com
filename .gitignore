@@ -19,3 +19,6 @@ apps/web/node_modules/
 apps/web/dist/
 apps/web/test-results/
 apps/web/playwright-report/
+
+# Local contract-validator dependencies
+/tools/contracts/node_modules/
