@@ -155,6 +155,7 @@ def test_postgres_buckets_use_utc_independent_of_session_timezone():
         with engine.connect() as connection:
             transaction = connection.begin()
             try:
+                original_timeout = connection.scalar(text("SHOW statement_timeout"))
                 connection.execute(text("SET LOCAL TIME ZONE 'America/Los_Angeles'"))
                 with Session(bind=connection, join_transaction_mode="create_savepoint") as session:
                     session.add(event(tenant, "2026-08-01T00:30:00Z", 7))
@@ -163,7 +164,9 @@ def test_postgres_buckets_use_utc_independent_of_session_timezone():
                     for granularity in ("day", "month"):
                         result = usage_history(query, granularity, {"tenant": tenant}, session)
                         assert [item.model_dump(mode="json") for item in result.items] == [{"period_start": "2026-08-01", "quantity": 7}]
+                        assert connection.scalar(text("SHOW statement_timeout")) == "5s"
             finally:
                 transaction.rollback()
+            assert connection.scalar(text("SHOW statement_timeout")) == original_timeout
     finally:
         engine.dispose()

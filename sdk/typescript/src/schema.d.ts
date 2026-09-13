@@ -12226,6 +12226,20 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Tenant access denied or account suspended */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authenticated tenant resolution failed */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Invalid date window, cursor, filter or pagination limit */
             422: {
                 headers: {
@@ -12233,7 +12247,14 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Usage store unavailable */
+            /** @description Tenant request rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authorization or usage store unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -12279,6 +12300,20 @@ export interface operations {
                 };
                 content?: never;
             };
+            /** @description Tenant access denied or account suspended */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authenticated tenant resolution failed */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Invalid date window, cursor, filter or pagination limit */
             422: {
                 headers: {
@@ -12286,7 +12321,14 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Usage store unavailable */
+            /** @description Tenant request rate limit exceeded */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Authorization or usage store unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;

@@ -138,8 +138,11 @@ def usage_history(query: UsageHistoryQuery, granularity: Granularity, ctx: dict,
 
 ERRORS = {
     401: {"description": "Authentication required"},
+    403: {"description": "Tenant access denied or account suspended"},
+    404: {"description": "Authenticated tenant resolution failed"},
     422: {"description": "Invalid date window, cursor, filter or pagination limit"},
-    503: {"description": "Usage store unavailable"},
+    429: {"description": "Tenant request rate limit exceeded"},
+    503: {"description": "Authorization or usage store unavailable"},
 }
 
 

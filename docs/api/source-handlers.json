@@ -2719,14 +2719,14 @@
     "declared_path": "/v1/usage/daily",
     "file": "apps/gateway/app/usage_history.py",
     "handler": "daily_usage",
-    "line": 148,
+    "line": 151,
     "method": "GET"
   },
   {
     "declared_path": "/v1/usage/monthly",
     "file": "apps/gateway/app/usage_history.py",
     "handler": "monthly_usage",
-    "line": 154,
+    "line": 157,
     "method": "GET"
   },
   {
